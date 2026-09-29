@@ -1,0 +1,20 @@
+# quality-gate（2026-09-03）：回合收口质量门禁。
+# ECC（MIT, github.com/affaan-m/ECC）stop-format-typecheck 移植：
+#   - 编辑记账：本回合编辑过的代码/配置文件（O(1)，md 等非代码面豁免）；
+#   - agent/turn-stopping 批处理：从编辑路径向上探测最近清单根
+#     （pnpm-workspace 且根 package.json 声明了 check→pnpm check /
+#      Cargo.toml→cargo check / pyproject→ruff / package.json+tsconfig→tsc），
+#     门禁失败经 followup 注入修复指令 → 回合物理不结束（agent.ts:304-308 inbox 二次检查）；
+#     探测只提项目自己声明过的命令，拿不到脚本清单时宁可不给门禁（防假失败注入）；
+#   - 防跑飞：每回合每根至多 2 次注入、总预算封顶、超时按「未执行」注入不静默通过；
+#     inbox 有待处理时不抢话。
+# 设置卡：enabled / 注入配额 / 门禁预算 / 记忆反馈（开关 + 网关地址 + 密钥凭据引用，
+# 记忆反馈默认关闭且地址默认为空 = 不启用；密钥走 dsh 凭据通道，不落设置）。
+#
+# 组合包层（2026-09-05 bundle 化）：本文件由 package.json 的 dsh.bundle.patch
+# 指向，随 `dsh plugin --profile web add/remove ./plugins/quality-gate` 维护。
+# 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
+# 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
+- insert:
+    - id: quality-gate
+      name: "@jayyuen666/dsh-quality-gate"

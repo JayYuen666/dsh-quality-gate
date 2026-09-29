@@ -1,0 +1,10 @@
+{
+  "extends": "@jayyuen666/dsh-plugin-shared/config/tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "schemastery": ["./node_modules/schemastery/lib/index.d.ts"]
+    }
+  },
+  "include": ["host.ts", "lib/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  "exclude": ["test/client-card.test.ts"]
+}
