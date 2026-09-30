@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-quality-gate",
-  "version": "1.2.1",
+  "version": "1.0.0",
   "description": "dsh 插件：回合收口质量门禁（在 agent/turn-stopping 按项目形态跑 pnpm check / cargo check / ruff check / tsc，未过则注入修复指令开新轮）",
   "license": "MIT",
   "author": "JayYuen",
@@ -46,7 +46,7 @@
   "dependencies": {
     "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
-    "@jayyuen66/dsh-plugin-shared": "^0.6.3"
+    "@jayyuen66/dsh-plugin-shared": "^1.0.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
