@@ -91,7 +91,7 @@ import {
   LOCALE_SETTINGS_NAMESPACE,
   messagesFor,
   resolveLocalePreference,
-} from "@jayyuen666/dsh-plugin-shared/lib/locale";
+} from "@jayyuen66/dsh-plugin-shared/lib/locale";
 import { pushGateFeedback } from "./lib/gateway-feedback.ts";
 import { resolveGatewayUrl } from "./lib/gateway-target.ts";
 import type { GatewayTarget } from "./lib/gateway-target.ts";
@@ -102,13 +102,13 @@ import type { GateFeedbackInput } from "./lib/feedback-content.ts";
 import {
   scanToolEvents,
   editPathOf as sharedEditPathOf,
-} from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
-import type { SessionEvent } from "@jayyuen666/dsh-plugin-shared/lib/tool-events";
+} from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 // lesson bus 收口：lesson-loop 的 report 已异步落库（返回 Promise），只包一层同步
 // try/catch 抓不到 rejection——失败既被静默吞掉又给宿主进程留一枚未处理拒绝。
 // 同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
-import { settleLessonCall } from "@jayyuen666/dsh-plugin-shared/lib/lesson-bus";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /**
  * 常见项目根标记文件：向上找最近的含清单目录。

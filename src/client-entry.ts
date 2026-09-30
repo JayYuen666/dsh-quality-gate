@@ -44,7 +44,7 @@ const NS: LocaleNs = "quality-gate";
 // 写成裸条目 id（`quality-gate`）时 ledger 里没有这个键 → 插件页永不出卡。
 // 包名真源：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；
 // test/profile-bundle.ts 把真源读进测试，test/build-client.test.ts 的漂移针据此钉。
-const BUNDLE_PKG = "@jayyuen666/dsh-quality-gate";
+const BUNDLE_PKG = "@jayyuen66/dsh-quality-gate";
 
 const CARD_CSS = [
   ".qgc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}",

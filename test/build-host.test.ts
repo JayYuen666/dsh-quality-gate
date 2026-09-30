@@ -2,7 +2,7 @@
 //
 // 为什么值得一条测试（两个坏方向都不报错、只在线上发作）：发布形态下 host.js 躺在
 // node_modules 里被 dsh 载入——
-//   1) 内联：`@jayyuen666/dsh-plugin-shared/lib/*` 一旦被打进产物，shared 的模块级状态就在每个插件
+//   1) 内联：`@jayyuen66/dsh-plugin-shared/lib/*` 一旦被打进产物，shared 的模块级状态就在每个插件
 //      里各复制一份；rolldown 的 external 字符串项是精确匹配，只列包名会漏掉**子路径**，
 //      故 build-host.mjs 按「包名段」判定（该坑已在脚本注释登记）。
 //   2) 残留：产物里只要还剩 `./lib/xxx.ts`，Node 载入即抛 ERR_UNSUPPORTED_NODE_MODULES_
@@ -44,15 +44,15 @@ describe("buildHost()", () => {
     );
     // 子路径说明符：external 字符串项匹配不到的那个坑
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/tool-events"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/tool-events"'),
       "shared/tool-events 必须外部化",
     );
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/project-key"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/project-key"'),
       "shared/project-key 必须外部化（lib/gateway-target.ts 的 project 单源，内联会让网关反馈与 lesson 总线各算一份键）",
     );
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/locale"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/locale"'),
       "shared/locale 必须外部化（host 侧文案语言与官方 locale 偏好同源，内联会把 resolveLocale 复制进每个插件）",
     );
     assert.ok(
@@ -64,7 +64,7 @@ describe("buildHost()", () => {
       "产物不得内联官方 branded-string 构造器（出现函数体=依赖又落回 devDependencies）",
     );
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/record"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/record"'),
       "shared/record 必须外部化（SP-D 起 isRecord/fieldOf 单点在 shared；本包那份异形 messageOf 仍留本地）",
     );
   });

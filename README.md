@@ -1,4 +1,4 @@
-# @jayyuen666/dsh-quality-gate
+# @jayyuen66/dsh-quality-gate
 
 [中文](#中文) · [English](#english)
 
@@ -24,13 +24,11 @@
 ### 安装
 
 ```sh
-npm config --global @jayyuen666:registry=https://npm.pkg.github.com
-printf '//npm.pkg.github.com/:_authToken=<PAT:read:packages>\n' >> ~/.npmrc
-dsh plugin --profile web add @jayyuen666/dsh-quality-gate
+dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 ```
 
-- GitHub Packages 连读私有包也要凭据，故前两条是一次性配置。
-- 运行时依赖 `@jayyuen666/dsh-plugin-shared` 必须已在同一 registry 上，否则整组 404。
+- 包在公共 npm（`registry.npmjs.org`）上，安装侧不需要凭据。
+- 运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须已在同一 registry 上，否则整组 404。
 - 另一枚运行期依赖是 `@deepseek-ai/schemastery`（宿主 fork）：0.1.7 的 `.volatile()` 活引用只有它解析得出来，装公共 `schemastery` 会让改设置要重启才生效。
 - 本地目录形态安装需 pnpm ≥ 12.3.0（12.0.0 的本地目录 `add` 有已知缺陷）。
 
@@ -99,7 +97,7 @@ dsh plugin --profile web add @jayyuen666/dsh-quality-gate
   - 沙箱策略拒绝、runner 起不来、超时、取消、exit 126/127、`npx` 抓到 stub 包、预算不足都属此类。
   - 注入文案明确要求「不要为此修改代码」，不写记忆，并以 `gate-not-run` 单独上报总线。
 - 会不会无限修？配额耗尽后注入一次用户可见的「放行说明」并停止自动修复，直到某次全部干净通过才重新计数。
-- 临时停掉：设置卡关 `enabled`，或 `dsh plugin --profile web remove @jayyuen666/dsh-quality-gate`。
+- 临时停掉：设置卡关 `enabled`，或 `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`。
 - 子代理改的代码呢？in-process 子代理跳过，由父会话下一回合统一核验。
   - out-of-process 子代理（ACP/claude-code/codex）不发 dsh 事件，天然不在门禁面内。
 - 许可 MIT，仓库见 `package.json` 的 `repository.url`。
@@ -126,13 +124,11 @@ dsh plugin --profile web add @jayyuen666/dsh-quality-gate
 ### Install
 
 ```sh
-npm config --global @jayyuen666:registry=https://npm.pkg.github.com
-printf '//npm.pkg.github.com/:_authToken=<PAT:read:packages>\n' >> ~/.npmrc
-dsh plugin --profile web add @jayyuen666/dsh-quality-gate
+dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 ```
 
-- GitHub Packages needs credentials even to read, so the first two lines are one-time setup.
-- The runtime dependency `@jayyuen666/dsh-plugin-shared` must already be on the same registry, otherwise the whole set 404s.
+- The packages live on the public npm registry, so installs need no credentials.
+- The runtime dependency `@jayyuen66/dsh-plugin-shared` must already be on the same registry, otherwise the whole set 404s.
 - The other runtime dependency is `@deepseek-ai/schemastery` (the host's fork): it is the only one whose `resolve` wraps `.volatile()` fields into live references, so the public `schemastery` would turn "edit a setting" into "restart to apply".
 - Installing a local directory needs pnpm ≥ 12.3.0 (12.0.0 has a known bug in that path).
 
@@ -203,7 +199,7 @@ Four whitelist commands are locked at type level (only these can reach the execu
   - Sandbox policy denial, a runner that will not start, a timeout, a cancellation, exit 126/127, `npx` fetching a stub package and an exhausted budget all land here.
   - The injected text explicitly says "do not change code because of it", nothing is written to memory, and it is reported separately as `gate-not-run`.
 - Can it loop forever? Once the quota is spent it injects one user-visible release note, stops auto-repair, and only counts again after a fully clean pass.
-- To stop it temporarily: turn off `enabled` on the card, or run `dsh plugin --profile web remove @jayyuen666/dsh-quality-gate`.
+- To stop it temporarily: turn off `enabled` on the card, or run `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`.
 - What about code edited by subagents? In-process subagents are skipped and their edits get verified by the parent session's next turn.
   - Out-of-process ones (ACP/claude-code/codex) emit no dsh events, so they are outside the gate by construction.
 - Licensed MIT; the repository is in `repository.url` of `package.json`.

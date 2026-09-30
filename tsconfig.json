@@ -1,5 +1,5 @@
 {
-  "extends": "@jayyuen666/dsh-plugin-shared/config/tsconfig.base.json",
+  "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.base.json",
   "compilerOptions": {
     "paths": {
       "schemastery": ["./node_modules/schemastery/lib/index.d.ts"]

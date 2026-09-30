@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { deriveProjectKey } from "@jayyuen666/dsh-plugin-shared/lib/project-key";
+import { deriveProjectKey } from "@jayyuen66/dsh-plugin-shared/lib/project-key";
 import { buildFeedbackText } from "../lib/feedback-content.ts";
 import { pushGateFeedback } from "../lib/gateway-feedback.ts";
 import { deriveAgentId, resolveGatewayUrl, resolveServiceId } from "../lib/gateway-target.ts";

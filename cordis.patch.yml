@@ -17,4 +17,4 @@
 # 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
 - insert:
     - id: quality-gate
-      name: "@jayyuen666/dsh-quality-gate"
+      name: "@jayyuen66/dsh-quality-gate"

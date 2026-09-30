@@ -8,7 +8,7 @@
 // 插值不放进字典（官方字典是扁平字符串表）：带变量的整行用官方 `{name}` 占位符，
 // 由宿主侧的 Translate 渲染，本文件只存扁平字符串。
 import type { TranslateNS as OfficialTranslateNS } from "@deepseek-ai/dsh-client-ui-slots";
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包设置卡产出的全部界面文案。 */
 export interface UiMessages {

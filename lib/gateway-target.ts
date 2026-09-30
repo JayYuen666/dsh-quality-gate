@@ -9,7 +9,7 @@
 // （只能 resetModules），使用者的配置也永远追不上第一次 import。旧实现还因此把作者机器上的
 // `http://127.0.0.1:8420` 写死成默认地址，别人每次门禁失败都去连一个不存在的服务。
 
-import { deriveProjectKey } from "@jayyuen666/dsh-plugin-shared/lib/project-key";
+import { deriveProjectKey } from "@jayyuen66/dsh-plugin-shared/lib/project-key";
 
 /** env 值 trim 后非空则用之，否则回到 fallback（保留原 `||` 语义，
  *  又以显式比较规避 prefer-nullish-coalescing 与 strict-boolean-expressions）。 */

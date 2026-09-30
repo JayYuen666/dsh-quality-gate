@@ -1,5 +1,5 @@
 {
-  "name": "@jayyuen666/dsh-quality-gate",
+  "name": "@jayyuen66/dsh-quality-gate",
   "version": "1.2.1",
   "description": "dsh 插件：回合收口质量门禁（在 agent/turn-stopping 按项目形态跑 pnpm check / cargo check / ruff check / tsc，未过则注入修复指令开新轮）",
   "license": "MIT",
@@ -30,7 +30,7 @@
       "./package.json": "./package.json"
     },
     "access": "public",
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
@@ -46,7 +46,7 @@
   "dependencies": {
     "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
-    "@jayyuen666/dsh-plugin-shared": "^0.6.3"
+    "@jayyuen66/dsh-plugin-shared": "^0.6.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",

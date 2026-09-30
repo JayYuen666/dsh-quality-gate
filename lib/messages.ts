@@ -11,7 +11,7 @@
 //
 // 带变量的整行放 `{name}` 占位符（与卡片侧官方 Translate 同语法），由本文件的
 // renderTemplate 渲染：字典仍是扁平字符串表，两种语言可以各自决定变量的语序。
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包 host 侧产出的全部人读文案（注入给模型的修复指令 + 门禁降级回显）。 */
 export interface QualityGateMessages {
