@@ -9,6 +9,7 @@
     "url": "git+https://github.com/JayYuen666/dsh-quality-gate.git"
   },
   "files": [
+    "icon.svg",
     "host.js",
     "client.js",
     "cordis.patch.yml"
@@ -59,7 +60,6 @@
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-host-directory-picker": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
     "@deepseek-ai/dsh-package-manifest": "0.2.0-rc.2",
     "@deepseek-ai/dsh-sandbox": "0.2.0-rc.2",
@@ -76,7 +76,6 @@
     "@types/react": "catalog:",
     "@vitest/coverage-v8": "catalog:",
     "eslint-plugin-sonarjs": "catalog:",
-    "fallow": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
@@ -94,6 +93,7 @@
       "optional": true
     }
   },
+  "icon": "icon.svg",
   "engines": {
     "dsh": ">=0.2.0-rc.2"
   },
