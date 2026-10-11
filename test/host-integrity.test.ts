@@ -885,7 +885,7 @@ describe("quality-gate 门禁完整性", () => {
     });
 
     it("0.1.7 的宿主没有 settings.register → 缺它照样装载（守卫不得退回旧判据）", () => {
-      // 这条钉住 2026-09-22 的 P0：register 被宿主移除后，拿它当硬前置会让每条真宿主
+      // 这条钉住一个 P0 级回归：register 被宿主移除后，拿它当硬前置会让每条真宿主
       // 都判成"服务面不齐"，`gate not armed` 成为唯一失败模式且没有任何设置面。
       guardCalls.length = 0;
       const ctx = armedCtx();

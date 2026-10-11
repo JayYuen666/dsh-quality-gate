@@ -1395,6 +1395,31 @@ describe("quality-gate host 接线", () => {
     assert.equal(ctx.shellCommands.length, 0);
   });
 
+  it("缺 name 的 tool/call 不记入门禁面（无名调用连分桶键都没有）", async () => {
+    ctx.gateExitCode = 1;
+    // 参数形状与上面那条 str_replace_editor 一字不差，唯一区别是 data 里没有 name。共享层
+    // 自 0.1.2 起在扫描面就把这种调用整条滤掉（本地 node_modules 装的就是那一版）；即便
+    // 哪天真混了进来，isEditTool 也是拿空名去比三个工具名，不可能命中。两道都不放行，
+    // 这里把它钉成用例——免得日后有人把「滤掉」改成「静默补个默认名」而无人察觉。
+    const events = [
+      {
+        type: "tool/call",
+        data: {
+          arguments: JSON.stringify({
+            command: "str_replace",
+            path: `${project}/a.ts`,
+            old_str: "a",
+            new_str: "b",
+          }),
+        },
+      },
+    ];
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentWith(1, events), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.followupCalls.length, 0, "无名调用不得触发门禁");
+    assert.equal(ctx.shellCommands.length, 0);
+  });
+
   it("fork 会话从 inheritedEventCount 切点起步（源码核对改进）", async () => {
     ctx.gateExitCode = 1;
     // 父会话前缀里的编辑落在另一个项目根——若被计入会多跑一次门禁

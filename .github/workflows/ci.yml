@@ -1,0 +1,34 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+# 同一分支的新推送作废排队中的旧 run：门禁一趟要几十秒，留着它只会晚到一个与当前提交无关的红灯。
+# 发布用的是另一套口径（见 publish.yml 的 cancel-in-progress: false）——发布不能中途取消。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  gate:
+    name: 门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      # registry-url 留空：本仓的 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
+      # 配上 registry-url 反而会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成
+      # 和开发者不一样。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # 运行时只跑 node 24（与 publish.yml 同一条）：node 22 这条线没在本仓验证过，
+      # 先不给一个可能凭空红的 lane；要加就先在本地把它跑通再加。
+      - run: pnpm install --frozen-lockfile
+      # check 里已含 check:pack（对真 tarball 做入口/依赖形状/产物内容面体检），
+      # 所以"仓库全绿但装出去坏"这一类坑在这一趟里就会被拦下。
+      - run: pnpm run check
+      - name: 门禁没跑过就别留下产物
+        run: test -z "$(git status --porcelain --untracked-files=no)"

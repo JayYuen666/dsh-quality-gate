@@ -1,4 +1,4 @@
-// quality-gate → 记忆网关反馈（闭环补环③，改 fetch 实现）
+// quality-gate → 记忆网关反馈
 //
 // 职责：门禁失败确认后，把失败摘要投递进记忆网关的 L0 会话层（session 'dsh-agent'），
 // 供 auto-recall 在后续会话注入"上次栽的坑"——让工程质量环的质量反馈回流进记忆环，两环合成大闭环。
@@ -7,9 +7,9 @@
 //
 // 设计要点：
 // - shell-free：Node 内建 fetch（运行时底线 Node ≥22.18），无子进程、无 argv——
-//   旧 execFile('curl') 把 Authorization 头放 argv，进程列表（ps）瞬间可见；
-//   改 fetch 后 key 只进请求头，顺带消除 EPIPE/孤儿进程两类兜底负担；
-// - 不持有任何"作者机器事实"：url 与 Bearer 令牌都由调用方（host）从设置 +
+//   Authorization 头一旦走 argv，进程列表（ps）里瞬间可见；fetch 让 key 只进请求头，
+//   顺带没有 EPIPE/孤儿进程两类兜底负担；
+// - 不内建任何本机默认值：url 与 Bearer 令牌都由调用方（host）从设置 +
 //   dsh 官方凭据通道（ctx.credentials）解析后传进来，这里不拼任何本机文件路径；
 // - 尽力而为：5s 超时封顶（AbortSignal.timeout 覆盖含 DNS/connect 全阶段），
 //   错误由调用方 catch（绝不阻塞门禁主流程）；

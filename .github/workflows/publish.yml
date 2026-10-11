@@ -3,10 +3,14 @@ on:
   workflow_dispatch: {}
 permissions:
   contents: read
-  # npm trusted publishing（OIDC）：官方文档里 id-token: write 是必需项，缺了报
-  # ENEEDAUTH。runner 上没配过 trusted publisher 时这行无害——npm 探测不到 OIDC
-  # 环境就回落到下面的 token，两条路并存，所以不必等 npmjs.com 配好才合。
+  # npm trusted publishing（OIDC）：官方文档里 id-token: write 是必需项，缺了报 ENEEDAUTH。
+  # runner 上没配过 trusted publisher 时这行无害——npm 探测不到 OIDC 环境就回落到下面的 token，
+  # 两条路并存，所以不必等 npmjs.com 配好才合。
   id-token: write
+# 发布不能中途取消：一个被取消在「已上传、未落库」中间的 run，比多排一个队难收拾得多。
+concurrency:
+  group: publish
+  cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -23,36 +27,68 @@ jobs:
         env:
           TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # 这里只报形态，不报长度、不报任何 token 片段：日志是仓库可见的，长度加上前后缀
+          # 足够把一枚凭据缩小到可猜测的范围。
           TOKEN_TIDY="$(printf '%s' "$TOKEN" | tr -d '\r\n[:space:]')"
           if [ -z "$TOKEN_TIDY" ]; then echo "NPM_TOKEN 是空的——去仓库 Settings → Secrets and variables → Actions 配上"; exit 1; fi
           if [ "$TOKEN" != "$TOKEN_TIDY" ]; then echo "注意：secret 里含空白/换行，已剔除后使用"; fi
+          junk=$(printf '%s' "$TOKEN_TIDY" | tr -d 'A-Za-z0-9_-' | wc -c | tr -d ' ')
+          if [ "$junk" != "0" ]; then
+            echo "凭据里混进了非 token 字符（引号、说明文字之类）——请只贴 npm_ 开头那一串，不要带引号"
+            exit 1
+          fi
           case "$TOKEN_TIDY" in
             npm_*) echo "token 形态：npm access token";;
             ghp_*|github_pat_*) echo "这是 GitHub token——发到公共 npm 需要 npm 站点自己的 token（www.npmjs.com → Access Tokens），GH 的 token 对 npmjs 无效"; exit 1;;
             *) echo "注意：前缀不是 npm_，请确认它确实是 npm 的 access token";;
           esac
-          junk=$(printf %s "$TOKEN_TIDY" | tr -d "A-Za-z0-9_-" | wc -c | tr -d " ")
-          echo "token 度量：长度=${#TOKEN_TIDY}；非法字符数=$junk"
-          if [ "$junk" != "0" ]; then
-            echo "凭据里混进了非 token 字符（引号、说明文字之类）——请只贴 npm_ 开头那一串，不要带引号"
-            exit 1
+      - name: 版本号自检（别把已发过的号再发一遍）
+        run: |
+          set -euo pipefail
+          export VERSION
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "本仓 package.json 的版本：$VERSION"
+          code="$(curl -s -o "$RUNNER_TEMP/meta.json" -w '%{http_code}' 'https://registry.npmjs.org/@jayyuen66%2fdsh-quality-gate')"
+          if [ "$code" = "404" ]; then
+            echo "registry 上没有这个包名：本次是首发"
+          elif [ "$code" = "200" ]; then
+            node -e '
+              const fs = require("node:fs");
+              const meta = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/meta.json", "utf8"));
+              const want = process.env.VERSION;
+              const times = meta.time ?? {};
+              const published = Object.keys(times).filter((v) => v !== "created" && v !== "modified");
+              const latest = meta["dist-tags"]?.latest ?? "(无 latest)";
+              if (Object.hasOwn(times, want)) {
+                console.error(`版本 ${want} 已经发布过（registry 上有 ${published.length} 个版本，latest=${latest}）——先发号再派发`);
+                process.exit(1);
+              }
+              console.log(`registry 现有 ${published.length} 个版本，latest=${latest}；本次发 ${want}`);
+            '
+          else
+            echo "读包元数据得到 HTTP $code——这不是 404（没有）也不是 200（有），先别发"; exit 1
           fi
       - name: registry 预检（身份与依赖库可见性）
         env:
           TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -euo pipefail
           TOKEN_TIDY="$(printf '%s' "$TOKEN" | tr -d '\r\n[:space:]')"
-          echo "whoami: $(curl -s -H "Authorization: Bearer $TOKEN_TIDY" "https://registry.npmjs.org/-/whoami")"
-          code=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@jayyuen66%2fdsh-plugin-shared")
+          echo "whoami: $(curl -s -H "Authorization: Bearer $TOKEN_TIDY" 'https://registry.npmjs.org/-/whoami')"
+          code=$(curl -s -o /dev/null -w "%{http_code}" 'https://registry.npmjs.org/@jayyuen66%2fdsh-plugin-shared')
           echo "读 @jayyuen66/dsh-plugin-shared：HTTP $code"
           echo "判读：200=依赖库已公开，可以发；404=shared 还没发到 npmjs，先发它（本包 pnpm install 会因此取不到依赖）"
           [ "$code" = "200" ] || exit 1
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
-      # prepack 会重建 host.js/client.js/dist，产物不入库也发得出去
-      # 凭据走 NODE_AUTH_TOKEN：setup-node 配了 registry-url 之后会设
-      # NPM_CONFIG_USERCONFIG 指向它自己生成的那份 .npmrc，npm 只读那一份，
-      # $HOME/.npmrc 会被完全忽略——所以 token 必须以环境变量注入，不能写文件。
-      - run: pnpm publish --no-git-checks --access public
+      # prepack 会重建 host.js/client.js，产物不入库也发得出去
+      # 凭据走 NODE_AUTH_TOKEN：setup-node 配了 registry-url 之后会设 NPM_CONFIG_USERCONFIG
+      # 指向它自己生成的那份 .npmrc，npm 只读那一份，$HOME/.npmrc 会被完全忽略——所以 token
+      # 必须以环境变量注入，不能写文件。
+      # 剔除空白的那一步必须在发布这一趟里再做一遍：预检用的是副本，而 pnpm 读的是原值——
+      # secret 里混进换行时会出现「whoami 通、publish 401」这种对不上号的失败。
+      # --provenance 配上方的 id-token: write 才产出 npm attestation；
+      # --publish-wait-timeout 让「上传成功但没落库」这种状态等到超时被报出来，而不是静默成功。
+      - run: pnpm publish --no-git-checks --access public --provenance --publish-wait-timeout 600000
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

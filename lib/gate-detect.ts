@@ -63,7 +63,7 @@ function gateForRoot(entry: ProjectRoot): Gate | undefined {
     gate = { root, command: ["cargo", "check"] as const };
   } else if (has("pyproject.toml") || has("ruff.toml")) {
     // ruff.toml 分支不是死码：host 的 MANIFESTS 已登记 ruff.toml，只有 ruff 配置的
-    // Python 工程也能拿到根并落到这里（审计 LOW-MED 项）。
+    // Python 工程也能拿到根并落到这里。
     gate = { root, command: ["ruff", "check", "."] as const };
   } else if (has("package.json") && has("tsconfig.json")) {
     // 必须有 tsconfig.json 才算 TS 项目。裸 package.json 不够——HOME 里 `npm init` 的空壳
