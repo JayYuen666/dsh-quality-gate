@@ -28,7 +28,7 @@ export interface AccumulatorOptions {
 export class EditAccumulator {
   private readonly files = new Set<string>();
   private readonly maxFiles: number;
-  /** 容量淘汰累计丢弃数：drain 时清零（C10：500-cap 静默淘汰可观测）。 */
+  /** 容量淘汰累计丢弃数：drain 时清零（500-cap 静默淘汰要可观测）。 */
   private dropped = 0;
 
   public constructor(options: AccumulatorOptions = {}) {
@@ -69,7 +69,7 @@ export class EditAccumulator {
     this.dropped += 1;
   }
 
-  /** 自上次 drain 以来容量淘汰丢弃的文件数（C10：>0 时 host 侧 console.warn）。 */
+  /** 自上次 drain 以来容量淘汰丢弃的文件数（>0 时 host 侧 console.warn）。 */
   public droppedCount(): number {
     return this.dropped;
   }

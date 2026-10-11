@@ -39,8 +39,7 @@ const NS: LocaleNs = "quality-gate";
 // dsh-client-ui-renderer/lib/client.js:1154 的 `e.options.key === opts?.entryKey`；
 // 同文件 :2698 的 `configured: ledger.bundles.has(openPkg.name)` 读的就是这批 key），
 // 契约文本 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:96-100
-// （"keyed by the bundle's package name"），首方先例
-// dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661。
+// （"keyed by the bundle's package name"）。
 // 写成裸条目 id（`quality-gate`）时 ledger 里没有这个键 → 插件页永不出卡。
 // 包名真源：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；
 // test/profile-bundle.ts 把真源读进测试，test/build-client.test.ts 的漂移针据此钉。
@@ -157,10 +156,10 @@ function NumberInputRow(props: NumberInputRowProps): ReactNode {
   const num =
     typeof props.value === "number" && Number.isFinite(props.value) ? String(props.value) : "";
   const [text, setText] = useState(num);
-  // 低危修复：越界/非法值不再静默不 set（旧实现输入框显示越界值但静默不落盘）——
-  // 用 invalid 状态标 aria-invalid + 显示"未保存"提示，避免用户以为已生效。
+  // 越界/非法值不静默不落盘：输入框显示的值必须与落盘的值一致，否则用 invalid 状态
+  // 标 aria-invalid + 显示"未保存"提示，避免用户以为已生效。
   const [invalid, setInvalid] = useState(false);
-  // C11：外部值变更（他处改设置 / unset 恢复默认）回同步输入框，不留过期快照
+  // 外部值变更（他处改设置 / unset 恢复默认）回同步输入框，不留过期快照
   useEffect(() => {
     setText(num);
     setInvalid(false);
@@ -184,7 +183,7 @@ function NumberInputRow(props: NumberInputRowProps): ReactNode {
         onChange: (event: { target: { value: string } }) => {
           const next = event.target.value;
           setText(next);
-          // C11：清空 → unset（恢复 schema 默认，不留过期值）
+          // 清空 → unset（恢复 schema 默认，不留过期值）
           if (next === "") {
             setInvalid(false);
             props.onClear(props.field);
@@ -235,7 +234,7 @@ interface TextInputRowProps {
 function TextInputRow(props: TextInputRowProps): ReactNode {
   const text = typeof props.value === "string" ? props.value : "";
   const [draft, setDraft] = useState(text);
-  // 外部值变更（他处改设置 / unset 恢复默认）回同步输入框，不留过期快照（同数字行 C11）
+  // 外部值变更（他处改设置 / unset 恢复默认）回同步输入框，不留过期快照（与数字行同一口径）
   useEffect(() => {
     setDraft(text);
   }, [text]);
@@ -350,9 +349,9 @@ interface SaveChannels {
 
 /**
  * 逐键 await 写入并**消费受理位**（0.1.7 的 set/unset 回 Promise<boolean>：
- * true=宿主受理；false=拒绝或写入被跳过，settings.md:13 "refuses stale revisions"；
+ * true=宿主受理；false=拒绝或写入被跳过（官方语义："refuses stale revisions"；
  * 传输失败才 reject）。false 或 rejection 都**不清 touched**——否则宿主拒写时
- * 卡片仍显示"已保存"，用户修改被静默丢弃（旧版 setTimeout 盲清正是这个缺陷）。
+ * 卡片仍显示"已保存"，用户修改被静默丢弃。
  */
 async function writeTouched(channels: SaveChannels): Promise<void> {
   const { t, set, unset, keys, touched, setBusy, setSaveError, setTouched } = channels;
@@ -361,7 +360,7 @@ async function writeTouched(channels: SaveChannels): Promise<void> {
       const val = touched[key];
       // 有意串行（非 Promise.all）：首个被拒（false/reject）即停——后面的字段
       // 不再写，touched 保留全部未落盘修改，避免"一半已写一半没写"的模糊态。
-      // oxlint-disable-next-line no-await-in-loop -- 压掉本行 await 的"改 Promise.all 并行"判据：串行逐键写是宿主契约（settings.md:13 受理位），并行批会在首个拒写后继续落后续键，造出半写状态；按规则建议改写必然弱化 fail-closed 语义。
+      // oxlint-disable-next-line no-await-in-loop -- 压掉本行 await 的"改 Promise.all 并行"判据：串行逐键写是宿主契约（宿主的受理位），并行批会在首个拒写后继续落后续键，造出半写状态；按规则建议改写必然弱化 fail-closed 语义。
       const accepted = await (val === undefined ? unset(key) : set(key, val));
       // !accepted 按"拒绝"收口（fail-closed）：受理位缺失/畸形时宁可保留改动多报
       // 一次错，也不静默清 touched 把用户修改丢掉。
@@ -760,18 +759,18 @@ function apply(ctx: ClientCtx): void {
     const unregister = ctx.slots.register(
       {
         // 0.1.6：settings.plugin.item 已删除；plugins.bundle.config 按 bundle 包名 keyed。
-        // 0.1.7 复核：该槽位仍在（installed
-        // dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:100），故本段
+        // 该槽位仍在（installed
+        // dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:100），本段
         // 不动——换掉的只是它读写的表单来源，以及 key：用 BUNDLE_PKG（bundle 包名），
         // **不是** NS（NS 只喂 configForms.get()，见文件头）。
         name: "plugins.bundle.config",
         key: BUNDLE_PKG,
         // 写入通道把 0.1.7 的 `Promise<boolean>` 受理位**原样**交给卡片：true=宿主受理；
-        // false=拒绝或写入被跳过（settings.md:13 "refuses stale revisions before
+        // false=拒绝或写入被跳过（官方语义："refuses stale revisions before
         // persistence"）；传输失败才 reject（config-form-types.d.ts:62-64/:70-72）。
         // 消费与用户反馈（saveRejected / saveFailed 文案、touched 保留）在卡片 save()
-        // 里——旧版在此 swallow、卡片盲目 setTimeout 清 touched，宿主拒写时卡片仍显示
-        // "已保存"，用户修改被静默丢弃。unset 供数字行清空恢复默认。
+        // 里——这里 swallow 受理位会让宿主拒写时卡片仍显示"已保存"，用户修改被静默丢弃。
+        // unset 供数字行清空恢复默认。
         inject: () => ({
           t,
           hooks: { card: store },

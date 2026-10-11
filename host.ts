@@ -2,20 +2,19 @@
 //
 // 机制（已在 dsh 宿主源码核实）：
 //   - tool/result 事件记账本回合编辑过的代码/配置文件（EditAccumulator，O(1)）；
-//   - agent/turn-stopping 事件触发批处理：agent.ts:304-308 在 turn-stopping
-//     之后仍检查 inbox.nextStep —— 门禁失败经 followup 注入修复指令即开新轮
-//     （followup opens NEW turn，runtime-types.ts:126-130；旧注记"回合物理上
-//     不结束"有误，已按官方语义修正）。
+//   - agent/turn-stopping 事件触发批处理：宿主在 turn-stopping 之后仍检查
+//     inbox.nextStep —— 门禁失败经 followup 注入修复指令即开新轮
+//     （followup opens NEW turn）。
 //
-// 门禁完整性总纲（2026-09 审计后的硬约束）：**一次没有真正跑完的检查，绝不能
+// 门禁完整性总纲：**一次没有真正跑完的检查，绝不能
 // 被记为"通过"**。所有出口都是显式三态（GateOutcome）：
 //   - pass        ：门禁真的跑了且 exit 0；
 //   - code-failure：门禁跑了且报了代码错误 → 注入"修这些错"（进记忆/lesson-loop）；
 //   - not-run     ：门禁没跑成（沙箱策略拒绝/runner 不可用/沙箱整体不可用/准备期抛错/
 //                   超时/取消/工具装不上/预算不足被跳过）→ 注入"请手动跑一次"，
 //                   且**不**写记忆、**不**以 gate-failure 进 lesson-loop。
-//   旧实现在这些场景要么直接报 PASS（catch 兜底、预算耗尽只 warn），要么把沙箱
-//   拒绝当代码错误注入"修这些错"并污染记忆与自进化闭环。
+//   两类最容易糊过去的坑各有对应的硬出口：catch 兜底与预算耗尽不许报 PASS，沙箱
+//   拒绝不许当代码错误注入（那会污染记忆与自进化闭环）。
 //
 // 会话边界：
 //   - 门禁只对根会话收口（isRootSession：delegationDepth>0 / origin==='subagent' 跳过）。
@@ -34,15 +33,15 @@
 //   - 门禁总时长预算封顶（默认 300s），超时/预算耗尽一律按 not-run 注入说明。
 //
 // 运行方式：dsh cordis Loader 直接 import 本 .ts（Node ≥22.18 类型剥离）。
-// 一处例外：@deepseek-ai/dsh-credentials 的 `credentialRef` / `isCredentialRefName` 是值导入
-// 且在 dependencies（口径 A，2026-09-26；见下面 import 段的理由）。其余 @deepseek-ai/* 一律 type-only。
+// 一处例外：@deepseek-ai/dsh-credentials 的 `credentialRef` / `isCredentialRefName` 是值导入，
+// 因此必须进 peerDependencies（见下面 import 段的理由）。其余 @deepseek-ai/* 一律 type-only。
 
 import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-// 0.1.7 设置面要求宿主 fork：只有 @deepseek-ai/schemastery 的 resolve 会把 volatile
-// 字段包成 Volatile 引用（vendor/schemastery/src/index.ts:521-526），公共
-// schemastery@3.18.0 既没有 .volatile()、解析出来的也仍是普通值。
+// 0.1.7 设置面要求宿主 fork：`Schema.prototype.volatile` 只在 @deepseek-ai/schemastery 这一枚
+// 里存在（installed @deepseek-ai/schemastery/src/index.ts:480-482），公共
+// schemastery 既没有 .volatile()、解析出来的也仍是普通值。
 import Schema from "@deepseek-ai/schemastery";
 import type { Context, Events, Fiber, Volatile } from "@deepseek-ai/cordis";
 import type { SettingsForms } from "@deepseek-ai/dsh-settings";
@@ -51,8 +50,8 @@ import type { SettingsForms } from "@deepseek-ai/dsh-settings";
 // （@deepseek-ai/dsh-shell/lib/types/index.d.ts:47）：cordis 的
 // `abstract class Service` 带 `protected ctx: Context`（@deepseek-ai/cordis/lib/types/
 // service.d.ts:9-10），TS 对带 protected/private 成员的类按**名义**比 → 结构替身永远
-// 满足不了整个类，故服务成员只取 `Pick<ShellExecutor, "resolve" | "execute">`（本仓既有
-// 先例：ocr-review/host.ts:175、zvec-grep/host.ts:169）。被 Pick 的那两个方法的入参与返回
+// 满足不了整个类，故服务成员只取 `Pick<ShellExecutor, "resolve" | "execute">`。
+// 被 Pick 的那两个方法的入参与返回
 // （ShellExecRequest / ShellExecSpec / ShellExecution / ShellRunResult / ShellSandboxInfo /
 // CollectedOutput，官方出口 lib/types/index.d.ts:11）就此由官方给出，本包不再手抄一个字段。
 import type {
@@ -62,18 +61,19 @@ import type {
   ShellRunResult,
   ShellSandboxInfo,
 } from "@deepseek-ai/dsh-shell";
-// sandboxPolicy / session / agent 三面同批绑官方声明（三个 devDependency 与运行宿主同版本）：
+// sandboxPolicy / session / agent 三面同样绑官方声明（三个 devDependency 与运行宿主同版本）：
 // 三个服务/实体类都带私有成员或远多于本包所需的面，故一律 `Pick<官方类, "成员">` 投影，
 // 载荷与返回由被 Pick 的成员给出（见下面各自的注释），仍是 type-only。
 import type { SandboxPolicyService as HostSandboxPolicyService } from "@deepseek-ai/dsh-sandbox-policy";
 // 值导入：`isCredentialRefName` / `credentialRef` 是凭据包自己交出的**官方**校验与品牌构造
-// （installed lib/index.js:13 `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`、:21-36）。本包原先
-// 自己抄了同一条正则当 ref 语法（见下面 resolveFeedbackTarget 前那道判据）——抄一条规则就多
-// 一处会跟着宿主漂移的判据，ocr-review 同批换掉。两者都是纯字符串函数，官方品牌没有 type-only
-// 的构造方式 ⇒ 按口径 A（2026-09-26）把 dsh-credentials 落在 dependencies，产物留
-// `from "@deepseek-ai/dsh-credentials"` 裸说明符；放 devDependencies 会被 rolldown 把函数体
-// 内联进 host.js（等于本包各持一份官方实现）。**旧注释曾写"由 test/build-host.test.ts 钉住
-// 内联"——实测该文件当时并没有任何 credentials/brand 断言**（SP-D 复核抓出的假话）；本轮起那条钉测是真的：说明符在 + 四枚官方构造器的函数体都不在。
+// （installed @deepseek-ai/dsh-credentials/lib/index.js:13 `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`、
+// :21 / :34）。自己抄一条正则当 ref 语法（见下面 resolveFeedbackTarget 前那道判据的位置）就多
+// 一处会跟着宿主漂移的判据，所以不抄。两者都是纯字符串函数，官方品牌没有 type-only
+// 的构造方式 ⇒ dsh-credentials 落在 peerDependencies：build-host.mjs 的外部化面是
+// dependencies ∪ peerDependencies，产物因此留
+// `from "@deepseek-ai/dsh-credentials"` 裸说明符；只放 devDependencies 会被 rolldown 把函数体
+// 内联进 host.js（等于本包各持一份官方实现）。两件事由 `test/build-host.test.ts`
+// 成对钉住：说明符在 + 四枚官方构造器的函数体都不在。
 import { credentialRef, isCredentialRefName } from "@deepseek-ai/dsh-credentials";
 import type { CredentialProvider } from "@deepseek-ai/dsh-credentials";
 import type { Session, SessionId, SessionLogOffset } from "@deepseek-ai/dsh-session";
@@ -112,7 +112,7 @@ import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /**
  * 常见项目根标记文件：向上找最近的含清单目录。
- * ruff.toml 必须在列（审计 LOW-MED 项）：只有 ruff 配置、无 pyproject.toml 的 Python
+ * ruff.toml 必须在列：只有 ruff 配置、无 pyproject.toml 的 Python
  * 工程若不在此登记，gate-detect 的 has("ruff.toml") 就是死码——那类工程根本得不到根，
  * 也就永远没有门禁。
  */
@@ -129,12 +129,11 @@ const MANIFESTS = [
  * @deepseek-ai/dsh-session-query/lib/types/index.d.ts:35 起，cordis `Service` 子类 + private
  * 字段 → 名义比较，整类交不出结构替身）的 `observeSession` 一位（:47）。
  *
- * 它取代的是本包此前的 `Session.snapshotEvents()` 同步读：官方把 `snapshotEvents` / `eventAt`
+ * 它取代的是 `Session.snapshotEvents()` 那类同步读：官方把 `snapshotEvents` / `eventAt`
  * / `ownEvents` 三枚一并标为 `@deprecated`（"new calls are prohibited"，installed
  * @deepseek-ai/dsh-session/lib/types/index.d.ts:176 / :186 / :195，指向 Agent Note
- * 2026-09-09-deprecate-synchronous-session-event-reads）。本仓在这里曾写过一句
- * 「packages/session-query 是检索语料库面、无回合级增量读」——那是**未核实的判断**，实际
- * `observeSession` 就是按 sessionId 的精确读：lib/types/observation.d.ts:7-31 交回一枚不可变
+ * "Deprecate synchronous session event reads"）。增量读的官方面就是 `observeSession`——它按
+ * sessionId 精确读：lib/types/observation.d.ts:7-31 交回一枚不可变
  * 切片，`events: readonly SessionEvent[]`（:19）与 `inheritedEventCount: SessionLogOffset`
  * （:13）一次给全，记账要的两样连 fork 切点都不必再从 session 对象上摸。
  *
@@ -302,7 +301,7 @@ type GateOutcome = { kind: "pass" } | GateProblem;
 /**
  * 沙箱策略解析结果：ok 才允许执行门禁；unavailable（服务在但 resolve 抛错）
  * 一律按 not-run 处理——回落到部署级策略会让门禁写在宿主 cwd 之外，被沙箱拒绝后
- * 产出假的"修这些错"指令（审计 HIGH 项的根因）。
+ * 产出假的"修这些错"指令。
  */
 type PolicyResolution =
   | { kind: "ok"; policy: SandboxExecutionPolicy | undefined }
@@ -402,16 +401,16 @@ interface LessonLoopReporter {
  * 先用官方 `isCredentialRefName`（index.d.ts:28，用法说明 :20-27）问一遍语法——这正是官方对
  * 「名字来自设置字典」这一来源给出的口径：语法外的名字根本没有可 miss 的引用，读作"未配置"
  * 比送去抛错更准，也就绝不会撞上 `credentialRef()` 的抛错路径。
- * 与本文件顶部的发布纪律不冲突：值导入的这两个函数都是纯字符串函数；口径 A（2026-09-26）把
- * dsh-credentials 落在 dependencies，产物因此**新增**一条 `from "@deepseek-ai/dsh-credentials"`
- * 裸说明符（旧写法放 devDependencies 会把函数体内联进产物）。两件事由
+ * 与本文件顶部的发布纪律不冲突：值导入的这两个函数都是纯字符串函数；dsh-credentials
+ * 落在 peerDependencies，产物因此**新增**一条 `from "@deepseek-ai/dsh-credentials"`
+ * 裸说明符（只放 devDependencies 会把函数体内联进产物）。两件事由
  * `test/build-host.test.ts` 成对钉住：说明符在 + 官方构造器的函数体不在。
  */
 type CredentialService = Pick<CredentialProvider, "resolve">;
 
 /**
  * 宿主 logger 的本包用面：官方 `ctx.logger(name)` 具名 facade 的方法子集
- * （cordis-api/context.md:131-138；installed @deepseek-ai/cordis/lib/types/logger.d.ts:55-58
+ * （installed @deepseek-ai/cordis/lib/types/logger.d.ts:55-58
  * 的 Logger facade，方法形如 `(format, ...param)`）。结构化最小声明——不 import cordis 的
  * Logger 类型（类类型带 private 字段按名义比，测试桩件给个同形对象即可）。
  */
@@ -423,7 +422,7 @@ interface Log {
 
 interface HostCtx {
   settings: SettingsFormsService;
-  /** 具名 logger 服务（cordis-api/context.md:131-138）。缺席（异常 ctx/测试桩件）→
+  /** 具名 logger 服务（官方 `ctx.logger(name)`）。缺席（异常 ctx/测试桩件）→
    *  回退 console——回退是**兼容路径**不是常态路径，测试两条都覆盖。 */
   logger?: (name: string) => Log;
   /** 隐式注册后本包不再持有 scope，只经注入的子上下文挂页面策略（宿主 dsh-client-locale 同款）。 */
@@ -441,14 +440,14 @@ interface HostCtx {
    * 环境下插件整体不加载。
    * 字面量 name 重载（按服务返回精确类型），其余未知服务名回退 unknown——
    * 由此 getShell/lessonLoop 的取用不再需要 `as` 断言。
-   * ⚠ 这一位**不能**换成官方 `Context["get"]`（ctx-observe / ocr-review / zvec-grep 那三包的
-   * 读法）：官方那一位是 `get<K extends string & keyof this>(name: K): undefined | this[K]`
+   * ⚠ 这一位**不能**换成官方 `Context["get"]`：官方那一位是
+   * `get<K extends string & keyof this>(name: K): undefined | this[K]`
    * 加一条 `get(name: string): any` 兜底（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14,17`）。
    * `shell` / `sandboxPolicy` / `credentials` 确实都是官方声明进 `Context` 的名字（installed
    * `@deepseek-ai/dsh-shell/lib/types/index.d.ts:15-17` 等），走泛型臂没问题；但
    * `lessonLoop` 是**兄弟插件**（lesson-loop 包）提供的服务，不在官方 `Context` 面上——
-   * 换成官方面它就正好落进那条 `any` 兜底，读回来的形状从 `unknown` 退化。三包能换是因为它们
-   * 读的名字全在官方 `Context` 上，本包不行，故这里的本地重载交集留着。
+   * 换成官方面它就正好落进那条 `any` 兜底，读回来的形状从 `unknown` 退化。
+   * 只要有一个服务名落在官方面之外，这里的本地重载交集就得留着。
    */
   get: ((name: "shell") => ShellService | undefined) &
     ((name: "sandboxPolicy") => SandboxPolicyService | undefined) &
@@ -467,8 +466,7 @@ interface HostCtx {
    *  `@mode serial`）——本包的监听器现在要 await 官方观察面那一次日志读，返回域由官方交出
    *  之后 `Promise<void>` 就是合法实现，不必在本地把它窄成 `void`（窄成 void 会被
    *  `no-misused-promises` / `strict-void-return` 判成"把 Promise 塞进 void 槽"）。
-   *  载荷位仍是 `TurnStoppingPayload` 投影，理由写在那位上；⚠ 整位仍不换 `Context["on"]`
-   *  （全仓延后项，见 ctx-observe/host.ts 的同一注记）。 */
+   *  载荷位仍是 `TurnStoppingPayload` 投影，理由写在那位上；⚠ 整位仍不换 `Context["on"]`。 */
   on: (
     event: "agent/turn-stopping",
     listener: (payload: TurnStoppingPayload) => ReturnType<Events["agent/turn-stopping"]>,
@@ -497,14 +495,15 @@ const DEFAULT_GATE_STDOUT_MAX_BYTES = 64 * 1024;
 
 /** 设置面（= profile 条目 `quality-gate` 的可编辑表单）与 loader 行 config 共用同一份
  *  schema（单源，防漂移）。六个字段**全部** `.volatile()`：没有任何 volatile 字段的条目
- *  会被宿主 describe() 整条跳过（packages/settings/settings/src/index.ts:308-309），
- *  写入则抛 `has no volatile fields`（:386）。
+ *  会被宿主 describe() 整条跳过（installed @deepseek-ai/dsh-settings/lib/index.js:413-418
+ *  只在 volatileForm(schema) 有值时才登记条目），写入则抛
+ *  `has no volatile fields`（:505-506）。
  *  两个策略陷阱（都锁在下面对应的行内注释里，改默认前先读）：
  *   - `memoryGatewayUrl` 的默认是**空串**而不是缺省：`""` + feedback-off = 永不推送，
  *     换成 undefined 会把"未配置"变成"字段不存在"，行为不再等价；
  *   - `memoryGatewayKeyRef` 的 `.role('credential-ref')` 与 `.volatile()` **共存**：role 只
- *     写 meta.role（fork 的 role/volatile 都是 `{...meta, k: v}` 展开，见
- *     vendor/schemastery/src/index.ts:463-482），不会抹掉 meta.volatile。 */
+ *     写 meta.role（fork 的 role/volatile 都走 `extra`＝`{...meta, k: v}` 展开，见
+ *     installed @deepseek-ai/schemastery/src/index.ts:385-389），不会抹掉 meta.volatile。 */
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true).volatile(),
   maxInjectsPerTurn: Schema.natural()
@@ -517,20 +516,20 @@ export const Config = Schema.object({
     .max(600_000)
     .default(DEFAULT_GATE_BUDGET_MS)
     .volatile(),
-  // 记忆反馈默认**关闭**：它连的是"某台机器上的记忆网关"，作者机器的 127.0.0.1:8420
+  // 记忆反馈默认**关闭**：它连的是"某台机器上的记忆网关"，一个开发机的 127.0.0.1 端口
   // 对别人既不存在也无意义——默认开着等于每个失败回合都去连一个不存在的本机服务
   // （白等 5s 超时 + 刷屏 warn）。要用的人在设置卡里打开并填自己的地址。
   memoryFeedback: Schema.boolean().default(false).volatile(),
   // 地址默认"未配置"（空串）：与上面的开关构成双保险，任一为空都不推送。
   memoryGatewayUrl: Schema.string().default("").volatile(),
-  // 凭据引用（环境变量名形态）：官方写法 llm-deepseek/src/config.ts 的
-  // `apiKeyEnv: z.string().role('credential-ref').default(...).volatile()`。role 让设置面按凭据引用呈现，
+  // 凭据引用（环境变量名形态）：官方写法是 `.role('credential-ref')` 与 `.default(...).volatile()`
+  // 共存。role 让设置面按凭据引用呈现，
   // 存的只是引用名，密钥值由 ctx.credentials 侧管理，永不落进 settings.yaml。
   memoryGatewayKeyRef: Schema.string()
     .role("credential-ref")
     .default(DEFAULT_MEMORY_KEY_REF)
     .volatile(),
-  // ── W4（config.md:78-92 判据：部署间可能想配不同值的必须是配置字段）──
+  // ── 部署间可能想配不同值的必须是配置字段 ──
   // 以下两项是**部署假定值**：非 volatile → 不进设置卡（宿主只投影 volatile 字段），
   // 以普通值形态交进 apply（不经 .get()）；默认 = 现值，cordis.yml 行 config 可改而不改代码。
   /** 向上找项目根的最大层数（深嵌套 monorepo 的探测深度）。 */
@@ -593,13 +592,12 @@ function pruneToSessionBudget<Value>(map: Map<string, Value>, keep: string): voi
 }
 
 /**
- * 根会话判定（与 ctx-observe/lesson-loop 同款口径）：子代理会话
- * （delegationDepth>0 或 origin==='subagent'）跳过门禁。
+ * 根会话判定：子代理会话（delegationDepth>0 或 origin==='subagent'）跳过门禁。
  *
- * agent/turn-stopping 对每个 agent（含 in-process fork/spawn 子代理）都触发，
- * 旧实现未过滤子代理 → ①父会话与子代理对同一项目根各跑一遍门禁（token/耗时翻倍）；
+ * agent/turn-stopping 对每个 agent（含 in-process fork/spawn 子代理）都触发，不过滤的后果有
+ * 两条：①父会话与子代理对同一项目根各跑一遍门禁（token/耗时翻倍）；
  * ②失败注入文案面向用户，却 followup 进子代理——结算前到达会多拖一轮子代理回合，
- * 结算后到达则滞留 inbox 被丢弃（门禁静默失效）。统一改为只对根会话收口。
+ * 结算后到达则滞留 inbox 被丢弃（门禁静默失效）。所以只对根会话收口。
  *
  * out-of-process 子代理（ACP/claude-code/codex）
  * 在独立进程运行，不发射 dsh 的 agent 事件，其编辑天然不在任何门禁面内；in-process
@@ -622,7 +620,7 @@ function inboxHasPending(inbox: TurnAgent["inbox"]): boolean {
  * （官方 agent.ts：turn-stopping 在 running 相内 serial 分发，转 idle 发生在回合结束之后），
  * 故绝不能用 status 判 idle。改用数据信号：turn signal 已取消、或 inbox 有待处理
  * （用户接管/已排队工作）→ 不注入（对齐官方 "Data decides" 语义）。
- * 插件卸载的拦截不在这里：W4 起 disposer abort 在飞门禁批次，迟到结果在批次层就地丢弃
+ * 插件卸载的拦截不在这里：disposer abort 在飞门禁批次，迟到结果在批次层就地丢弃
  * （见 processGate），到不了注入点——卸载收口比"注入前拦一下"更强。
  */
 function preInjectCheck(
@@ -693,11 +691,11 @@ function headExcerpt(file: string | undefined): string | undefined {
  * 证据文本。
  *
  * tsc/cargo 等错误自顶向下，**首条才是根因**，而 harness CollectedOutput 截断时保留的是
- * **尾部**（packages/subprocess/src/types.ts）——旧实现从不查 truncated，根因错误被静默
- * 丢掉，注入给模型的"修这些错"只剩残尾（审计 MEDIUM 项）。现在：
+ * **尾部**（installed @deepseek-ai/dsh-subprocess/lib/types/types.d.ts:18-23）——
+ * 于是不读 `truncated` 就把根因错误静默丢掉，注入给模型的"修这些错"只剩残尾。必须：
  *   ①显式标注截断；②从 spillPath 有界读回头部摘录放在最前；③无落盘文件时明确说明
  *   首个错误可能已丢弃，让模型与用户都知道证据不完整。
- * 未截断时不叠加第二层截断（用户拍板"不为省 token 降能力"，上限由 shell 的
+ * 未截断时不叠加第二层截断（不为省 token 降能力，上限由 shell 的
  * stdoutMaxBytes 把关）。
  */
 function evidenceText(
@@ -750,7 +748,7 @@ const giveUpText = (messages: QualityGateMessages, gate: Gate, attempts: number)
 const skippedGateLine = (messages: QualityGateMessages, gate: Gate): string =>
   renderTemplate(messages.skippedGateItem, { command: gate.command.join(" "), root: gate.root });
 
-/** 预算耗尽后剩余门禁的"未执行"清单（审计 MEDIUM 项：只 warn = 静默通过）。 */
+/** 预算耗尽后剩余门禁的"未执行"清单：只 warn 等于静默通过，所以要注入给模型与用户。 */
 const skippedText = (messages: QualityGateMessages, gates: readonly Gate[]): string =>
   renderTemplate(messages.gatesSkipped, {
     budgetMs: MIN_USEFUL_GATE_MS,
@@ -823,7 +821,7 @@ function interruptedRunOutcome(
  *
  * 环境问题非代码问题：走失败注入会让模型去"修"装不了的工具（配合配额环更糟）。
  * 但它同样是"没跑成的检查"，所以按 not-run 注入"请手动确认"，不再算作通过
- * （审计：没跑成 ≠ 通过）。
+ * ——没跑成 ≠ 通过。
  */
 function unavailableToolOutcome(
   messages: QualityGateMessages,
@@ -848,10 +846,11 @@ function unavailableToolOutcome(
 /**
  * 把一次 shell.execute().result() 结果分类成三态（纯函数：不进 ctx，每条分支都可测）。
  *
- * harness 的 ShellRunResult.sandbox 与退出码**正交**上报（packages/shell/shell/src/types.ts：
+ * harness 的 ShellRunResult.sandbox 与退出码**正交**上报（installed
+ * @deepseek-ai/dsh-shell/lib/types/types.d.ts:28：
  * "Facts are reported independently of process exit status so callers can distinguish
- * command failures from policy denials and runner failures"），旧实现从不读它 →
- * 策略拒绝被当成代码失败注入"修这些错"（审计 HIGH 项）。
+ * command failures from policy denials and runner failures"），所以必须读它——不读就会把
+ * 策略拒绝当成代码失败注入"修这些错"。
  *
  * 判定序（三支各自成函数，顺序与 warn 次数都不变）：沙箱面拦截 → 进程没跑完 →
  * 工具装不上（126/127）→ exit 0（部分生效沙箱只 warn）→ npx stub 横幅 → 代码失败。
@@ -967,7 +966,7 @@ async function resolveEventWindow(
       // 本会话自己的历史编辑——这是有意的，turn-stopping 时本回合编辑已在日志里，
       // 从末尾起步会跳过正在要检查的回合。代价是重启后首轮会多跑几次门禁（预算与
       // maxInjectsPerTurn 兜底）；重放本身不会造成假失败——根必须是真 TS 项目
-      // （见 gate-detect B1），历史编辑的根都是真项目。
+      // （见 gate-detect 的 tsc 判据），历史编辑的根都是真项目。
       const forkCut = observation.inheritedEventCount ?? 0;
       const from = Math.max(forkCut, lastSeq.get(sessionId) ?? forkCut);
       if (isArrayDelivery(observation.events)) {
@@ -1025,7 +1024,7 @@ function collectEdits(events: readonly SessionEvent[]): PendingEdits {
   for (const call of calls) {
     // read-view（str_replace_editor view）只读不算编辑；坏参（JSON 非法）与
     // 非编辑工具同样不落地——与名义实现的 EDIT_SKIP 分支严格等价。
-    if (call.name !== undefined && isEditTool(call.name) && !call.badArguments) {
+    if (isEditTool(call.name) && !call.badArguments) {
       const target = sharedEditPathOf(call);
       if (target.kind === "write") {
         storeEdit(call.callId, { name: call.name, path: target.path }, pending, noCallId);
@@ -1041,7 +1040,7 @@ function collectEdits(events: readonly SessionEvent[]): PendingEdits {
 }
 
 /** 单文件向上找最近的清单根；hitDepthLimit 标记是否因超深而无根（供可观测 warn）。
- *  maxDepth 来自 Config 的 maxRootDepth（W4 非 volatile 部署值）。 */
+ *  maxDepth 来自 Config 的 maxRootDepth（非 volatile 部署值）。 */
 function findManifestRoot(
   file: string,
   maxDepth: number,
@@ -1120,8 +1119,8 @@ const injectMessage = (text: string): FollowupMessage => ({
 /**
  * 总线上报（自进化闭环）：门禁失败是事实，无论注入与否都要沉淀
  * ——修复环里同一门禁反复失败会形成 violation 序列，度量"提醒有没有用"。
- * 但"没跑成"以 gate-not-run 单独上报：环境/策略问题不得被学成代码教训（审计 HIGH 项
- * 的第二半——假的失败指令曾经既进注入又进记忆/lesson-loop）。
+ * 但"没跑成"以 gate-not-run 单独上报：环境/策略问题不得被学成代码教训——假的失败指令
+ * 一旦既进注入又进记忆/lesson-loop，闭环就学会了错的东西。
  * report 自身容错（同步抛错与异步拒绝经 settleLessonCall 落进同一条 warn）；
  * 总线缺失（未装 lesson-loop）时 get 返回 undefined 直接跳过。
  */
@@ -1228,9 +1227,8 @@ async function pushFeedbackToMemory(
   }
 }
 
-/** 一次读全的解析后设置快照（旧 scope.get() 的等价物）：门禁按回合现读，纯值往下传，
- *  不必让每个消费方都持有引用。官方同款读法见 harness
- *  packages/llm/llm-deepseek/src/config.ts 的 `plainOptions(config)`。 */
+/** 一次读全的解析后设置快照（`scope.get()` 的等价物）：门禁按回合现读，纯值往下传，
+ *  不必让每个消费方都持有引用——所有 `.volatile()` 引用一次 `.get()` 成普通值。 */
 function settingsOf(config: ConfigShape): ResolvedSettings {
   return {
     enabled: config.enabled.get(),
@@ -1270,7 +1268,7 @@ function isGateHost(value: unknown): value is Context & HostCtx {
 }
 
 /**
- * 从编辑文件路径向上找最近的清单根（层数上限 = Config 的 maxRootDepth，W4 非 volatile
+ * 从编辑文件路径向上找最近的清单根（层数上限 = Config 的 maxRootDepth，非 volatile
  * 部署值），每个根探一次真实盘上事实（清单名 + 已声明脚本）。找不到清单根的文件跳过
  * （无门禁面）。
  */
@@ -1280,7 +1278,7 @@ function projectRootsOf(files: readonly string[], maxDepth: number, log: Log): P
     const hit = findManifestRoot(file, maxDepth);
     const useRoot = hit.root;
     if (useRoot === undefined) {
-      // 低危可观测：深仓（超层数无清单）静默跳过会让门禁漏面。
+      // 可观测：深仓（超层数无清单）静默跳过会让门禁漏面。
       if (hit.hitDepthLimit) {
         log.warn(
           `[quality-gate] no manifest within ${maxDepth} levels of ${file}; gate skipped for it`,
@@ -1300,8 +1298,8 @@ function projectRootsOf(files: readonly string[], maxDepth: number, log: Log): P
 /**
  * 执行一个门禁：只有 exitCode 0 才是 pass。
  * 超时/取消/信号/策略拒绝/工具装不上都走 classifyRun 的显式三态；
- * **catch 不再报通过**（审计 MEDIUM 项：workdir 不存在、spawn 失败、
- * SandboxUnavailableError 都曾落进 catch 被当 PASS）。
+ * **catch 一律不报通过**：workdir 不存在、spawn 失败、SandboxUnavailableError
+ * 都会落进 catch，而被当 PASS 就是漏门禁。
  */
 async function runGate(
   messages: QualityGateMessages,
@@ -1327,10 +1325,10 @@ async function runGate(
       workdir: gate.root,
       stdoutMaxBytes,
       timeoutMs: budgetMs,
-      // C6 + W4：信号恒透传（回合取消门禁同命；disposer abort 时在飞门禁同命，
+      // 信号恒透传（回合取消门禁同命；disposer abort 时在飞门禁同命，
       // 不跑孤儿门禁）。
       signal,
-      // 审计 HIGH：不带 sandboxPolicy 时，沙箱版 executor 会回落到**部署级**策略
+      // 不带 sandboxPolicy 时，沙箱版 executor 会回落到**部署级**策略
       // （根 = 宿主 process.cwd()，且忽略本会话的 sandbox/mode 覆盖），门禁于是写在
       // 沙箱外 → 被拒 → 假的失败指令。必须按会话解析后传入。
       ...(policy === undefined ? {} : { sandboxPolicy: policy }),
@@ -1371,25 +1369,25 @@ interface GateRuntime {
   stdoutMaxBytes: number;
   /** 注入文案的语言随官方 locale 偏好走：按回合现读，改语言后下一次收口就是新文案。 */
   messages: () => QualityGateMessages;
-  /** sessionId → 该会话自己的编辑累加器（审计 HIGH：跨会话共用会互相偷走待复查编辑）。 */
+  /** sessionId → 该会话自己的编辑累加器（跨会话共用会互相偷走待复查编辑）。 */
   accumulators: Map<string, EditAccumulator>;
   /** sessionId → 跨回合累计的注入配额状态（followup 每注入一次即开新回合，
    *  旧的 `sessionId:turn` 键每回合重置 → 配额永不累计 → 失败环无限烧 token）。 */
   injectState: Map<string, InjectState>;
-  /** sessionId → 上次 rescan 已读到的事件 seq（C2 增量窗：只读新 tool/call，不重读旧事件）。 */
+  /** sessionId → 上次 rescan 已读到的事件 seq（增量窗：只读新 tool/call，不重读旧事件）。 */
   lastSeqBySession: Map<string, number>;
   /** 本次装载的记忆反馈降级状态（只说一次；见 warnMemorySkip）。 */
   memoryNotice: MemorySkipNotice;
   /**
-   * 在飞门禁的中止源（W4 防御收口，defensive-patterns.md:19-23 quiescence）：disposer
+   * 在飞门禁的中止源（dispose quiescence：卸载必须终止并等待在飞工作）：disposer
    * abort 之 → 组合信号（turn signal ∪ 本信号）终止 shell 执行，批次就地收口。
-   * 旧实现只置 disposed 旗：门禁子进程活过卸载、结果被静默丢弃。
+   * 只置 disposed 旗不够：门禁子进程会活过卸载、结果被静默丢弃。
    */
   gateAbort: AbortController;
   /** 在飞门禁批次账本：每趟 detached 闭包登记其 settle promise，disposer abort 后
    *  await 全部收敛（Promise.allSettled 快照）才真正离场。 */
   inFlightGates: Set<Promise<void>>;
-  /** shell 缺失警告只发一次（C9：无 shell 静默通过可观测，但不刷屏）。 */
+  /** shell 缺失警告只发一次（无 shell 静默通过要可观测，但不刷屏）。 */
   shellWarned: boolean;
   /** 插件已卸载（disposer 已跑）：新到的收口整体放弃——不读事件、不开门禁、不注入。 */
   disposed: boolean;
@@ -1401,19 +1399,19 @@ interface GateRuntime {
  * **不可写成 `svc.shell`**：cordis ctx 的 Proxy get 陷阱对未列入 `inject` 的属性
  * 直接抛 `cannot get property "shell" without inject`（见 cordis reflect.ts 的
  * `ReflectService.handler.get`），于是下面的 `=== undefined` 判定永远走不到，
- * C9 静默放行分支形同虚设，且每回合结束都冒一个 turn 错误卡。
+ * 无 shell 时的静默放行分支形同虚设，且每回合结束都冒一个 turn 错误卡。
  * shell 服务由 host 组合（@deepseek-ai/dsh-shell 的 Service 构造即注册），
- * 正常环境下 get 命中；异常环境才落 C9。
+ * 正常环境下 get 命中；异常环境才走静默放行。
  *
  * **也不加 `?? svc.shell` 兜底**：shell 真缺失时右值会重新触发同一个抛错，
- * 兜底反而把 C9 再打断。mock 需实现 get() 才有意义。
+ * 兜底反而把静默放行再打断。mock 需实现 get() 才有意义。
  */
 function getShell(rt: GateRuntime): ShellService | undefined {
   // get 字面量重载已把 "shell" 键返回 ShellService | undefined，无需断言
   return rt.svc.get("shell");
 }
 
-/** 取本会话的解析后沙箱策略（审计 HIGH 项）。`session` 交官方 `Session` 类本身：
+/** 取本会话的解析后沙箱策略。`session` 交官方 `Session` 类本身：
  *  官方 `SandboxPolicyRequest.session` 就是这个类（@deepseek-ai/dsh-sandbox-policy/lib/
  *  types/index.d.ts:52），而 `Session` 带私有字段、按名义比 —— 本包那个只服务退役中同步
  *  读面的 SessionRef 视图交不进去，编译器原话：`Type 'SessionRef' is missing the following
@@ -1463,9 +1461,9 @@ function accumulatorOf(rt: GateRuntime, sessionId: string): EditAccumulator {
 
 /**
  * 从事件流读本回合**成功**编辑的文件（按官方观察面给的增量窗），记进本会话的账。
- * 低危修复（authoritative 记账）：被 danger-guard 拒绝或执行失败的编辑，其 tool/call
- * 仍在事件流里——旧实现照记，会对未真正改动的文件（若落在独立项目根）多跑一次门禁。
- * 改为：tool/call 建 callId→{name,path}，tool/result 的 isError 标记失败 callId，只记成功的。
+ * 被 danger-guard 拒绝或执行失败的编辑，其 tool/call 仍在事件流里——照记就会对未真正
+ * 改动的文件（若落在独立项目根）多跑一次门禁。所以 tool/call 建 callId→{name,path}，
+ * tool/result 的 isError 标记失败 callId，只记成功的。
  * turn-stopping 时本回合 call+result 同处一个增量窗，单次扫描即可关联；无 callId 的事件
  * （异常/旧形状/测试 mock）保守直记，避免漏门禁。
  * fork 前缀修复（源码核对 0.1.3 后落地）：子代理会话 fork 自父会话时，
@@ -1495,7 +1493,7 @@ async function readEditedFiles(
   const edits = collectEdits(window.events);
   const { cwd } = session.header;
   const note = (name: string, pathValue: string | undefined): void => {
-    // C5：相对路径按会话 cwd 解析（edit 常报相对路径；不按 host 进程 CWD）
+    // 相对路径按会话 cwd 解析（edit 常报相对路径；不按 host 进程 CWD）
     let resolvedPath = pathValue;
     if (resolvedPath !== undefined && cwd !== undefined && !path.isAbsolute(resolvedPath)) {
       resolvedPath = path.resolve(cwd, resolvedPath);
@@ -1545,14 +1543,14 @@ function handleGateFailure(scope: TurnScope, target: Gate, problem: GateProblem)
   const maxInjects = cfg.maxInjectsPerTurn;
   const isCodeFailure = problem.kind === GATE_KIND_CODE_FAILURE;
   reportProblemToBus(rt.svc.get, { sessionId, turn, cwd }, target, problem, log);
-  // 触发前二次校验（H4：不再静默——被拦截时打日志，便于排查"门禁没注入"）
+  // 触发前二次校验：被拦截时打日志，便于排查"门禁没注入"
   const check = preInjectCheck(agent, scope.signal);
   if (!check.ok) {
     log.warn(`[quality-gate] ${sessionId}: injection skipped (${check.reason}) at turn ${turn}`);
     return true;
   }
   const st = injectState.get(sessionId) ?? { count: 0, gaveUp: false };
-  // 配额耗尽：注入一次用户可见的放行说明，之后静默直到干净通过重置（F2）。
+  // 配额耗尽：注入一次用户可见的放行说明，之后静默直到干净通过重置。
   if (st.count >= maxInjects) {
     if (!st.gaveUp) {
       st.gaveUp = true;
@@ -1597,7 +1595,7 @@ function handleGateFailure(scope: TurnScope, target: Gate, problem: GateProblem)
     // 一次只注入一个失败（修完一个再见下一个）
     return true;
   } catch (error) {
-    // followup 失败：回滚配额计数（这次注入没发生），不写记忆（M8）。
+    // followup 失败：回滚配额计数（这次注入没发生），不写记忆。
     st.count -= 1;
     injectState.set(sessionId, st);
     log.error(`[quality-gate] ${sessionId}: followup failed: ${messageOf(error)}`);
@@ -1606,7 +1604,7 @@ function handleGateFailure(scope: TurnScope, target: Gate, problem: GateProblem)
 }
 
 /** 卸载收口的读法：两次判读之间隔着 `await runGate(...)`，那期间 disposer 的 abort() 是真会
- *  发生的（W4 收口由测试钉住）；直接读 `gateAbort.signal.aborted` 会被控制流分析钉在前一次
+ *  发生的（卸载收口由测试钉住）；直接读 `gateAbort.signal.aborted` 会被控制流分析钉在前一次
  *  判读的 false 上（属性窄不跨 await 复位），后一处守卫就被判成恒假。经函数取值 ⇒ 每读都按
  *  声明的 boolean 算，守卫才是必要的。 */
 function gateAborted(rt: GateRuntime): boolean {
@@ -1619,7 +1617,7 @@ interface GateBatchInput {
   gates: readonly Gate[];
   shell: ShellService;
   resolved: PolicyResolution;
-  /** 批次执行信号：turn signal（回合取消同命，C6）∪ dispose abort（卸载收口，W4）的归一结果。 */
+  /** 批次执行信号：turn signal（回合取消同命）∪ dispose abort（卸载收口）的归一结果。 */
   signal: AbortSignal;
   /** 门禁总时长预算（Config 的 `gateBudgetMs`，本回合读定的值）。 */
   budget: number;
@@ -1664,8 +1662,8 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
           log: rt.log,
         });
   // 卸载收口：abort 后迟到的门禁结果一律就地丢弃——不上报 lesson-loop（被中止的
-  // 检查既不是代码失败事实也不是"请手动跑"素材）、不注入。旧实现这里继续处理，
-  // 结果被 disposed 旗在注入前拦下，而门禁进程仍活过卸载（quiescence 缺陷）。
+  // 检查既不是代码失败事实也不是"请手动跑"素材）、不注入。只靠 disposed 旗在注入前
+  // 拦不够：门禁进程会活过卸载。
   if (gateAborted(rt)) {
     return;
   }
@@ -1681,21 +1679,20 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
 }
 
 /**
- * 一趟门禁批次：C4 按总预算封顶（perGate 保底 10s 会超支）——跟踪已花时间，每门
+ * 一趟门禁批次：按总预算封顶（perGate 保底 10s 会超支）——跟踪已花时间，每门
  * min(perGate, remaining)。尾段不足最小可用预算（真实 tsc/pnpm 冷启动也要数秒，几百 ms
- * 必超时 → 假"超时失败"注入）时**注入未执行说明**——旧实现只 console.warn，那等于静默
- * 通过（审计 MEDIUM 项）。
+ * 必超时 → 假"超时失败"注入）时**注入未执行说明**——只 console.warn 等于静默通过。
  *
- * W4 防御收口：①整段顶层 try/catch——批次自身故障只记一条 error，绝不产生
+ * 防御收口：①整段顶层 try/catch——批次自身故障只记一条 error，绝不产生
  * unhandledRejection；②批次 promise 由调用方登记进在飞账本，disposer abort 后 await 收敛
- * （defensive-patterns.md:19-23：dispose 必须终止并等待在飞工作）。
+ * （dispose 必须终止并等待在飞工作）。
  */
 async function runGateBatch(input: GateBatchInput): Promise<void> {
   const { scope } = input;
   const { rt, sessionId } = scope;
   try {
     const perGate = Math.max(10_000, Math.floor(input.budget / input.gates.length));
-    // C4 的计时基准：每门可用预算 = min(perGate, budget - 已花)。
+    // 计时基准：每门可用预算 = min(perGate, budget - 已花)。
     const started = Date.now();
     /** 是否有门禁未给出"通过"结论（code-failure 与 not-run 都算；只有全 pass 才重置配额）。
      *  放进可变持有对象而不是 `let`：赋值全在 `processGate` 里，控制流分析看不见那两次
@@ -1703,14 +1700,14 @@ async function runGateBatch(input: GateBatchInput): Promise<void> {
      *  通过结论」是真会发生的（配额重置与否由它决定）。属性读保留声明的 boolean，守卫才是真的。 */
     const batch: { blocked: boolean } = { blocked: false };
     await processGate({ ...input, perGate, started, batch }, input.gates);
-    // 所有门禁都真的跑完并通过 → 重置会话配额：模型已修好，下一轮重新计数（F2）。
+    // 所有门禁都真的跑完并通过 → 重置会话配额：模型已修好，下一轮重新计数。
     // 有任何"没跑成"都不重置：那不等于代码健康。
     if (!batch.blocked) {
       rt.injectState.delete(sessionId);
     }
   } catch (error) {
     // 批次兜底：门禁调度自身异常（如宿主面在飞期间行为突变）不得外溢——
-    // 旧实现这一层没有 catch，rejection 会直奔 unhandledRejection。
+    // 这一层没有 catch 的话，rejection 会直奔 unhandledRejection。
     rt.log.error(`[quality-gate] ${sessionId}: gate batch failed: ${messageOf(error)}`);
   }
 }
@@ -1726,8 +1723,8 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   if (agent === undefined) {
     return;
   }
-  // 插件已卸载（disposer 已跑）：收口整体放弃——旧实现还会读事件、跑门禁，只在
-  // 注入前被 disposed 旗拦下；W4 起 abort + 就地收口，这里连起步都免了。
+  // 插件已卸载（disposer 已跑）：收口整体放弃——放在最前，卸载之后连读事件、跑门禁
+  // 都不必起步。
   if (rt.disposed) {
     return;
   }
@@ -1778,7 +1775,7 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   await readEditedFiles(rt, agent, acc);
   const dropped = acc.droppedCount();
   const files = acc.drain();
-  // C10：500-cap 淘汰可观测（drain 已清零计数，先读后排）
+  // 500-cap 淘汰可观测（drain 已清零计数，先读后排）
   if (dropped > 0) {
     rt.log.warn(
       `[quality-gate] ${sessionId}: ${dropped} edited file(s) evicted from accumulator cap; gate may miss their roots`,
@@ -1798,8 +1795,8 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   // 沙箱策略在**同步段**按会话解析一次（异步段不再触碰 agent.session）。
   const resolved = resolvePolicy(rt, messages, session);
 
-  // 门禁批次的执行信号 = turn signal（回合取消同命，C6）∪ dispose abort（卸载收口，
-  // W4）。AbortSignal.any 不收 undefined（Node 26 实测抛 TypeError），两态先归一——
+  // 门禁批次的执行信号 = turn signal（回合取消同命）∪ dispose abort（卸载收口）。
+  // AbortSignal.any 不收 undefined（Node 26 实测抛 TypeError），两态先归一——
   // 由此 runGate 的 signal 恒有值。
   const gateSignal =
     payload.signal === undefined
@@ -1842,7 +1839,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   }
   const svc = ctx;
 
-  // 具名 logger（官方 ctx.logger(name)，cordis-api/context.md:131-138）；宿主未装
+  // 具名 logger（官方 ctx.logger(name)）；宿主未装
   // （异常 ctx/测试桩件）回退 console——回退是兼容路径，测试两条都覆盖。
   // ⚠ 这一位从显式「可缺席」的视图上读，而不是直接 `svc.logger`：`svc` 被 `isGateHost` 窄成
   // `Context & HostCtx`，官方 `Context.logger` 是必填（@deepseek-ai/cordis/lib/types/context.d.ts:27），
@@ -1852,7 +1849,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const loggerSlot: { readonly logger?: (name: string) => Log } = svc;
   const log: Log = loggerSlot.logger?.("quality-gate") ?? console;
 
-  // 非 volatile 部署值（W4）：普通值形态（不经 .get()），装载期读一次，cordis.yml 行 config 可改。
+  // 非 volatile 部署值：普通值形态（不经 .get()），装载期读一次，cordis.yml 行 config 可改。
   const { maxRootDepth, gateStdoutMaxBytes: stdoutMaxBytes } = config;
 
   // 0.1.7 起命名空间是**隐式**的：宿主把本条目导出的 Config 里标了 `.volatile()` 的字段
@@ -1919,9 +1916,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }
   });
 
-  // 卸载即收口（defensive-patterns.md:19-23 dispose quiescence）：先置旗（新到收口整体
+  // 卸载即收口（dispose quiescence）：先置旗（新到收口整体
   // 放弃），再 abort 在飞门禁（shell 执行随组合信号终止、迟到结果就地丢弃），最后 await
-  // 全部批次闭包收敛才真正离场——旧实现只置 disposed 旗，门禁子进程活过卸载、结果被静默
+  // 全部批次闭包收敛才真正离场——只置 disposed 旗不够：门禁子进程会活过卸载、结果被静默
   // 丢弃。返回 Promise 合法：cordis 的 disposer 允许 async（"they may be async, in which
   // case unloading awaits them"，installed @deepseek-ai/cordis/lib/types/fiber.d.ts:36-38）。
   // 会话级记账（配额/游标/累加器）随之废弃，不留跨代残留。
