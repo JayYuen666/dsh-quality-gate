@@ -31,6 +31,28 @@ export function resolveGatewayUrl(settingUrl: string): string {
   return candidate.replace(/\/+$/u, "");
 }
 
+/**
+ * 凭据只允许发往 https 或回环地址：明文 http 到远端会把 Bearer 令牌暴露给同网段
+ * （设置卡默认值就是本机 http，属有意用法）。返回 false 时调用方按"未配置"处理，
+ * 不解析、不发送凭据。
+ */
+export function isCredentialSafeUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "https:") {
+    return true;
+  }
+  if (parsed.protocol !== "http:") {
+    return false;
+  }
+  const host = parsed.hostname.replaceAll(/^\[|\]$/gu, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
 /** x-tdai-service-id：env 可覆盖，默认是网关协议的匿名服务名（不含任何机器信息）。 */
 export function resolveServiceId(): string {
   return envOr("TDAI_SERVICE_ID", "default");

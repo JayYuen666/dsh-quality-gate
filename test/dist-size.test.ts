@@ -12,9 +12,9 @@ const pkgDir = path.join(import.meta.dirname, "..");
 
 /** 每个产物的字节上限。 */
 const BUDGETS: readonly { readonly file: string; readonly maxBytes: number }[] = [
-  // 当前约 58 KB：够容纳若干轮文案与判据的增长，不够容纳一枚宿主包的函数体。
+  // 上限够容纳若干轮文案与判据的增长，不够容纳一枚宿主包的函数体。
   { file: "host.js", maxBytes: 96 * 1024 },
-  // 当前约 20 KB：client 半只有一张设置卡，翻倍即说明有东西被错误打包进来。
+  // client 半只有一张设置卡，翻倍即说明有东西被错误打包进来。
   { file: "client.js", maxBytes: 32 * 1024 },
 ];
 

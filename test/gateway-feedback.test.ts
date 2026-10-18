@@ -1,4 +1,4 @@
-// gateway-feedback 契约测试（补齐此前未覆盖的分支）：
+// gateway-feedback 契约测试：
 // 从对外契约验证质量门禁 → 记忆网关的反馈链：
 //   1. deriveAgentId：cwd → '尾目录名-8位hash'（与网关 workspace-peer 同分桶语义）；
 //      非字符串/空/根路径 → 'default'；空白与重复斜杠归一化；尾部斜杠剥离；空格转 _。

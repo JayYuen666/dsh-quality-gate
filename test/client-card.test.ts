@@ -22,7 +22,7 @@ type CardCtx = Parameters<typeof apply>[0];
 
 type Snap = ConfigFormSnapshot<Record<string, unknown>>;
 
-/** 官方 `ConfigFormSnapshot` 的合法形状（7 位全必选）：桩件必须交得出真宿主的面，
+/** 官方 `ConfigFormSnapshot` 的合法形状（6 位全必选）：桩件必须交得出真宿主的面，
  *  少了 `base`/`user`/`revision`/`mode` 或把 status 写成宽 `string` 都会编译失败。 */
 function snap(over: Partial<Snap> = {}): Snap {
   return {
@@ -32,7 +32,6 @@ function snap(over: Partial<Snap> = {}): Snap {
     user: {},
     revision: 3,
     writable: true,
-    mode: "host",
     ...over,
   };
 }
@@ -199,8 +198,8 @@ describe("卡片 apply 的官方 locale 接线", () => {
       mutateCalls: [],
     };
     // 本条目共享表单的假面：直接绑官方 `ConfigForm<Record<string, unknown>>`
-    // （installed dsh-client-ui-settings/lib/types/client/config-form-types.d.ts:36-74），
-    // 快照走同文件 `ConfigFormSnapshot`（:6-32，7 位全必选）——见上面的 snap() 工厂。
+    // （installed dsh-client-ui-settings/lib/types/client/config-form-types.d.ts 的 ConfigForm），
+    // 快照走同文件 `ConfigFormSnapshot`（:6-32，6 位全必选）——见上面的 snap() 工厂。
     // set/unset 回「宿主是否受理」的 boolean，只有传输失败才 reject。mutate 是官方第五位
     // （路径级原子写入），本卡不走它，但类型面要求它在位。dispose 不在契约里，留在这里
     // 只作 tripwire：卡片若再试图销毁 provider 持有的表单，disposeCalls 就会非空 → 用例红。
@@ -364,7 +363,7 @@ describe("卡片 apply 的官方 locale 接线", () => {
       "写入只用 set/unset，不碰官方 mutate（路径级原子写入是第五位，本卡不用）",
     );
     // slot 清理回调：只注销登记，**绝不 dispose 表单**——0.1.7 的 ConfigForm 契约里没有
-    // dispose（installed config-form-types.d.ts:36-74），表单归 provider 长活；销毁它正是
+    // dispose（installed config-form-types.d.ts 的 ConfigForm），表单归 provider 长活；销毁它正是
     // 旧 settingsScope 那个「收起插件页后每次保存被静默丢弃」缺陷的来源。
     assert.equal(trace.slotCleanups.length, 1);
     trace.slotCleanups[0]?.();

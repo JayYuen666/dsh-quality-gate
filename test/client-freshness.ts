@@ -1,7 +1,7 @@
-// test/client-freshness.ts —— 产物新鲜度指纹门禁（8 包共用，TDD 驱动编写）。
+// test/client-freshness.ts —— 产物新鲜度指纹门禁（多包共用）。
 //
 // 背景：src/client-entry.ts 改后忘跑 node build-client.mjs，浏览器一直加载旧
-// client.js——本会话已两次踩坑（rescue 403 修复没进产物；ctx-observe 字段补齐
+// client.js——已踩过坑（rescue 403 修复没进产物；ctx-observe 字段补齐
 // 曾靠人工时间戳核对）。mtime 断言在 git clone / touch 下不稳定，故用
 // **内容指纹**：内存构建（buildClient()，纯函数、确定性输出）vs 磁盘
 // client.js 逐字节比对。src 任何变更未重建 → 字节必差 → 红。
@@ -15,7 +15,7 @@
 // 体内的裸调用；而断言必须写在用例体内才看得见（vitest(expect-expect)）。
 // 空数组即门禁通过，非空元素的文本就是原来的报错信息。
 //
-// 注意：buildClient() 必须是确定性构建（同输入同输出）。当前 8 包的
+// 注意：buildClient() 必须是确定性构建（同输入同输出）。各包的
 // build-client.mjs 均不含时间戳/随机数（rollup 无 banner hash 变量），
 // 逐字节相等成立；若未来构建引入非确定性，改为规范哈希比较并在
 // build-client.mjs 里输出 canonical 形态。

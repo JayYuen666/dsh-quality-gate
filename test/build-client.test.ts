@@ -76,7 +76,7 @@ describe("quality-gate client 构建", () => {
     assert.ok(text.includes("unset"), "空输入必须走 unset（恢复默认）");
     // 受理位消费（0.1.7 ConfigForm.set/unset 回 Promise<boolean>）：
     // false=宿主拒写 → saveRejected 文案且不清 touched（fail-closed，不静默丢修改）；
-    // reject=传输失败 → saveFailed。旧版 inject 侧 swallow + 卡片盲目清 touched 已退役。
+    // reject=传输失败 → saveFailed。inject 侧 swallow 受理位、卡片盲清 touched 都是这一面要挡的。
     // 产物是压缩构建：局部标识符不保留，钉两门字典里的文案串（缺一门即红）。
     assert.ok(text.includes("saveRejected"), "宿主拒写必须有可见反馈（saveRejected 文案进产物）");
     assert.ok(

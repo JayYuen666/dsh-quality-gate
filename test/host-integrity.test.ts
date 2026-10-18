@@ -45,6 +45,10 @@ const PKG_JSON = "package.json";
 const TSCONFIG = "tsconfig.json";
 /** 最小可用的 tsconfig 内容（够 tsc 门禁认它是真 TS 项目）。 */
 const MINIMAL_TSCONFIG_JSON = '{"compilerOptions":{}}';
+/** 项目根下的 pnpm workspace 清单名（上溯判据只认这一个名字）。 */
+const WORKSPACE_MANIFEST = "pnpm-workspace.yaml";
+/** 一条只含 packages 段的 workspace 清单（子包目录用）。 */
+const WORKSPACE_PACKAGES_YAML = "packages:\n  - packages/*\n";
 /** 沙箱模式：工作区可写（门禁写盘该走的那一档）。 */
 const SANDBOX_MODE_WORKSPACE_WRITE = "workspace-write";
 /** lesson 总线里"检查没跑成"那一类的 category 期望值。 */
@@ -172,7 +176,7 @@ function makeCtx(): MockCtx {
       memoryFeedback: true,
       // 记忆反馈配置齐备：这样"不得污染记忆环"的断言是真的在拦推送，而不是被
       // "地址未配置"的前置降级顺手挡掉（那种绿是假的）。
-      memoryGatewayUrl: "http://gateway.test:8420",
+      memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
       // W4 非 volatile 部署值：resolve 交普通值（refsOf 按 meta.volatile 区分形状）
       maxRootDepth: 10,
@@ -284,7 +288,7 @@ function makeProject(name: string): string {
   return root;
 }
 
-/** 只有 ruff.toml 的 Python 根（审计 LOW-MED 项：它此前拿不到根）。 */
+/** 只有 ruff.toml 的 Python 根：这类根拿不到就等于门禁面整片漏掉（MANIFESTS 登记 ruff.toml 的用例）。 */
 function makeRuffProject(name: string): string {
   const root = path.join(
     tmpdir(),
@@ -936,27 +940,41 @@ describe("quality-gate 门禁完整性", () => {
       assert.equal(ctx.specs.length, 0);
     });
 
-    it("sessionQuery 未装配（官方观察面缺席）→ 无窗可判，门禁不跑也不误报", async () => {
+    it("sessionQuery 未装配（官方观察面缺席）→ 门禁不跑、不误报，并点名一次", async () => {
       const ctx = makeCtx();
       const root = makeProject("noreader");
       // 迁移前这一档是「session 上没有 snapshotEvents」；记账改走官方 ctx.sessionQuery 之后，
       // 同一档降级的新形态就是该服务未装配（精简 profile / 尚未 provide）。
       Reflect.deleteProperty(ctx, "sessionQuery");
       applyWith(ctx);
-      stop(ctx, {
+      const agent = {
         session: { id: "s-nr", header: { cwd: root } },
         status: "running",
         inbox: { nextTurn: [], nextStep: [] },
         followup: () => {
           assert.fail("无事件窗时不得注入");
         },
-      });
-      await sleep(20);
+      };
+      const log = capture();
+      try {
+        stop(ctx, agent, 1);
+        await sleep(20);
+        // 第二趟仍缺席：warn 只发一次（不逐回合刷屏），门禁仍不跑
+        stop(ctx, agent, 2);
+        await sleep(20);
+      } finally {
+        log.restore();
+      }
       assert.equal(ctx.specs.length, 0);
       assert.equal(ctx.followupCalls.length, 0);
+      assert.equal(
+        log.lines.filter((line) => line.includes("sessionQuery service unavailable")).length,
+        1,
+        "整条门禁面失活必须点名一次——静默的『一直不跑』与『一直没问题』读起来一样",
+      );
     });
 
-    it("observeSession 拒绝（会话已卸载/存储读不出）→ 游标不推进、不误报", async () => {
+    it("observeSession 拒绝（会话已卸载/存储读不出）→ 游标不推进、不误报、点名一次", async () => {
       const ctx = makeCtx();
       const root = makeProject("rejects");
       applyWith(ctx);
@@ -968,19 +986,51 @@ describe("quality-gate 门禁完整性", () => {
           throw new Error("session log unreadable");
         },
       };
-      stop(ctx, agent, 1);
-      await sleep(20);
+      const captured = capture();
+      try {
+        stop(ctx, agent, 1);
+        await sleep(20);
+        // 第二趟仍拒绝：读面失败也只点名一次
+        stop(ctx, agent, 2);
+        await sleep(20);
+      } finally {
+        captured.restore();
+      }
       assert.equal(ctx.specs.length, 0, "观察面抛错：既不跑门禁也不误报通过");
       assert.equal(ctx.followupCalls.length, 0);
+      assert.equal(
+        captured.lines.filter((line) => line.includes("session event read returned no window"))
+          .length,
+        1,
+        "读失败要可观测，但只说一次",
+      );
       // 游标必须没被这次失败污染：读法恢复后，同一批编辑照样查到（不静默丢门禁）。
       // exactOptionalPropertyTypes：替身字段是可选的，恢复只在拿得到时写回。
       if (working !== undefined) {
         ctx.sessionQuery = working;
       }
-      stop(ctx, agent, 2);
+      stop(ctx, agent, 3);
       await sleep(20);
       assert.equal(ctx.specs.length, 1, "游标未被污染 → 下一趟照样查到");
       assert.equal(ctx.followupCalls.length, 1);
+    });
+
+    it("事件读面只取 events：observeSession 必须显式关掉投影计算", async () => {
+      const ctx = makeCtx();
+      const root = makeProject("proj-none");
+      applyWith(ctx);
+      const seen: unknown[][] = [];
+      ctx.sessionQuery = {
+        observeSession: async (...args: unknown[]) => {
+          seen.push(args);
+          return observationOfFiredSession();
+        },
+      };
+      stopEdits(ctx, "s-pn", [fileIn(root)]);
+      await sleep(20);
+      assert.equal(ctx.specs.length, 1, "关掉投影不影响事件读与门禁");
+      // 官方默认 projectionMode: "all" 会让宿主为整份日志算全部投影，而本包只读 events。
+      assert.deepEqual(seen[0]?.[1], { projectionMode: "none" });
     });
 
     it("snapshotEvents 返回非数组 → 游标不推进、不误报通过", async () => {
@@ -1307,15 +1357,15 @@ describe("quality-gate 门禁完整性", () => {
       );
       mkdirSync(root, { recursive: true });
       writeFileSync(path.join(root, PKG_JSON), '{"name":"t","scripts":42}');
-      writeFileSync(path.join(root, "pnpm-workspace.yaml"), "packages:\n  - .\n");
+      writeFileSync(path.join(root, WORKSPACE_MANIFEST), "packages:\n  - .\n");
       writeFileSync(path.join(root, TSCONFIG), MINIMAL_TSCONFIG_JSON);
       scratch.push(root);
       applyWith(ctx);
       stopEdits(ctx, "s-scripts", [fileIn(root)]);
       await sleep(20);
-      assert.equal(
-        ctx.specs.at(0)?.command,
-        "npx tsc --noEmit",
+      assert.match(
+        String(ctx.specs.at(0)?.command),
+        /bin\/tsc --noEmit$/u,
         "scripts 不是对象 = 拿不到清单 → 保守不发 pnpm check",
       );
     });
@@ -1354,7 +1404,7 @@ describe("quality-gate 门禁完整性", () => {
       );
       const sub = path.join(ws, "packages", "admin");
       mkdirSync(sub, { recursive: true });
-      writeFileSync(path.join(ws, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+      writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
       writeFileSync(path.join(ws, PKG_JSON), '{"name":"ws","scripts":{"check":"tsc"}}');
       writeFileSync(path.join(sub, PKG_JSON), '{"name":"admin"}');
       writeFileSync(path.join(sub, TSCONFIG), MINIMAL_TSCONFIG_JSON);
@@ -1364,6 +1414,42 @@ describe("quality-gate 门禁完整性", () => {
       await sleep(20);
       assert.equal(ctx.specs.at(0)?.workdir, ws, "门禁升级到 workspace 根");
       assert.equal(ctx.specs.at(0)?.command, "pnpm check");
+    });
+
+    it("workspace 根产不出门禁（无 check 脚本、无 tsconfig）→ 保留子包自己的 tsc 门禁", async () => {
+      const ctx = makeCtx();
+      const ws = makeProject("wsnogate");
+      // 外层去掉能产出门禁的两样：只留 workspace 清单 + 无 scripts 的 package.json
+      rmSync(path.join(ws, TSCONFIG));
+      writeFileSync(path.join(ws, PKG_JSON), '{"name":"ws"}');
+      writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
+      const sub = path.join(ws, "packages", "foo");
+      mkdirSync(sub, { recursive: true });
+      writeFileSync(path.join(sub, PKG_JSON), '{"name":"foo"}');
+      writeFileSync(path.join(sub, TSCONFIG), MINIMAL_TSCONFIG_JSON);
+      applyWith(ctx);
+      // 同目录两个文件：同一内层根只判一次盘，且只登记一条门禁
+      stopEdits(ctx, "s-wsnogate", [fileIn(sub), fileIn(sub, "b.ts")]);
+      await sleep(20);
+      assert.equal(ctx.specs.length, 1, "外层无门禁 → 不升级；子包门禁只能出现一次");
+      assert.equal(ctx.specs.at(0)?.workdir, sub, "门禁落在子包自己的根");
+      assert.match(String(ctx.specs.at(0)?.command), /bin\/tsc --noEmit$/u);
+    });
+
+    it("内外层都产不出门禁 → 一条门禁都不给（信息缺失不替项目猜）", async () => {
+      const ctx = makeCtx();
+      const ws = makeProject("wsnone");
+      rmSync(path.join(ws, TSCONFIG));
+      writeFileSync(path.join(ws, PKG_JSON), '{"name":"ws"}');
+      writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
+      const sub = path.join(ws, "packages", "foo");
+      mkdirSync(sub, { recursive: true });
+      writeFileSync(path.join(sub, PKG_JSON), '{"name":"foo"}');
+      applyWith(ctx);
+      stopEdits(ctx, "s-wsnone", [fileIn(sub)]);
+      await sleep(20);
+      assert.equal(ctx.specs.length, 0);
+      assert.equal(ctx.followupCalls.length, 0);
     });
 
     it("非编辑类 tool/call（read/grep）不记入累加器", async () => {

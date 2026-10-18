@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 
 import path from "node:path";
-import plugin from "../host.ts";
+import plugin, { shellArg } from "../host.ts";
 // 0.1.7 隐式注册的共用桩件：Config 引用、逐字段默认、宿主 volatileForm 的复刻。
 import {
   applyGate,
@@ -40,15 +40,15 @@ const TS_SOURCE_BODY = "export const x = 1\n";
 const MEMORY_SKIP_WARN_TEXT = "memory feedback skipped";
 /** 本包的插件 id（logger 具名、patch 条目 id、设置命名空间三处同值）。 */
 const PLUGIN_ID = "quality-gate";
-/** 探测不出 workspace/cargo/python 时落到的 tsc 门禁命令行（shell 侧看到的 join 结果）。 */
-const TSC_GATE_COMMAND = "npx tsc --noEmit";
+/** tsc 门禁不经 npx 取包（那段历史事故的判据，多处复用）。 */
+const NO_NPX = "门禁不再经 npx 取包";
 
 // 本文件创建的临时项目根统一登记，各 suite 的 afterEach 显式回收。
-// 旧实现依赖"系统清理 tmp 目录"——实测每次跑本套件泄漏 32 个目录，macOS 的 TMPDIR
-// 清理按"30 天未访问"判定并不激进，已累积 1225 个残留。改为显式 rmSync。
+// 只靠"系统清理 tmp 目录"不算回收：macOS 的 TMPDIR 清理并不激进，套件跑完的残留会一直
+// 堆在盘上，所以这里显式 rmSync。
 const scratchRoots: string[] = [];
 
-/** 回收本轮登记的临时项目根（空清单时不动作）。 */
+/** 回收本文件登记的临时项目根（空清单时不动作）。 */
 function recycleScratchRoots(): void {
   while (scratchRoots.length > 0) {
     rmSync(scratchRoots.pop()!, { recursive: true, force: true });
@@ -207,7 +207,7 @@ function createMockCtx(): MockCtx {
       gateBudgetMs: 60_000,
       // 记忆反馈是"显式配置了才启用"的能力：mock 的运行期设置值给出本机以外的示例地址
       memoryFeedback: true,
-      memoryGatewayUrl: "http://gateway.test:8420",
+      memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
       // W4 非 volatile 部署值：宿主 fork 的 resolve 对它们交普通值（不包 Volatile 引用）
       maxRootDepth: 10,
@@ -437,7 +437,7 @@ describe("quality-gate host 接线", () => {
     followup: (message: unknown) => void;
   } {
     return {
-      // C2：按真实 snapshotEvents(fromSeq) 语义 honor 增量游标（旧代码传空游标 → 全量重读）
+      // 按真实 snapshotEvents(fromSeq) 语义 honor 增量游标（传空游标就是全量重读）
       session: { id: "s1", header: {}, snapshotEvents: (from?: number) => events.slice(from ?? 0) },
       status: "idle",
       inbox: { nextTurn: [], nextStep: [] },
@@ -611,7 +611,7 @@ describe("quality-gate host 接线", () => {
     };
     ctx.handlers["agent/turn-stopping"]!({ agent: subagent, turn: 1 });
     await sleep(20);
-    // 子代理：不读编辑、不跑门禁、不注入——零副作用（P1：旧实现会重复跑 + followup 错位）
+    // 子代理：不读编辑、不跑门禁、不注入——零副作用（不跳过就会重复跑门禁、followup 错位）
     assert.equal(ctx.shellCommands.length, 0, "子代理会话不得执行门禁命令");
     assert.equal(ctx.followupCalls.length, 0, "子代理会话不得注入修复指令");
   });
@@ -649,15 +649,15 @@ describe("quality-gate host 接线", () => {
     const log: unknown[] = [];
     const agent = {
       session: { id: "s1", header: {}, snapshotEvents: (from?: number) => log.slice(from ?? 0) },
-      // turn-stopping 时官方状态恒为 running（F1）
+      // turn-stopping 时官方状态恒为 running
       status: "running",
       inbox: { nextTurn: [], nextStep: [] },
       followup(msg: unknown) {
         ctx.followupCalls.push(msg);
       },
     };
-    // 事件形状出自本 describe 的 editEvtFor（此前两个用例各抄一遍同一枚 push 闭包，
-    // 判在 sonarjs/no-identical-functions）；log 仍是用例自己的，跨用例不共享。
+    // 事件形状出自本 describe 的 editEvtFor（同一枚 push 闭包抄两遍会判在
+    // sonarjs/no-identical-functions）；log 仍是用例自己的，跨用例不共享。
     const pushEdit = (): void => {
       log.push(editEvtFor("a.ts"));
     };
@@ -774,7 +774,7 @@ describe("quality-gate host 接线", () => {
       },
     ];
     // 官方 agent.ts：turn-stopping 在 running 相内 serial 分发，status getter 恒返回 'running'。
-    // 旧实现据此早退 → 门禁在生产永不执行（F1）。此处断言 running 能走到 gate。
+    // 按 status 早退会让门禁在生产永不执行。此处断言 running 能走到 gate。
     const running = { ...agentWith(1, events), status: "running" };
     ctx.handlers["agent/turn-stopping"]!({ agent: running, turn: 1 });
     await sleep(20);
@@ -1033,7 +1033,7 @@ describe("quality-gate host 接线", () => {
     const ids: string[] = [];
     // id = quality-gate-<randomUUID>：前缀命名空间 + 密码学随机后缀（同 ms 多次注入不碰撞）
     const uuidRe = /^quality-gate-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-    // 会话日志追加写：三回合共享同一 log（C2 游标语义下每回合读到各自的新事件）
+    // 会话日志追加写：三回合共享同一 log（游标语义下每回合读到各自的新事件）
     const log: unknown[] = [];
     const agent = {
       session: { id: "s1", header: {}, snapshotEvents: (from?: number) => log.slice(from ?? 0) },
@@ -1181,41 +1181,6 @@ describe("quality-gate host 接线", () => {
         1,
         "shell 缺失应经 ctx.get 落到 C9 并 warn 一次",
       );
-    } finally {
-      console.warn = origWarn;
-    }
-  });
-
-  it("npx 抓到 stub 包（非 126/127，exit 1 + 横幅）→ 按工具不可用报「未执行」，不当代码错误", async () => {
-    // 实测事故：HOME 的 npm init 空壳被发 `npx tsc --noEmit`，npx 自动安装已弃用的
-    // stub 包 tsc@2.0.4，打印横幅并 exit 1。只按退出码判定会误报为代码失败。
-    // 审计约束：这类"没跑成的检查"也不再算通过——注入的是**未执行说明**（不要求改代码），
-    // 且不写记忆（环境事实不是工程教训）。
-    const warns: unknown[][] = [];
-    const origWarn = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warns.push(args);
-    };
-    try {
-      ctx.gateExitCode = 1;
-      ctx.gateStderr =
-        "\u001B[41m\u001B[37m                This is not the tsc command you are looking for                \u001B[0m\n" +
-        "npm warn exec The following package was not found and will be installed: tsc@2.0.4\n" +
-        "npm warn deprecated tsc@2.0.4: Package no longer supported.\n";
-      ctx.handlers["agent/turn-stopping"]!({ agent: agentWith(1, gateEvt(project)), turn: 1 });
-      await sleep(20);
-      assert.equal(ctx.followupCalls.length, 1, "工具不可用也要注入未执行说明（不得静默通过）");
-      const msg = ctx.followupCalls[0] as { content: { text: string }[] };
-      const text = msg.content.map((chunk) => chunk.text).join("");
-      assert.match(text, /未能执行/u);
-      assert.ok(!text.includes("请修复上述问题"), "不得让模型去修装不了的工具");
-      assert.equal(
-        vi.mocked(pushGateFeedback).mock.calls.length,
-        0,
-        "工具不可用不写记忆（不是代码教训）",
-      );
-      const toolWarns = warns.filter((a) => String(a[0]).includes("stub"));
-      assert.equal(toolWarns.length, 1, `工具不可用应 warn 一次（实测 ${toolWarns.length} 次）`);
     } finally {
       console.warn = origWarn;
     }
@@ -1486,9 +1451,8 @@ describe("quality-gate host 接线", () => {
     assert.equal(ctx.shellCommands[0]?.workdir, parentRoot);
   });
 });
-/** 测试后清理临时项目目录——已改为各 suite 顶部的 afterEach（recycleScratchRoots）统一回收。 */
 
-// ══ ④ pnpm check 假失败防线 + create 编辑器（审查修复）════════════
+// ══ ④ pnpm check 假失败防线 + create 编辑器 ════════════
 /** 造一个带 pnpm-workspace.yaml 的临时根；checkScript 控制是否声明 check。 */
 function makeWsProject(name: string, opts: { checkScript: boolean }): string {
   const root = path.join(
@@ -1522,11 +1486,9 @@ describe("quality-gate: pnpm check script 探测", () => {
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
     assert.equal(ctx.shellCommands.length, 1);
-    assert.equal(
-      ctx.shellCommands[0]?.command,
-      TSC_GATE_COMMAND,
-      "落到下一优先级 tsc，而非 pnpm check",
-    );
+    const cmd = String(ctx.shellCommands[0]?.command);
+    assert.match(cmd, /bin\/tsc --noEmit$/u, "落到下一优先级 tsc，而非 pnpm check");
+    assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 
   it("workspace 根声明了 check script → 仍发 pnpm check（作者同款工程行为不变）", async () => {
@@ -1544,7 +1506,9 @@ describe("quality-gate: pnpm check script 探测", () => {
     writeFileSync(path.join(ws, PKG_JSON), '{"name":"t","scripts":{"check":""}}');
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    assert.equal(ctx.shellCommands[0]?.command, TSC_GATE_COMMAND, "空脚本 → 不发 pnpm check");
+    const cmd = String(ctx.shellCommands[0]?.command);
+    assert.match(cmd, /bin\/tsc --noEmit$/u, "空脚本 → 不发 pnpm check");
+    assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 
   it("package.json 非法 JSON（scripts 读不出来）→ 保守不发 pnpm check", async () => {
@@ -1553,11 +1517,13 @@ describe("quality-gate: pnpm check script 探测", () => {
     writeFileSync(path.join(ws, PKG_JSON), "{not-json");
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    assert.equal(
-      ctx.shellCommands[0]?.command,
-      TSC_GATE_COMMAND,
+    const cmd = String(ctx.shellCommands[0]?.command);
+    assert.match(
+      cmd,
+      /bin\/tsc --noEmit$/u,
       "读不到脚本清单时不猜：宁可不给 pnpm 门禁，也不发一条注定命令级失败的检查",
     );
+    assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 
   it("package.json 根本读不到（不可读路径）→ 同样不发 pnpm check", async () => {
@@ -1569,7 +1535,9 @@ describe("quality-gate: pnpm check script 探测", () => {
     mkdirSync(path.join(ws, PKG_JSON));
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    assert.equal(ctx.shellCommands[0]?.command, TSC_GATE_COMMAND);
+    const cmd = String(ctx.shellCommands[0]?.command);
+    assert.match(cmd, /bin\/tsc --noEmit$/u);
+    assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 });
 
@@ -1635,10 +1603,10 @@ describe("quality-gate: memoryFeedback 反馈", () => {
       { url: string; key: string },
       unknown,
     ];
-    assert.deepEqual(input.command, ["npx", "tsc", "--noEmit"]);
+    assert.deepEqual(input.command, ["tsc", "--noEmit"]);
     assert.equal(input.root, project);
     assert.ok(input.failure.includes("mock-gate-output"), "失败证据随反馈沉淀");
-    assert.deepEqual(target, { url: "http://gateway.test:8420", key: CREDENTIAL_FIXTURE_TOKEN });
+    assert.deepEqual(target, { url: "https://gateway.test:8420", key: CREDENTIAL_FIXTURE_TOKEN });
     assert.deepEqual(env.credentialRequests, ["TDAI_GATEWAY_KEY"], "key 走凭据通道，不拼文件路径");
   });
 
@@ -1710,6 +1678,15 @@ describe("quality-gate: memoryFeedback 反馈", () => {
       warns.find((line) => line.includes(MEMORY_SKIP_WARN_TEXT)) ?? "",
       /TDAI_GATEWAY_KEY/u,
     );
+  });
+
+  it("明文 http 的远端网关 → 凭据不解析、不发送，warn 点明只发 https 或本机", async () => {
+    const project = makeProject("fb-plain-http");
+    const env = mkEnv({ memoryGatewayUrl: "http://gateway.test:8420" });
+    const warns = await collectWarns(() => runTurn(env, "s-fb-plain-http", gateEvt(project)));
+    assert.equal(vi.mocked(pushGateFeedback).mock.calls.length, 0, "明文远端不投递");
+    assert.deepEqual(env.credentialRequests, [], "拒绝发生在解析凭据之前");
+    assert.match(warns.find((line) => line.includes(MEMORY_SKIP_WARN_TEXT)) ?? "", /明文 http/u);
   });
 
   it("凭据服务自身抛错 → 只 warn 注入照常（尽力而为）", async () => {
@@ -1966,5 +1943,13 @@ describe("quality-gate 注入文案双语（@deepseek-ai/dsh-client-locale 的 s
     assert.match(text, /could not run/u, "英文未执行说明");
     assert.match(text, /command not found/u, "英文成因短语");
     assert.doesNotMatch(text, /未能执行|命令不存在/u, "不残留中文");
+  });
+});
+
+describe("门禁命令拼接的引号处理", () => {
+  it("无元字符的路径原样，含空白或单引号的路径加单引号", () => {
+    assert.equal(shellArg("/usr/local/bin/tsc"), "/usr/local/bin/tsc");
+    assert.equal(shellArg("/opt/my tools/tsc"), "'/opt/my tools/tsc'");
+    assert.equal(shellArg("/opt/it's/tsc"), String.raw`'/opt/it'\''s/tsc'`);
   });
 });

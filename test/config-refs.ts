@@ -1,4 +1,4 @@
-// test/config-refs.ts —— 0.1.7 隐式注册的测试桩件（本包三个 host 测试共用）。
+// test/config-refs.ts —— 0.1.7 隐式注册的测试桩件（本包的 host 测试共用）。
 //
 // 背景：0.1.7 删掉了 `settings.register(ns, schema, { base })`。命名空间变成**隐式**的
 // （= profile 条目 id，见 cordis.patch.yml），可编辑字段由 schema 上的 `.volatile()`
@@ -39,7 +39,7 @@ export function configDict(): Record<string, SchemaNode> {
 }
 
 /**
- * 复刻 cordis 交进 apply 的那份 Config（W4 起形状是**混合**的，实测宿主 fork 的
+ * 复刻 cordis 交进 apply 的那份 Config（形状是**混合**的，实测宿主 fork 的
  * schemastery resolve：volatile 字段包成 Volatile 引用、非 volatile 字段是普通值）：
  *  - volatile 字段 → 一枚**稳定引用**，get() 现读 value——与真实 Volatile 的
  *    "引用不变、值可变"同构（cosmokit createVolatile 也只有一个 get()，

@@ -107,7 +107,7 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
       memoryFeedback: true,
       // 记忆反馈要"开关 + 地址"两项齐了才启用；mock 给出可用配置，
       // 让"反馈自身失败"的测试真的走到 pushGateFeedback（而不是被前置门禁挡掉）。
-      memoryGatewayUrl: "http://gateway.test:8420",
+      memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
       // W4 非 volatile 部署值：resolve 交普通值（refsOf 按 meta.volatile 区分形状）
       maxRootDepth: 10,
