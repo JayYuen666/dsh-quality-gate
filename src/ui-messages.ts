@@ -60,8 +60,8 @@ export interface UiMessages {
  * 官方 `LocaleDictOf` / `TranslateNS` 的约束域立刻只剩宿主包 merge 的那三个命名空间
  * （`Type '"quality-gate"' does not satisfy the constraint
  * '"common" | "pluginManager" | "settings.locale"'`，TS2344）：merge 是键域的**唯一**入口。
- * merge 之后键集由官方 `TranslateNS<NS>`（`index.d.ts:67`，`= Translate<LocaleKeysOf<N>>`，
- * :45/:59）表达，`t("拼错的键")` 在编译期红。
+ * merge 之后键集由官方 `TranslateNS<NS>`（`dsh-client-ui-slots/lib/types/index.d.ts:67`，
+ * `= Translate<LocaleKeysOf<N>>`，:45/:59）表达，`t("拼错的键")` 在编译期红。
  * ⚠ 表键必须是字面量（interface 键位不接受计算属性），故下面的等式常量是本源，
  * client-entry.ts 的 `NS` 按它的类型 `LocaleNs` 标注：两边哪天分叉，那行编译期就红。
  */
@@ -84,11 +84,11 @@ const LOCALE_NS_KEY = "quality-gate" as const;
 export type LocaleNs = typeof LOCALE_NS_KEY;
 
 /**
- * 卡片取文案的函数形状：官方 `TranslateNS<N>`（installed `index.d.ts:67`，
- * `= Translate<LocaleKeysOf<N>>`，而 `Translate<K> = (key: K, params?) => string`，
- * `index.d.ts:45`）——键域就是上面 merge 的 `keyof UiMessages` **并上**官方 `common`
+ * 卡片取文案的函数形状：官方 `TranslateNS<N>`（installed `dsh-client-ui-slots/lib/types/index.d.ts:67`，
+ * `= Translate<LocaleKeysOf<N>>`，而 `Translate<K> = (key: K, params?) => string`，同文件 `:45`）——
+ * 键域就是上面 merge 的 `keyof UiMessages` **并上**官方 `common`
  * 命名空间的共享词（官方 `LocaleKeysOf` 的并集：宿主查找链在本命名空间 miss 之后确实
- * 会去 consult common，见 installed dsh-client-locale/lib/client.js:1417），函数面完全归官方。
+ * 会去 consult common，见 installed dsh-client-locale/lib/client.js:1425），函数面完全归官方。
  */
 export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 

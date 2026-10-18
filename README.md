@@ -12,7 +12,7 @@
 
 - Trigger: the host event `agent/turn-stopping`. Flow: read the incremental event window → take this session's **successful** edits → walk each file up to the nearest manifest root → detect the gate → run it.
   - Edits counted: `edit` / `write` / `str_replace_editor` writes; `view` is read-only and does not count.
-  - Manifest root: searched up from each file, max 10 levels; a monorepo package is upgraded to the workspace root holding `pnpm-workspace.yaml`.
+  - Manifest root: searched up from each file, max 10 levels; a monorepo package is upgraded to the workspace root holding `pnpm-workspace.yaml` only when that root yields a gate — otherwise the package keeps its own root (an outer workspace without a `check` script must not swallow the package's `tsc`/`ruff` gate).
 - Skipped when:
   - `enabled: false`; the turn has no checkable edit (only md/txt/images/`.sh`, or edits that were denied or failed).
   - Subagent sessions (`origin === "subagent"` or `delegationDepth > 0`); the inbox already has pending items (the gate does not talk over the user).
@@ -26,7 +26,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 ```
 
 - The packages live on the public npm registry, so installs need no credentials.
-- Requires a host at `@deepseek-ai/dsh` 0.2.1-alpha.2 or newer (`engines.dsh`); the plugin is compiled against that host's type surface.
+- Requires a host at `@deepseek-ai/dsh` 0.2.1-rc.2 or newer (`engines.dsh`); the plugin is compiled against that host's type surface.
 - The runtime dependency `@jayyuen66/dsh-plugin-shared` must already be on the same registry, otherwise the whole set 404s.
 - `@deepseek-ai/schemastery` is resolved from the host, not installed by this package: the host's own fork is the only one whose `resolve` wraps `.volatile()` fields into live references, so a public `schemastery` would turn "edit a setting" into "restart to apply".
 - Installing a local directory needs pnpm ≥ 12.3.0 (12.0.0 has a known bug in that path).

@@ -34,7 +34,8 @@ const FORBIDDEN_ENTRIES = [
   "package/pnpm-workspace.yaml",
 ];
 
-/** 产物内容面的禁令：注释会被打包器剥掉，所以这里防的是随数据出去的东西。 */
+/** 产物内容面的禁令：随包发布的产物会原样保留声明处的 JSDoc（实测在 host.js 里），
+ *  注释面的噪音由 test/publish-manifest.test.ts 的注释门禁负责；这一面只防随数据出去的东西。 */
 const FORBIDDEN_CONTENT = [
   /\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b/u,
   /\/(?:Users|home)\/[A-Za-z0-9._-]+/u,

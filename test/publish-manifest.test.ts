@@ -430,12 +430,14 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   });
 
   it("engines 与 peer 同基准：dsh 下界即编译目标，node 底线不低于宿主发布线", async () => {
-    // engines.dsh 低于编译目标 = 在一个从没跑过的宿主版本上承诺能装；`>=` 与 peer 的
-    // 区间算子在这里必须同值，因为要钉的是"最低可装载"，不是"可升级"。
+    // engines.dsh 低于编译目标 = 在一个从没跑过的宿主版本上承诺能装。根表把 peer 与 engines.dsh
+    // 写成同一份插入符范围，所以这里要求逐字相等：算子一分叉，装载门槛和编译目标就各说各话。
     const { manifest } = await readSurface();
     const peer = manifest.peerDependencies?.["@deepseek-ai/dsh"] ?? "";
     expect(peer, "peer 的 @deepseek-ai/dsh 缺失，engines 失去基准").not.toBe("");
-    expect(manifest.engines?.["dsh"], "engines.dsh 缺失").toBe(`>=${peer.replace(/^[\^~]/u, "")}`);
+    expect(manifest.engines?.["dsh"], "engines.dsh 必须与 peer 同一份范围，不能各说各话").toBe(
+      peer,
+    );
     // 运行时底线取宿主发布线的那一档：产物用到 AbortSignal.any 这类较新 API，声明得比宿主
     // 还低等于承诺一个没人测过的执行环境。
     const node = manifest.engines?.["node"] ?? "";

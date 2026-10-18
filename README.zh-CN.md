@@ -12,7 +12,7 @@
 
 - 触发点：宿主事件 `agent/turn-stopping`。流程是读增量事件窗 → 取本会话**成功**的编辑 → 每个文件向上找最近清单根 → 探测门禁 → 执行。
   - 编辑口径：`edit` / `write` / `str_replace_editor` 的写入；`view` 只读不算。
-  - 清单根：最多向上找 10 层；monorepo 子包升到 `pnpm-workspace.yaml` 所在的工作区根。
+  - 清单根：最多向上找 10 层；monorepo 子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只在该根**产得出门禁**时升级，否则保留子包自己的根（外层没有 `check` 脚本的 workspace 不得吃掉子包的 `tsc` / `ruff` 门禁）。
 - 不触发：
   - `enabled: false`；本回合没有可检编辑（只改 md/txt/图片/`.sh`，或被拒、执行失败的编辑）。
   - 子代理会话（`origin === "subagent"` 或 `delegationDepth > 0`）；inbox 已有待处理消息（不抢话）。
@@ -26,7 +26,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 ```
 
 - 包在公共 npm（`registry.npmjs.org`）上，安装侧不需要凭据。
-- 宿主需 `@deepseek-ai/dsh` 0.2.1-alpha.2 起（`engines.dsh`）：本包按这一版宿主的类型面编译。
+- 宿主需 `@deepseek-ai/dsh` 0.2.1-rc.2 起（`engines.dsh`）：本包按这一版宿主的类型面编译。
 - 运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须已在同一 registry 上，否则整组 404。
 - `@deepseek-ai/schemastery` 由宿主解析、不由本包安装：只有宿主 fork 的那一枚能把 `.volatile()` 字段解析成活引用，换成公共 `schemastery` 就变成改设置要重启才生效。
 - 本地目录形态安装需 pnpm ≥ 12.3.0（12.0.0 的本地目录 `add` 有已知缺陷）。

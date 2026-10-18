@@ -6,7 +6,7 @@
 // 正文的写法在 lib/feedback-content.ts，两侧各自也被 host 直接消费——本模块不读设置、不碰 env。
 //
 // 设计要点：
-// - shell-free：Node 内建 fetch（运行时底线 Node ≥22.18），无子进程、无 argv——
+// - shell-free：Node 内建 fetch（运行时底线见 package.json 的 `engines.node`），无子进程、无 argv——
 //   Authorization 头一旦走 argv，进程列表（ps）里瞬间可见；fetch 让 key 只进请求头，
 //   顺带没有 EPIPE/孤儿进程两类兜底负担；
 // - 不内建任何本机默认值：url 与 Bearer 令牌都由调用方（host）从设置 +

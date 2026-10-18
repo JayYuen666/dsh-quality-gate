@@ -49,8 +49,6 @@ export interface QualityGateMessages {
   readonly toolNotExecutable: string;
   /** 成因短语 → "门禁没有运行"（{cause}）。 */
   readonly toolNotRun: string;
-  /** npx 抓到 stub 包（工具没起来，不是代码问题）。 */
-  readonly toolStub: string;
   /** 沙箱策略解析失败（{message} 错误摘要）。 */
   readonly policyUnresolvable: string;
   /** 沙箱在本机不可用（{message}）。 */
@@ -91,7 +89,6 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
     toolMissing: "命令不存在（工具未安装）",
     toolNotExecutable: "命令不可执行",
     toolNotRun: "{cause}，门禁没有运行。",
-    toolStub: "门禁工具本身不可用（npx 抓到的是 stub 包，不是真工具）。",
     policyUnresolvable: "沙箱策略无法解析（{message}），门禁拒绝在未确认的沙箱边界下执行。",
     sandboxUnavailable: "沙箱在本机不可用（{message}）：命令被拒绝执行，未做任何检查。",
     gateStartFailed: "门禁未能启动（{message}）。",
@@ -133,8 +130,6 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
     toolMissing: "command not found (tool not installed)",
     toolNotExecutable: "command not executable",
     toolNotRun: "{cause} — the gate did not run.",
-    toolStub:
-      "The gate tool itself is unavailable (npx fetched a stub package, not the real tool).",
     policyUnresolvable:
       "The sandbox policy could not be resolved ({message}); the gate refuses to run under an " +
       "unconfirmed sandbox boundary.",

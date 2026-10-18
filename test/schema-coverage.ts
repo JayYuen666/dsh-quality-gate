@@ -2,9 +2,9 @@
 //
 // 背景：host.ts 用 `Schema.object({...})` 声明 N 个设置字段，
 // client 卡片只渲染 M 个（M < N）→ 那 N-M 个字段用户无法从 UI 触及，只能改 settings 底层或
-// 读源码。本轮踩坑：quality-gate 的 `memoryFeedback`（功能性开关——host.ts 的
+// 读源码。踩过的坑：quality-gate 的 `memoryFeedback`（功能性开关——host.ts 的
 // `if (isCodeFailure && cfg.memoryFeedback)` 决定是否把门禁失败写入记忆库，且有专门测试）在卡片
-// 漏项，两轮审查后才被发现。
+// 漏项，审查后才被发现。
 //
 // 做法：解析 host.ts 的 Schema.object 字段名 + client 源码树（src/** + lib/**）实际绑定的
 // 字段名，断言后者 ⊇ 前者。漏项必须显式列入 allowUnbound 并给理由——测试同时校验

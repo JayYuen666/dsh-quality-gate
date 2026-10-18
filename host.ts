@@ -32,13 +32,14 @@
 //   - 每回合每根至多 N 次门禁注入（默认 2）；循环修不好就放行并提示用户；
 //   - 门禁总时长预算封顶（默认 300s），超时/预算耗尽一律按 not-run 注入说明。
 //
-// 运行方式：dsh cordis Loader 直接 import 本 .ts（Node ≥22.18 类型剥离）。
+// 本文件只以 host.js 形态被宿主载入（入口面由 test/publish-manifest.test.ts 钉住）。
 // 一处例外：@deepseek-ai/dsh-credentials 的 `credentialRef` / `isCredentialRefName` 是值导入，
 // 因此必须进 peerDependencies（见下面 import 段的理由）。其余 @deepseek-ai/* 一律 type-only。
 
 import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { createRequire } from "node:module";
 // 0.1.7 设置面要求宿主 fork：`Schema.prototype.volatile` 只在 @deepseek-ai/schemastery 这一枚
 // 里存在（installed @deepseek-ai/schemastery/src/index.ts:480-482），公共
 // schemastery 既没有 .volatile()、解析出来的也仍是普通值。
@@ -93,7 +94,7 @@ import {
   resolveLocalePreference,
 } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 import { pushGateFeedback } from "./lib/gateway-feedback.ts";
-import { resolveGatewayUrl } from "./lib/gateway-target.ts";
+import { isCredentialSafeUrl, resolveGatewayUrl } from "./lib/gateway-target.ts";
 import type { GatewayTarget } from "./lib/gateway-target.ts";
 import type { GateFeedbackInput } from "./lib/feedback-content.ts";
 // 共享记账骨架：事件流 → tool/call+tool/result 两张表 + 编辑路径提取，与 danger-guard
@@ -116,8 +117,10 @@ import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
  * 工程若不在此登记，gate-detect 的 has("ruff.toml") 就是死码——那类工程根本得不到根，
  * 也就永远没有门禁。
  */
+const PKG_MANIFEST = "package.json";
+
 const MANIFESTS = [
-  "package.json",
+  PKG_MANIFEST,
   "Cargo.toml",
   "pyproject.toml",
   "pnpm-workspace.yaml",
@@ -131,7 +134,7 @@ const MANIFESTS = [
  *
  * 它取代的是 `Session.snapshotEvents()` 那类同步读：官方把 `snapshotEvents` / `eventAt`
  * / `ownEvents` 三枚一并标为 `@deprecated`（"new calls are prohibited"，installed
- * @deepseek-ai/dsh-session/lib/types/index.d.ts:176 / :186 / :195，指向 Agent Note
+ * @deepseek-ai/dsh-session/lib/types/index.d.ts:208 / :218 / :227，指向 Agent Note
  * "Deprecate synchronous session event reads"）。增量读的官方面就是 `observeSession`——它按
  * sessionId 精确读：lib/types/observation.d.ts:7-31 交回一枚不可变
  * 切片，`events: readonly SessionEvent[]`（:19）与 `inheritedEventCount: SessionLogOffset`
@@ -142,7 +145,7 @@ const MANIFESTS = [
  * 监听器里 `await`——靠的正是 serial 分发保持"同一会话的读窗一次只跑一趟"，与迁移前的同步段
  * 等价；门禁执行仍照旧 detached（迁移前那一段本就是并发的）。
  * 原 `SessionRef` 视图（为那条退役读面而存在的 `Partial<Pick<Session, "inheritedEventCount"
- * | "snapshotEvents">>`）随本次迁移一并删除；`header`/`id` 两位仍由 `TurnAgent.session` 上
+ * | "snapshotEvents">>`）不再需要；`header`/`id` 两位仍由 `TurnAgent.session` 上
  * 的官方 `Session` 直接交出，不需要视图。
  *
  * ⚠ 这一位**不**写成 `Pick<SessionQueryEngine, "observeSession">`：官方返回域 `SessionObservation`
@@ -159,8 +162,15 @@ type SessionObservationFace = Pick<SessionObservation, "events"> & {
   readonly inheritedEventCount: SessionLogOffset | undefined;
 };
 
+/** `options` 在本地读面上是**必填**的：官方默认 `projectionMode: "all"`
+ *  （installed @deepseek-ai/dsh-session-query/lib/index.js 的 `projectionMode = "all"`），
+ *  会让宿主为整份日志算一遍全部投影的 snapshot，而本包只读 events/inheritedEventCount。
+ *  收成必填，是为了不给"少传一次就白算一遍"留默认值。 */
 interface SessionQueryFace {
-  observeSession: (sessionId: SessionId) => Promise<SessionObservationFace>;
+  observeSession: (
+    sessionId: SessionId,
+    options: { readonly projectionMode: "none" },
+  ) => Promise<SessionObservationFace>;
 }
 
 /** 本插件 followup 注入消息的 producer-owned source.kind（session-rescue 的
@@ -369,7 +379,7 @@ interface ResolvedSettings {
  * 返回值按 unknown 收而不是 void：lesson-loop 的 report 已异步落库（返回 Promise），
  * 而 `(input) => void` 的函数类型**恰好允许调用方丢弃返回的 Promise**——TS 不报
  * "游离 Promise"，no-floating-promises 也看不到，失败于是被静默吞掉并留下一枚未处理
- * 拒绝，正是这次修的根因。unknown 保留真实形状，调用方一律经 settleLessonCall 收口。
+ * 拒绝。unknown 保留真实形状，调用方一律经 settleLessonCall 收口。
  */
 interface LessonLoopReporter {
   report: (input: {
@@ -386,8 +396,8 @@ interface LessonLoopReporter {
 
 /**
  * ctx.credentials 的服务面：官方 `CredentialProvider extends Service`
- * （@deepseek-ai/dsh-credentials/lib/types/index.d.ts:119）的 `resolve` **方法面投影**
- * （:129）——整类带 private 字段是名义比较，结构替身永远满足不了，故只 Pick 用到的那一位；
+ * （@deepseek-ai/dsh-credentials/lib/types/index.d.ts:120）的 `resolve` **方法面投影**
+ * （:130）——整类带 private 字段是名义比较，结构替身永远满足不了，故只 Pick 用到的那一位；
  * 投影不重述签名，入参（品牌 `CredentialRef`）与返回（`ResolvedCredential | undefined`，
  * :71-76：`value` 非空密钥 + `source` 来源层）全部由官方交出。本包只读 `.value`，来源层
  * 不进任何决策，但也不再本地抄一个只剩 value 的 `CredentialHit`。
@@ -441,8 +451,8 @@ interface HostCtx {
    * 字面量 name 重载（按服务返回精确类型），其余未知服务名回退 unknown——
    * 由此 getShell/lessonLoop 的取用不再需要 `as` 断言。
    * ⚠ 这一位**不能**换成官方 `Context["get"]`：官方那一位是
-   * `get<K extends string & keyof this>(name: K): undefined | this[K]`
-   * 加一条 `get(name: string): any` 兜底（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14,17`）。
+   * `get<K extends string & keyof this>(name: K, strict?: boolean): undefined | this[K]`
+   * 加一条 `get(name: string, strict?: boolean): any` 兜底（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14,16`）。
    * `shell` / `sandboxPolicy` / `credentials` 确实都是官方声明进 `Context` 的名字（installed
    * `@deepseek-ai/dsh-shell/lib/types/index.d.ts:15-17` 等），走泛型臂没问题；但
    * `lessonLoop` 是**兄弟插件**（lesson-loop 包）提供的服务，不在官方 `Context` 面上——
@@ -473,9 +483,8 @@ interface HostCtx {
   ) => unknown;
 }
 
-// ── 内置默认（0.1.6 交给 `settings.register(ns, schema, { base })` 的那层「底座」）──
-// 0.1.7 把它逐字段搬进下面 schema 的 `.default()`：单一来源，cordis 装载期用同一份
-// schema 填默认再交进 apply。声明在 Config 之前是为了避开 const 的 TDZ。
+// ── 内置默认：就是下面 schema 各字段的 `.default()`（单一来源，没有第二层「底座」）──
+// cordis 装载期用同一份 schema 填默认再交进 apply。声明在 Config 之前是为了避开 const 的 TDZ。
 
 /** 每回合每根的门禁注入上限：循环修不好就放行并提示用户。 */
 const DEFAULT_MAX_INJECTS_PER_TURN = 2;
@@ -483,11 +492,11 @@ const DEFAULT_MAX_INJECTS_PER_TURN = 2;
 /** 记忆网关密钥的默认凭据引用名（值由凭据服务侧存，本包只登记引用）。 */
 const DEFAULT_MEMORY_KEY_REF = "TDAI_GATEWAY_KEY";
 
-// 门禁总预算：大仓库 pnpm check 常超 120s，原默认会让门禁静默放行（形同虚设）。
-// 提到 300s 且超时按"失败注入"处理（不再按通过）——用户已确认（300s + 超时报错注入）。
+// 门禁总预算：大仓库的 pnpm check 会吃掉较短的预算，预算不足等于门禁静默放行（形同虚设）。
+// 超时一律按「未执行」注入说明，不按通过。
 const DEFAULT_GATE_BUDGET_MS = 300_000;
 
-// 向上找项目根的深度上限：深嵌套 monorepo（apps/foo/src/...）6 层不够会静默跳过 → 10 层。
+// 向上找项目根的深度上限：深嵌套 monorepo（apps/foo/src/...）在太浅的上限下会静默跳过（无门禁面）。
 const DEFAULT_MAX_ROOT_DEPTH = 10;
 
 // 门禁 stdout 捕获上限（字节）：超过则 harness 只保留尾部（见 CollectedOutput）。
@@ -569,8 +578,8 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * 会话级 Map 淘汰：把 keep 先删后插移到队尾（JS Map 迭代按插入序），再淘汰队首
- * (size - 50) 项 → keep 永不被淘汰，且总大小收敛。泛型复用：注入配额 Map（InjectState）、
+ * 会话级 Map 淘汰：把 keep 先删后插移到队尾（JS Map 迭代按插入序），再淘汰队首超出
+ * `SESSION_BUDGET` 的项 → keep 永不被淘汰，且总大小收敛。泛型复用：注入配额 Map（InjectState）、
  * 事件游标 Map（number）与编辑累加器 Map（EditAccumulator）共用同一策略。
  * keep 不在表内 → 直接返回（inbox-busy 分支的 injectState 就会命中：该会话从未失败过）。
  */
@@ -637,21 +646,45 @@ function preInjectCheck(
 }
 
 /**
- * 判定门禁失败是否为"工具本身不可用"（而非代码问题）。
- *
- * `npx tsc` 在项目未装 typescript 时会**自动安装**已弃用的 stub 包 `tsc@2.0.4`，
- * 它打印横幅并以 exit 1 退出——不是 126/127，所以只按退出码判定会误报为代码失败。
- * 实测：`npx --no-install` 在本机拦不住 stub（已从 npx 缓存解析），
- * 所以必须在输出侧识别，不能只靠加 flag。
+ * 本次门禁要跑的 tsc 入口：优先工程自己装的 typescript（与工程惯用的编译器版本一致），
+ * 装不到时用本包依赖的那份（随包安装，运行期无网络动作）。两处都解析不到时回落到 PATH 上的
+ * `tsc`，由 126/127 那条「工具不可用」出口报成未执行——绝不走 `npx` 的自动下载。
  */
-function gateToolUnavailable(stdout: string, stderr: string): boolean {
-  const out = `${stdout}\n${stderr}`.toLowerCase();
-  // stub 包 `tsc@2.0.4` 的横幅
-  if (out.includes("not the tsc command you are looking for")) {
-    return true;
+function tscEntry(root: string): string | undefined {
+  let entry: string | undefined;
+  for (const from of [path.join(root, PKG_MANIFEST), import.meta.url]) {
+    try {
+      const manifest = createRequire(from).resolve("typescript/package.json");
+      entry = path.join(path.dirname(manifest), "bin", "tsc");
+      break;
+    } catch {
+      // 这个解析起点上没有 typescript：换下一个
+    }
   }
-  // npx 抓取了 stub 包（deprecation 提示只针对 tsc 这个占位包）
-  return out.includes("npm warn deprecated tsc@");
+  return entry;
+}
+
+/** 门禁命令的实际 argv：tsc 的门禁只带逻辑名，入口在运行时按工程根解析。 */
+function gateCommandArgs(gate: Gate): readonly string[] {
+  if (gate.command[0] !== "tsc") {
+    return gate.command;
+  }
+  /* v8 ignore next 1 —— 本包自己的 typescript 解析不到（安装面坏了）时才走 PATH 回落；
+     正常安装不可达，而那一路由 126/127 报成未执行。 */
+  return [tscEntry(gate.root) ?? "tsc", "--noEmit"];
+}
+
+/** 拼 shell 串：路径可能带空格，含空白或元字符的参数加单引号。
+ *  导出只为直接测这段引号处理：tsc 入口是绝对路径，它所在目录未必没有空格。 */
+export function shellArg(part: string): string {
+  return /^[\w./:=@+-]+$/u.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`;
+}
+
+/** 门禁命令的展示/执行串（与 gateCommandArgs 同源）。 */
+function gateCommandText(gate: Gate): string {
+  return gateCommandArgs(gate)
+    .map((part) => shellArg(part))
+    .join(" ");
 }
 
 /** harness run() 抛出的 SandboxUnavailableError（code 或 name 命中即可）。 */
@@ -720,7 +753,7 @@ function evidenceText(
 
 const gateText = (messages: QualityGateMessages, gate: Gate, out: string): string =>
   renderTemplate(messages.gateFailed, {
-    command: gate.command.join(" "),
+    command: gateCommandText(gate),
     root: gate.root,
     output: out,
   });
@@ -731,7 +764,7 @@ const gateText = (messages: QualityGateMessages, gate: Gate, out: string): strin
  */
 const notRunText = (messages: QualityGateMessages, gate: Gate, reason: string): string =>
   renderTemplate(messages.gateNotRun, {
-    command: gate.command.join(" "),
+    command: gateCommandText(gate),
     root: gate.root,
     reason,
   });
@@ -740,13 +773,13 @@ const notRunText = (messages: QualityGateMessages, gate: Gate, reason: string): 
 const giveUpText = (messages: QualityGateMessages, gate: Gate, attempts: number): string =>
   renderTemplate(messages.gaveUp, {
     attempts,
-    command: gate.command.join(" "),
+    command: gateCommandText(gate),
     root: gate.root,
   });
 
 /** 未执行清单的一行（模块级：不让 renderTemplate 套进 map 再套进 renderTemplate）。 */
 const skippedGateLine = (messages: QualityGateMessages, gate: Gate): string =>
-  renderTemplate(messages.skippedGateItem, { command: gate.command.join(" "), root: gate.root });
+  renderTemplate(messages.skippedGateItem, { command: gateCommandText(gate), root: gate.root });
 
 /** 预算耗尽后剩余门禁的"未执行"清单：只 warn 等于静默通过，所以要注入给模型与用户。 */
 const skippedText = (messages: QualityGateMessages, gates: readonly Gate[]): string =>
@@ -832,7 +865,7 @@ function unavailableToolOutcome(
   let outcome: GateOutcome | undefined;
   if (res.exitCode === 126 || res.exitCode === 127) {
     log.warn(
-      `[quality-gate] gate tool unavailable (exit ${res.exitCode}): ${gate.command.join(" ")} — reported as not-run, not as pass`,
+      `[quality-gate] gate tool unavailable (exit ${res.exitCode}): ${gateCommandText(gate)} — reported as not-run, not as pass`,
     );
     const cause = res.exitCode === 127 ? messages.toolMissing : messages.toolNotExecutable;
     outcome = {
@@ -853,7 +886,7 @@ function unavailableToolOutcome(
  * 策略拒绝当成代码失败注入"修这些错"。
  *
  * 判定序（三支各自成函数，顺序与 warn 次数都不变）：沙箱面拦截 → 进程没跑完 →
- * 工具装不上（126/127）→ exit 0（部分生效沙箱只 warn）→ npx stub 横幅 → 代码失败。
+ * 工具装不上（126/127）→ exit 0（部分生效沙箱只 warn）→ 代码失败。
  */
 function classifyRun(
   messages: QualityGateMessages,
@@ -881,20 +914,10 @@ function classifyRun(
     // 部分生效的沙箱下 exit 0 只是"在该边界内没报错"——warn 给运维，判定仍是 pass。
     if (facts?.enforcement === "partial") {
       log.warn(
-        `[quality-gate] gate passed under PARTIAL sandbox enforcement (${sandboxNote(messages, facts)}): ${gate.command.join(" ")} @ ${gate.root}`,
+        `[quality-gate] gate passed under PARTIAL sandbox enforcement (${sandboxNote(messages, facts)}): ${gateCommandText(gate)} @ ${gate.root}`,
       );
     }
     return { kind: "pass" };
-  }
-  // npx 抓到 stub 包（横幅/弃用警告）也是同一类：工具没起来，不是代码有问题。
-  if (gateToolUnavailable(res.stdout.text, res.stderr.text)) {
-    log.warn(
-      `[quality-gate] gate tool unavailable (npx fetched a stub instead of the real tool): ${gate.command.join(" ")} in ${gate.root} — reported as not-run`,
-    );
-    return {
-      kind: "not-run",
-      text: `${messages.toolStub}\n${evidenceText(messages, res.stderr, "stderr")}`,
-    };
   }
   return {
     kind: GATE_KIND_CODE_FAILURE,
@@ -941,41 +964,39 @@ function isArrayDelivery(value: unknown): boolean {
 /**
  * 解析事件游标窗口：fork 切点下限 vs 上次已读 seq 取大，返回起始 seq 与本批事件。
  * 事件流取自官方 `ctx.sessionQuery.observeSession(sessionId)`（见上面 SessionQueryFace：
- * 一次交回 `events` 与 `inheritedEventCount`）。三条降级路径一律 `undefined`（调用方直接
- * 返回，**游标不推进**、不误报）：① `sessionQuery` 未装配（`Context["get"]` 的官方语义即
- * "or `undefined` when not (yet) provided"，installed cordis/lib/types/reflect.d.ts:12）；
- * ② `observeSession` 抛错/拒绝（会话已卸载、存储读不出）；③ 交回的 events 不是数组
- * （契约外交付，由 `isArrayDelivery` 那道**布尔**判据挡——不用 `Array.isArray` 作守卫收窄，
- * 它会把官方 `readonly SessionEvent[]` 塌成 `any[]`，类型面当场作废并把 any 传进下游记账）。
+ * 一次交回 `events` 与 `inheritedEventCount`）。两条降级路径一律 `undefined`（调用方直接
+ * 返回，**游标不推进**、不误报）：① `observeSession` 抛错/拒绝（会话已卸载、存储读不出）；
+ * ② 交回的 events 不是数组（契约外交付，由 `isArrayDelivery` 那道**布尔**判据挡——不用
+ * `Array.isArray` 作守卫收窄，它会把官方 `readonly SessionEvent[]` 塌成 `any[]`，类型面
+ * 当场作废并把 any 传进下游记账）。`sessionQuery` 服务本身缺席是第三条降级，判定在
+ * `readEditedFiles`（那里才能发 warn-once）。
  * 窗口仍由**本地按 from 切片**：观察面给的是自日志开头的连续切片（`seq = log.length`
- * 连续性契约，installed dsh-session/lib/index.js:1285 的注记），而 `from` 是本包游标算出的
+ * 连续性契约，installed dsh-session/lib/index.js:1476 的注记），而 `from` 是本包游标算出的
  * 裸 number——这样连 `SessionLogOffset` 的品牌都不必造（官方只要 `SessionId`，那一位从
  * `Session.id` 上拿回来就是品牌的）。
  */
 async function resolveEventWindow(
-  query: SessionQueryFace | undefined,
+  query: SessionQueryFace,
   sessionId: SessionId,
   lastSeq: ReadonlyMap<string, number>,
 ): Promise<{ from: number; events: readonly SessionEvent[] } | undefined> {
   // 单 return（consistent-return 与 treatUndefinedAsUnspecified：不混 undefined 与值返回）
   let window: { from: number; events: readonly SessionEvent[] } | undefined;
-  if (query !== undefined) {
-    try {
-      const observation = await query.observeSession(sessionId);
-      // 游标下限 = fork 切点（root 会话为 0）：首见会话（含进程重启后）从下限重放
-      // 本会话自己的历史编辑——这是有意的，turn-stopping 时本回合编辑已在日志里，
-      // 从末尾起步会跳过正在要检查的回合。代价是重启后首轮会多跑几次门禁（预算与
-      // maxInjectsPerTurn 兜底）；重放本身不会造成假失败——根必须是真 TS 项目
-      // （见 gate-detect 的 tsc 判据），历史编辑的根都是真项目。
-      const forkCut = observation.inheritedEventCount ?? 0;
-      const from = Math.max(forkCut, lastSeq.get(sessionId) ?? forkCut);
-      if (isArrayDelivery(observation.events)) {
-        window = { from, events: observation.events.slice(from) };
-      }
-    } catch {
-      // 观察面读不出来：与迁移前"snapshotEvents 缺失/非数组"同一档降级——不推进游标。
-      window = undefined;
+  try {
+    const observation = await query.observeSession(sessionId, { projectionMode: "none" });
+    // 游标下限 = fork 切点（root 会话为 0）：首见会话（含进程重启后）从下限重放
+    // 本会话自己的历史编辑——这是有意的，turn-stopping 时本回合编辑已在日志里，
+    // 从末尾起步会跳过正在要检查的回合。代价是重启后首轮会多跑几次门禁（预算与
+    // maxInjectsPerTurn 兜底）；重放本身不会造成假失败——根必须是真 TS 项目
+    // （见 gate-detect 的 tsc 判据），历史编辑的根都是真项目。
+    const forkCut = observation.inheritedEventCount ?? 0;
+    const from = Math.max(forkCut, lastSeq.get(sessionId) ?? forkCut);
+    if (isArrayDelivery(observation.events)) {
+      window = { from, events: observation.events.slice(from) };
     }
+  } catch {
+    // 观察面读不出来：与迁移前"snapshotEvents 缺失/非数组"同一档降级——不推进游标。
+    window = undefined;
   }
   return window;
 }
@@ -1139,7 +1160,7 @@ function reportProblemToBus(
         cwd: attribution.cwd,
         sessionId: attribution.sessionId,
         turn: attribution.turn,
-        signature: gate.command.join(" "),
+        signature: gateCommandText(gate),
         detail: problem.text,
         evidence: { root: gate.root, command: gate.command, kind: problem.kind },
       }),
@@ -1176,6 +1197,12 @@ async function resolveFeedbackTarget(
   const url = resolveGatewayUrl(cfg.memoryGatewayUrl);
   if (url === "") {
     return { ok: false, reason: "memoryGatewayUrl 未配置（留空 = 不启用记忆反馈）" };
+  }
+  if (!isCredentialSafeUrl(url)) {
+    return {
+      ok: false,
+      reason: `memoryGatewayUrl ${url} 是明文 http 且非回环：Bearer 凭据只发往 https 或本机`,
+    };
   }
   if (!isCredentialRefName(cfg.memoryGatewayKeyRef)) {
     return {
@@ -1268,12 +1295,34 @@ function isGateHost(value: unknown): value is Context & HostCtx {
 }
 
 /**
+ * 一个文件的最近清单根 → 实际要跑的根：workspace 根优先，**但只在外层真能产出门禁时**才升级。
+ *
+ * 只判「上面有没有 pnpm-workspace.yaml」就升级是漏门禁的一条路：外层若是"有 workspace 清单、
+ * 却没有 check 脚本也没有 tsconfig"的根，gate-detect 对它返回空表，子包本来有的
+ * `npx tsc --noEmit` / `ruff check` 会被这次上溯抹掉，且没有任何输出。
+ */
+function rootForFile(useRoot: string, maxDepth: number): ProjectRoot {
+  const inner = probeProjectRoot(useRoot);
+  const upgraded = workspaceRootUpgrade(useRoot, maxDepth);
+  if (upgraded === useRoot) {
+    return inner;
+  }
+  const outer = probeProjectRoot(upgraded);
+  if (detectGate([outer]).length > 0) {
+    return outer;
+  }
+  // 外层产不出门禁：退回内层（内层也没有时两条等价，仍取外层保持"无门禁"语义）。
+  return detectGate([inner]).length > 0 ? inner : outer;
+}
+
+/**
  * 从编辑文件路径向上找最近的清单根（层数上限 = Config 的 maxRootDepth，非 volatile
  * 部署值），每个根探一次真实盘上事实（清单名 + 已声明脚本）。找不到清单根的文件跳过
- * （无门禁面）。
+ * （无门禁面）。同一内层根只判一次盘：一轮改几百个文件时逐文件重复探盘没有意义。
  */
 function projectRootsOf(files: readonly string[], maxDepth: number, log: Log): ProjectRoot[] {
   const roots = new Map<string, ProjectRoot>();
+  const chosenByInner = new Map<string, ProjectRoot>();
   for (const file of files) {
     const hit = findManifestRoot(file, maxDepth);
     const useRoot = hit.root;
@@ -1285,10 +1334,14 @@ function projectRootsOf(files: readonly string[], maxDepth: number, log: Log): P
         );
       }
     } else {
-      const upgraded = workspaceRootUpgrade(useRoot, maxDepth);
-      // 同根只探一次盘：一轮改几百个文件时逐文件重复 existsSync + 读 package.json 没意义。
-      if (!roots.has(upgraded)) {
-        roots.set(upgraded, probeProjectRoot(upgraded));
+      let chosen = chosenByInner.get(useRoot);
+      if (chosen === undefined) {
+        chosen = rootForFile(useRoot, maxDepth);
+        chosenByInner.set(useRoot, chosen);
+      }
+      // 同根只登记一次：specs 里一个根只出现一次。
+      if (!roots.has(chosen.root)) {
+        roots.set(chosen.root, chosen);
       }
     }
   }
@@ -1321,7 +1374,7 @@ async function runGate(
   try {
     const spec = shell.resolve({
       // command 数组来自 gate-detect 白名单（pnpm/cargo/ruff/tsc 固定词），无注入面。
-      command: gate.command.join(" "),
+      command: gateCommandText(gate),
       workdir: gate.root,
       stdoutMaxBytes,
       timeoutMs: budgetMs,
@@ -1337,7 +1390,7 @@ async function runGate(
     outcome = classifyRun(messages, gate, budgetMs, await exec.result(), log);
   } catch (error) {
     log.error(
-      `[quality-gate] gate did not run: ${gate.command.join(" ")} @ ${gate.root} — ${messageOf(error)}`,
+      `[quality-gate] gate did not run: ${gateCommandText(gate)} @ ${gate.root} — ${messageOf(error)}`,
     );
     const cause = messageOf(error);
     outcome = isSandboxUnavailable(error)
@@ -1389,6 +1442,9 @@ interface GateRuntime {
   inFlightGates: Set<Promise<void>>;
   /** shell 缺失警告只发一次（无 shell 静默通过要可观测，但不刷屏）。 */
   shellWarned: boolean;
+  /** 事件读面缺席/读失败各只警告一次（整条门禁面静默失活必须可见，但不逐回合刷屏）。 */
+  queryMissingWarned: boolean;
+  queryReadWarned: boolean;
   /** 插件已卸载（disposer 已跑）：新到的收口整体放弃——不读事件、不开门禁、不注入。 */
   disposed: boolean;
 }
@@ -1466,7 +1522,7 @@ function accumulatorOf(rt: GateRuntime, sessionId: string): EditAccumulator {
  * tool/result 的 isError 标记失败 callId，只记成功的。
  * turn-stopping 时本回合 call+result 同处一个增量窗，单次扫描即可关联；无 callId 的事件
  * （异常/旧形状/测试 mock）保守直记，避免漏门禁。
- * fork 前缀修复（源码核对 0.1.3 后落地）：子代理会话 fork 自父会话时，
+ * fork 前缀：子代理会话 fork 自父会话时，
  * 事件流含父事件前缀，游标从 0 首读会把父会话的历史编辑一并计入、多跑门禁。
  * Session.inheritedEventCount（0.1.2-rc.1 起公开只读）给出 fork 切点——首读下限
  * 取切点而非 0，父前缀天然跳过；缺属性退回 0（旧行为，保守不漏门禁）。
@@ -1478,12 +1534,27 @@ async function readEditedFiles(
 ): Promise<void> {
   const { session } = agent;
   const sessionId = session.id;
-  const window = await resolveEventWindow(
-    rt.svc.get("sessionQuery"),
-    sessionId,
-    rt.lastSeqBySession,
-  );
+  // 事件读面缺席 = 整条门禁面失活（不是"这一回合没有编辑"）：与无 shell 同一档事实，
+  // 所以同样 warn-once，而不是裸 return。读失败（会话已卸载/存储读不出/契约外交付）
+  // 可能是逐会话的瞬时态，也只说一次——否则每个回合刷一行。
+  const query = rt.svc.get("sessionQuery");
+  if (query === undefined) {
+    if (!rt.queryMissingWarned) {
+      rt.queryMissingWarned = true;
+      rt.log.warn(
+        "[quality-gate] sessionQuery service unavailable; edit accounting is off, so no gate will run",
+      );
+    }
+    return;
+  }
+  const window = await resolveEventWindow(query, sessionId, rt.lastSeqBySession);
   if (window === undefined) {
+    if (!rt.queryReadWarned) {
+      rt.queryReadWarned = true;
+      rt.log.warn(
+        "[quality-gate] session event read returned no window; this turn's gate is skipped (further read failures stay silent)",
+      );
+    }
     return;
   }
   // 游标按"起始 seq + 本次返回数"推进（seq 自 0 连续，见 resolveEventWindow 的切片注记）。
@@ -1775,7 +1846,7 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   await readEditedFiles(rt, agent, acc);
   const dropped = acc.droppedCount();
   const files = acc.drain();
-  // 500-cap 淘汰可观测（drain 已清零计数，先读后排）
+  // 累加器容量上限的淘汰要可观测（drain 已清零计数，先读后排）
   if (dropped > 0) {
     rt.log.warn(
       `[quality-gate] ${sessionId}: ${dropped} edited file(s) evicted from accumulator cap; gate may miss their roots`,
@@ -1891,6 +1962,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
     gateAbort: new AbortController(),
     inFlightGates: new Set<Promise<void>>(),
     shellWarned: false,
+    queryMissingWarned: false,
+    queryReadWarned: false,
     disposed: false,
   };
 
@@ -1920,7 +1993,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 放弃），再 abort 在飞门禁（shell 执行随组合信号终止、迟到结果就地丢弃），最后 await
   // 全部批次闭包收敛才真正离场——只置 disposed 旗不够：门禁子进程会活过卸载、结果被静默
   // 丢弃。返回 Promise 合法：cordis 的 disposer 允许 async（"they may be async, in which
-  // case unloading awaits them"，installed @deepseek-ai/cordis/lib/types/fiber.d.ts:36-38）。
+  // case unloading awaits them"，installed @deepseek-ai/cordis/lib/types/fiber.d.ts:36-40）。
   // 会话级记账（配额/游标/累加器）随之废弃，不留跨代残留。
   svc.effect(() => () => {
     rt.disposed = true;

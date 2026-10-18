@@ -28,7 +28,7 @@ export interface AccumulatorOptions {
 export class EditAccumulator {
   private readonly files = new Set<string>();
   private readonly maxFiles: number;
-  /** 容量淘汰累计丢弃数：drain 时清零（500-cap 静默淘汰要可观测）。 */
+  /** 容量淘汰累计丢弃数：drain 时清零（静默淘汰要可观测）。 */
   private dropped = 0;
 
   public constructor(options: AccumulatorOptions = {}) {
@@ -53,16 +53,15 @@ export class EditAccumulator {
   }
 
   /**
-   * 淘汰插入序最旧的一项并计数。调用点已保证集合非空（`size >= maxFiles >= 1`，本包
-   * maxFiles 只取默认 500 或测试里的 2），所以原意是**取首项这一次动作**，不是迭代——
-   * 旧写法拿 `for…of` + 无条件 `break` 伪装单次取值，那正是 eslint(no-unreachable-loop)
-   * 判的「循环体只允许一次迭代」：循环结构在这里没有承载任何语义。改成直接取首个元素，
-   * 单次淘汰的行为（删最旧 + 计数）与原样一致。
+   * 淘汰插入序最旧的一项并计数。`maxFiles` 配成 0 时调用点对空集也成立，所以取到的首项
+   * 可以不存在——那一支什么都不做，由该退化配置的用例钉住。
+   * 这里只需要**取首项这一次动作**，不需要迭代：`for…of` + 无条件 `break` 正是
+   * eslint(no-unreachable-loop) 判的「循环体只允许一次迭代」——循环结构在这里不承载任何语义。
    */
   private evictOldest(): void {
     const [oldest] = this.files;
     if (oldest === undefined) {
-      // 空集 = 无最旧可淘汰，什么都不做（原 for-of 的同一形状）。调用点保证正常配置走不到。
+      // 空集 = 无最旧可淘汰，什么都不做。默认配置下调用点走不到这一支。
       return;
     }
     this.files.delete(oldest);

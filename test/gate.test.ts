@@ -117,7 +117,7 @@ describe("gate-detect：项目门禁命令自动探测", () => {
 
   it("TypeScript 项目（package.json + tsconfig.json，无 workspace）→ tsc --noEmit", () => {
     const roots: ProjectRoot[] = [{ root: "/w/ts", files: [PKG_JSON, TSCONFIG, "index.ts"] }];
-    assert.deepEqual(detectGate(roots), [{ root: "/w/ts", command: ["npx", "tsc", "--noEmit"] }]);
+    assert.deepEqual(detectGate(roots), [{ root: "/w/ts", command: ["tsc", "--noEmit"] }]);
   });
 
   it("多项目根各得各的门禁（每根一条，互不影响）", () => {
@@ -154,7 +154,7 @@ describe("gate-detect：项目门禁命令自动探测", () => {
 describe("gate-detect：files 为根目录相对名", () => {
   it("相对名匹配清单（绝对路径输入不匹配——归并由 host 层负责）", () => {
     const roots: ProjectRoot[] = [{ root: "/w", files: [PKG_JSON, TSCONFIG] }];
-    assert.deepEqual(detectGate(roots)[0]?.command, ["npx", "tsc", "--noEmit"]);
+    assert.deepEqual(detectGate(roots)[0]?.command, ["tsc", "--noEmit"]);
     // 绝对路径输入不触发（防御：探测只认相对名）
     const abs: ProjectRoot[] = [{ root: "/w", files: ["/w/package.json"] }];
     assert.deepEqual(detectGate(abs), []);
@@ -163,8 +163,8 @@ describe("gate-detect：files 为根目录相对名", () => {
 
 describe("gate-detect：假失败回归（门禁误报 HOME 的 npm init 空壳）", () => {
   it("只有 package.json、无 tsconfig.json → 不发 tsc 门禁（HOME 的 npm init 空壳）", () => {
-    // 实测事故：主目录下的 package.json 是 npm init 空壳（无 tsconfig、无 typescript），
-    // 被当 TS 项目发 `npx tsc --noEmit` → npx 自动装弃用 stub 包 tsc@2.0.4 → exit 1 → 假失败。
+    // 实测事故：主目录下的 package.json 是 npm init 空壳（无 tsconfig），
+    // 被当 TS 项目发 tsc 门禁 → 无配置可读 → 假失败注入。tsconfig 是必要条件。
     const roots: ProjectRoot[] = [{ root: "/home/dev", files: [PKG_JSON] }];
     assert.deepEqual(detectGate(roots), []);
   });
@@ -173,7 +173,6 @@ describe("gate-detect：假失败回归（门禁误报 HOME 的 npm init 空壳�
     assert.deepEqual(detectGate([{ root: "/w", files: [PKG_JSON] }]), []);
     assert.deepEqual(detectGate([{ root: "/w", files: [TSCONFIG] }]), []);
     assert.deepEqual(detectGate([{ root: "/w", files: [PKG_JSON, TSCONFIG] }])[0]?.command, [
-      "npx",
       "tsc",
       "--noEmit",
     ]);
@@ -202,9 +201,7 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
         scripts: ["build", "test"],
       },
     ];
-    assert.deepEqual(detectGate(roots), [
-      { root: "/w/nocheck", command: ["npx", "tsc", "--noEmit"] },
-    ]);
+    assert.deepEqual(detectGate(roots), [{ root: "/w/nocheck", command: ["tsc", "--noEmit"] }]);
   });
 
   it("workspace 根无 check 脚本且不是 TS 工程 → 一条门禁都不给（宁缺毋滥）", () => {

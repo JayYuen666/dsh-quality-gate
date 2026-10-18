@@ -12,10 +12,10 @@ import type { SlotRegistry } from "@deepseek-ai/dsh-client-ui-renderer/client";
 import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-settings/client";
 // 槽位契约的所有权在属主包：`plugins.bundle.config` 由 plugin-manager 通过
 // `declare module '@deepseek-ai/dsh-client-ui-slots' { interface SlotMap }` 交出
-// （installed `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:73-104`，
+// （installed `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:8-10`，
 // 文件头明写「A registrant merges this contract with `import type` and registers
-// through `ctx.slots`; it never imports this package at runtime」）。本包过去没有那份
-// merge，也没有手抄一份——结果是 `ctx.slots.inject("plugins.bundle.config", …)` 的槽位名
+// through `ctx.slots`; it never imports this package at runtime」；那份 merge 在 :83）。
+// 没有那份 merge 时，`ctx.slots.inject("plugins.bundle.config", …)` 的槽位名
 // 一直只是个自由 `string`，拼错了编译器不说话。抄一次就多一处漂移点，而属主的 dts 现在是
 // 本包 devDependency，编译器可以替我们对表。
 // 这里取 `ConfigPageForm` 是**一举两得**：既是把那份 merge 载入 program 的入口（TS 会
@@ -23,6 +23,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
+import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 
@@ -34,11 +35,11 @@ const NS: LocaleNs = "quality-gate";
 //  - 下面这个常量 = 本包在 profile 里那条 bundle 的**包名**，只当槽位 key 用。
 // `plugins.bundle.config` 是按 bundle 包名 keyed 的槽位：宿主把注册项的 key 与
 // bundle 包名精确相等匹配后才渲染（installed
-// dsh-client-ui-plugin-manager/lib/client.js:1821 的
+// dsh-client-ui-plugin-manager/lib/client.js:2907 的
 // `renderSlot("plugins.bundle.config", { view: "page" }, { entryKey: pkg.name })` →
-// dsh-client-ui-renderer/lib/client.js:1154 的 `e.options.key === opts?.entryKey`；
-// 同文件 :2698 的 `configured: ledger.bundles.has(openPkg.name)` 读的就是这批 key），
-// 契约文本 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:96-100
+// dsh-client-ui-renderer/lib/client.js:1179 的 `e.options.key === opts?.entryKey`；
+// 同文件 :3979 的 `configured: ledger.bundles.has(openPkg.name)` 读的就是这批 key），
+// 契约文本 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:112-116
 // （"keyed by the bundle's package name"）。
 // 写成裸条目 id（`quality-gate`）时 ledger 里没有这个键 → 插件页永不出卡。
 // 包名真源：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；
@@ -78,12 +79,13 @@ const CARD_CSS = [
 
 /** 客户端配置面直接取官方声明：`@deepseek-ai/dsh-client-ui-settings/client` 交出的
  *  `ConfigForm<T>`（getSnapshot / subscribe / mutate / set / unset）与其快照
- *  `ConfigFormSnapshot<T>`（installed `lib/types/client/config-form-types.d.ts:6-74`）。
- *  原先这里手抄了一份 `getSnapshot: () => unknown`，快照字段全靠 fieldOf 逐位再解析一遍
+ *  `ConfigFormSnapshot<T>`（installed `lib/types/client/config-form-types.d.ts:6-29`，
+ *  `ConfigForm` 在 `:33-71`）。
+ *  手抄一份 `getSnapshot: () => unknown` 的话，快照字段就得靠 fieldOf 逐位再解析一遍
  *  ——那个解析器只是丢失类型的补救，不是宿主契约（宿主侧 provider 会 decode/derive）。
  *  ⚠ 官方 `configForms.get(entryId)` 返回的表单**没有 dispose()**（表单归 provider 持有），
  *  且 `set`/`unset` 多了受理位：true=宿主受理，false=拒绝或被跳过，只有传输失败才 reject。
- *  本卡失败面仍以 Promise 拒绝为准，受理位即弃（这轮只换类型源，不改行为）。 */
+ *  本卡失败面仍以 Promise 拒绝为准，受理位即弃（只换类型源，不改行为）。 */
 export type EntryForm = ConfigForm<Record<string, unknown>>;
 
 /**
@@ -97,7 +99,7 @@ export type LocaleCatalog = Record<BuiltInLocaleId, LocaleDictOf<typeof NS>>;
 /** 本卡自己的渲染视模型（官方快照的有用子集 + 兜底值）。
  *  `status`/`writable` 两位不再手写联合/裸布尔：它们取自属主包交给配置页的那份官方状态
  *  （`ConfigPageForm['state']`，installed `dsh-client-ui-plugin-manager/lib/types/client/
- *  slot-contract.d.ts:150-155`，其类型就是官方 `ConfigFormSnapshot<Record<string, unknown>>`
+ *  slot-contract.d.ts:166-168`，其类型就是官方 `ConfigFormSnapshot<Record<string, unknown>>`
  *  的再投影）。宿主把 status 的取值域或 writable 的必选性一改，这里当场红。
  *  两者都满足才允许写，故保持**必选**，不用可选位假装它们会缺；`value` 是本卡的兜底
  *  收窄（官方 `value: T | undefined` → 首个快照受理前落成空对象供渲染）。 */
@@ -265,20 +267,6 @@ function TextInputRow(props: TextInputRowProps): ReactNode {
       }),
     ),
   );
-}
-
-/** touched 层与快照的差异字段（值语义比较；undefined 与缺失等价）。 */
-export function diffTouched(
-  touched: Record<string, unknown>,
-  value: Record<string, unknown>,
-): string[] {
-  const out: string[] = [];
-  for (const key of Object.keys(touched)) {
-    if (JSON.stringify(touched[key] ?? null) !== JSON.stringify(value[key] ?? null)) {
-      out.push(key);
-    }
-  }
-  return out;
 }
 
 interface SaveBarProps {
@@ -659,7 +647,7 @@ function DgCard(props: {
  *   **编译期受检**的：`inject`/`register` 的 key 参数域就是 `keyof SlotMap & string`，
  *   `plugins.bundle.config` 能过靠的是文件头那条 `import type` 把属主 merge 载入 program。
  * - `configForms`：只投影用到的 `get`。官方 `ConfigForms.get` 是泛型
- *   （`<T>(entryId) => ConfigForm<T>`，installed `config-form.d.ts:142`），且
+ *   （`<T>(entryId) => ConfigForm<T>`，installed `config-form.d.ts:137`），且
  *   `ConfigForms` 同样是 Service 类 → 既不能整类型用，也不能把 `Pick` 交给桩件；
  *   这里把 `T` 钉在本卡唯一取的那张表单上，返回面仍是官方 `ConfigForm`。
  * - `locale`：官方 `@deepseek-ai/dsh-client-locale` 的 client 面（`LocaleRuntime`，installed
@@ -685,7 +673,7 @@ export interface ClientCtx {
   slots: Pick<SlotRegistry, "inject" | "register">;
   /** 0.1.7 的配置表单服务（installed
    *  `dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98` 交出
-   *  `Context.configForms`，`get:142` 按 profile 条目 id 取那张共享表单）：取代已随宿主
+   *  `Context.configForms`，`get:137` 按 profile 条目 id 取那张共享表单）：取代已随宿主
    *  移除的 `settingsScope`（installed 全树零命中）。注入只需 `configForms` 本身——
    *  写侧的 `remote.settings` 由 provider 自己的 fiber 承担（同文件 :113-118 明写
    *  「letting a shared form write through the caller's context would make every caller
@@ -749,19 +737,19 @@ function apply(ctx: ClientCtx): void {
   // 卡片文案交给官方 locale：把本包两语字典一次性交给**类型化**那条 register 重载
   // （官方要求每个内置 locale 都在，缺一门即编译期红；disposer 随 effect 回收），再
   // bind 出稳定的取文案函数交给卡片。语言切换由宿主驱动 slot 重渲染，无需重载页面。
-  // 一次性交齐与旧的两份逐语注册在宿主侧是**同一条代码路径**：installed
-  // dsh-client-locale/lib/client.js:1379-1405 的 `register(ns, localeOrDicts, dict)` 在
+  // 两份字典一次性交齐走的是宿主同一条代码路径：installed
+  // dsh-client-locale/lib/client.js:1387-1413 的 `register(ns, localeOrDicts, dict)` 在
   // 第二参不是字符串时走 `Object.entries(localeOrDicts)`，两份字典进同一个 `pairs`，
-  // 返回的是**一个**回收全部 pairs 的 disposer（旧写法是两个 disposer 手工串起来）。
+  // 返回的是**一个**回收全部 pairs 的 disposer（逐语各交一份就得手工串两个 disposer）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "quality-gate-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {
-        // 0.1.6：settings.plugin.item 已删除；plugins.bundle.config 按 bundle 包名 keyed。
-        // 该槽位仍在（installed
-        // dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:100），本段
-        // 不动——换掉的只是它读写的表单来源，以及 key：用 BUNDLE_PKG（bundle 包名），
+        // plugins.bundle.config 按 bundle 包名 keyed，且没有 settings.plugin.item 那枚槽位
+        // （installed
+        // dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:116），本段
+        // 不动——表单来源与 key 各归各处：key 用 BUNDLE_PKG（bundle 包名），
         // **不是** NS（NS 只喂 configForms.get()，见文件头）。
         name: "plugins.bundle.config",
         key: BUNDLE_PKG,
@@ -780,15 +768,15 @@ function apply(ctx: ClientCtx): void {
       },
       DgCard,
     );
-    // disposer 只 unregister()，**不 dispose 表单**：0.1.7 的 `configForms.get(entryId)`
-    // 交回的是 provider 自己持有的共享表单（installed config-form.d.ts:138-142
+    // disposer 只 unregister()，**不 dispose 表单**：`configForms.get(entryId)`
+    // 交回的是 provider 自己持有的共享表单（installed config-form.d.ts:133-137
     // "The entry's form, owned by this provider"），接口 `ConfigForm`
-    // （config-form-types.d.ts:36-74）里根本没有 dispose，消费者无从销毁。slot
+    // （config-form-types.d.ts:33-71）里根本没有 dispose，消费者无从销毁。slot
     // collapse 会调用本 disposer 并在再次声明时**重跑工厂**（installed
     // dsh-client-ui-renderer/lib/types/client/registry.d.ts:100 "Collapse disposes the
     // effect and a later declaration runs it again"）——表单共享且长活，所以重跑后写入
-    // 依然落盘；旧 `settingsScope` 那种「离开插件页一次之后 scope 永久 disposed、每次
-    // 保存被静默丢弃」的坑（0.1.6 的 fiber 级 dispose）随该服务一起消失。
+    // 依然落盘；换成消费者自己持有一份可 disposed 的 scope，就会长出「离开插件页一次之后
+    // scope 永久 disposed、每次保存被静默丢弃」那一类坑。
     return unregister;
   });
 }

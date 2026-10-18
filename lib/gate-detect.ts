@@ -29,7 +29,7 @@ export type GateCommand =
   | readonly ["pnpm", "check"]
   | readonly ["cargo", "check"]
   | readonly ["ruff", "check", "."]
-  | readonly ["npx", "tsc", "--noEmit"];
+  | readonly ["tsc", "--noEmit"];
 
 /** 一个根探测出的门禁：在该根下用 shell 执行的命令参数表。 */
 export interface Gate {
@@ -67,9 +67,9 @@ function gateForRoot(entry: ProjectRoot): Gate | undefined {
     gate = { root, command: ["ruff", "check", "."] as const };
   } else if (has("package.json") && has("tsconfig.json")) {
     // 必须有 tsconfig.json 才算 TS 项目。裸 package.json 不够——HOME 里 `npm init` 的空壳
-    // （无 tsconfig、无 typescript）也会被发 tsc 门禁，而 `npx tsc` 在无 typescript 时会自动
-    // 安装已弃用的 stub 包 `tsc@2.0.4`，打印横幅并 exit 1 → 假失败注入。
-    gate = { root, command: ["npx", "tsc", "--noEmit"] as const };
+    // 无 tsconfig，发给它 tsc 只会制造假失败。命令里的 `tsc` 是逻辑名：真正的入口在 host
+    // 执行时解析（工程本地 typescript 优先，其次本包依赖的那份），不经 npx 下载。
+    gate = { root, command: ["tsc", "--noEmit"] as const };
   }
   return gate;
 }
