@@ -18,7 +18,7 @@
 
 import { buildFeedbackText } from "./feedback-content.ts";
 import type { GateFeedbackInput } from "./feedback-content.ts";
-import { deriveAgentId, resolveServiceId } from "./gateway-target.ts";
+import { deriveAgentId } from "./gateway-target.ts";
 import type { GatewayTarget } from "./gateway-target.ts";
 import type { QualityGateMessages } from "./messages.ts";
 
@@ -31,6 +31,13 @@ export async function pushGateFeedback(
   target: GatewayTarget,
   messages: QualityGateMessages,
 ): Promise<void> {
+  // 目标面在**发请求之前**校验：本函数是导出的公共入口，不能假定调用方已走过
+  // resolveGatewayUrl 的归一（空 url 会拼出相对路径、fetch 抛 `Failed to parse URL`；
+  // 空 key 会发出 `Authorization: Bearer `，网关侧只会回 401，光看日志分辨不出是配置空）。
+  const base = target.url.trim().replace(/\/+$/u, "");
+  if (base === "" || target.key.trim() === "") {
+    throw new Error("投递目标不完整：url 与 key 都必须非空（目标面应由调用方解析后传入）");
+  }
   const agentId = deriveAgentId(input.cwd);
   const content = buildFeedbackText(input, messages);
   const payload = JSON.stringify({
@@ -38,19 +45,28 @@ export async function pushGateFeedback(
     agent_id: agentId,
     messages: [{ role: "assistant", content }],
   });
-  const res = await fetch(`${target.url}/v2/conversation/add`, {
+  const res = await fetch(`${base}/v2/conversation/add`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${target.key}`,
-      "x-tdai-service-id": resolveServiceId(),
+      "x-tdai-service-id": target.serviceId,
       "Content-Type": "application/json",
     },
     body: payload,
     signal: AbortSignal.timeout(FEEDBACK_TIMEOUT_MS),
   });
+  // 先消费 body 再判状态：非 2xx 时直接 throw 会把响应体连同连接一起留在未消费状态，
+  // undici 于是不复用该连接（keep-alive 槽位被占着到超时）。读取失败不影响"已送达"结论。
+  const drained = await res.arrayBuffer().catch(() => null);
   if (!res.ok) {
-    throw new Error(`gateway feedback HTTP ${res.status}`);
+    // 只带状态码时调用方（catch 里那条 warn）说不出网关为什么拒：401 与 400 的修法完全不同。
+    // 正文截断到一小段，避免把网关的 HTML 错误页整页塞进日志。
+    const detail = drained === null ? "" : new TextDecoder().decode(drained).trim().slice(0, 200);
+    throw new Error(
+      detail === ""
+        ? `gateway feedback HTTP ${res.status}`
+        : `gateway feedback HTTP ${res.status}：${detail}`,
+      { cause: drained },
+    );
   }
-  // 消费 body（连接可复用；body 读取失败不影响"已送达"结论）
-  await res.arrayBuffer().catch(() => null);
 }

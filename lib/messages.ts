@@ -143,13 +143,20 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
 
 /** 渲染模板里的 {name} 占位符；未提供的名字留空串（宁可少一段说明，也不给模型留裸花括号）。
  *  与 client 半官方 `@deepseek-ai/dsh-client-locale` 的 Translate 插值同语义（宿主同规则）。
+ *
+ *  查参数用 `Object.hasOwn` 而不是直接下标：模板里若出现 `{constructor}` / `{toString}` 这类被
+ *  Object.prototype 覆盖的名字，裸下标取到的是函数对象、`String()` 之后会渲染成源码串，
+ *  与"未提供的名字留空串"这条契约相反。
  *  @param text - 字典里的整行模板。
  *  @param params - 占位符名 → 值（数字会转成字符串）。
  *  @returns 替换后的文本。
  */
 export function renderTemplate(text: string, params: Record<string, string | number>): string {
-  return text.replaceAll(/\{(?<key>\w+)\}/gu, (_all: string, key: string) => {
-    const value = params[key];
-    return value === undefined ? "" : String(value);
-  });
+  // 先摊成 Map：`Object.entries` 只取自有可枚举键，原型链上的 `constructor` / `toString`
+  // 天然不在表里，于是"未提供的名字留空串"这条契约由数据结构保证，而不是靠一次判空。
+  const provided = new Map(Object.entries(params));
+  return text.replaceAll(
+    /\{(?<key>\w+)\}/gu,
+    (_all: string, key: string) => provided.get(key)?.toString() ?? "",
+  );
 }

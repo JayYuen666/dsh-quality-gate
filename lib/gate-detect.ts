@@ -18,6 +18,14 @@ export interface ProjectRoot {
    * 调用方（host）读盘后传入，本函数不碰 fs——保持纯函数可测性。
    */
   scripts?: readonly string[];
+  /**
+   * 根 pyproject.toml 里是否真有 ruff 配置段（`[tool.ruff]` 一族）。
+   *
+   * false 与 undefined 的差别只在信息面，不在判据面：两种都不产 ruff 门禁。分出一个
+   * false 是为了让"读过 pyproject、里面没有 ruff 段"与"根本没有 pyproject"在入参上
+   * 可区分——两者的真实盘面不同，写测试时不必靠猜。
+   */
+  ruffConfigured?: boolean;
 }
 
 /**
@@ -51,9 +59,26 @@ function pnpmCheckReady(scripts: readonly string[] | undefined): boolean {
   return scripts?.includes("check") === true;
 }
 
-/** 从 ProjectRoot（根目录相对名清单 + 已声明脚本）判定单根门禁。 */
+/**
+ * `ruff check .` 是否可用：必须有 ruff 自己的配置面，**信息缺失时一律判否**。
+ *
+ * 为什么 pyproject.toml 单独不算证据：它不是 ruff 的配置标记，而是 Python 工程最常见的
+ * 元数据文件——只写 `[project]`、lint 交给别的工具（flake8 / pylint / ruff 的编辑器集成）
+ * 的工程大量存在。对这类工程发 `ruff check .`，一旦宿主 PATH 上有 ruff，就会拿 ruff 的
+ * 默认规则集去判一个从未声明用 ruff 的项目，产出与使用者意图无关的告警，再经同一个注入
+ * 通道被当成真实缺陷。这正是本模块要压住的假失败，方向与 pnpmCheckReady 一致。
+ *
+ * 判据收在两处**声明**上：`ruff.toml`（ruff 专属文件名，在场即声明）与 pyproject 里真有
+ * 的 `[tool.ruff]` 一族段（由 host 读盘后经 ruffConfigured 传入）。二者都缺＝没有信息，
+ * 按保守口径不给门禁——代价只是这一轮少一次自动核验，用户可以自己跑。
+ */
+function ruffGateReady(files: readonly string[], ruffConfigured: boolean | undefined): boolean {
+  return files.includes("ruff.toml") || ruffConfigured === true;
+}
+
+/** 从 ProjectRoot（根目录相对名清单 + 已声明脚本 + ruff 配置事实）判定单根门禁。 */
 function gateForRoot(entry: ProjectRoot): Gate | undefined {
-  const { root, files, scripts } = entry;
+  const { root, files, scripts, ruffConfigured } = entry;
   const has = (name: string): boolean => files.includes(name);
   // 优先级从高到低：workspace 全套 > Rust > Python > 裸 TS
   let gate: Gate | undefined;
@@ -61,9 +86,7 @@ function gateForRoot(entry: ProjectRoot): Gate | undefined {
     gate = { root, command: ["pnpm", "check"] as const };
   } else if (has("Cargo.toml")) {
     gate = { root, command: ["cargo", "check"] as const };
-  } else if (has("pyproject.toml") || has("ruff.toml")) {
-    // ruff.toml 分支不是死码：host 的 MANIFESTS 已登记 ruff.toml，只有 ruff 配置的
-    // Python 工程也能拿到根并落到这里。
+  } else if (ruffGateReady(files, ruffConfigured)) {
     gate = { root, command: ["ruff", "check", "."] as const };
   } else if (has("package.json") && has("tsconfig.json")) {
     // 必须有 tsconfig.json 才算 TS 项目。裸 package.json 不够——HOME 里 `npm init` 的空壳

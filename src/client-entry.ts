@@ -332,7 +332,13 @@ interface SaveChannels {
   touched: Record<string, unknown>;
   setBusy: (busy: boolean) => void;
   setSaveError: (error: string | null) => void;
-  setTouched: (touched: Record<string, unknown>) => void;
+  /** 按 updater 改写 touched：要按「此刻的」草稿层决定保留哪些键，取值不能是 save 起步时的旧快照。 */
+  setTouched: (update: (prev: Record<string, unknown>) => Record<string, unknown>) => void;
+}
+
+/** 值语义相等（与 shared 的 diffTouched 同口径）：表单值是标量与数组，引用相等会把等值数组判成改动。 */
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
 /**
@@ -340,6 +346,10 @@ interface SaveChannels {
  * true=宿主受理；false=拒绝或写入被跳过（官方语义："refuses stale revisions"；
  * 传输失败才 reject）。false 或 rejection 都**不清 touched**——否则宿主拒写时
  * 卡片仍显示"已保存"，用户修改被静默丢弃。
+ *
+ * 成功后也只清**本次真正写下的那些键**：保存期间只有保存按钮被禁用，输入框仍可编辑，
+ * 期间产生的新改动若一并清掉就是静默丢失。这里的判据是「当前草稿值仍等于本次快照值」——
+ * 相等说明这条已落到宿主、可以从草稿层移除；不等说明用户又改过，保留下来重新变脏。
  */
 async function writeTouched(channels: SaveChannels): Promise<void> {
   const { t, set, unset, keys, touched, setBusy, setSaveError, setTouched } = channels;
@@ -359,7 +369,18 @@ async function writeTouched(channels: SaveChannels): Promise<void> {
       }
     }
     setBusy(false);
-    setTouched({});
+    setTouched((prev) => {
+      // 只保留「本次没写下的键」：写入期间只有保存按钮被禁用，输入框仍可编辑，
+      // 期间产生的新改动若一并清掉就是静默丢失。
+      const next: Record<string, unknown> = {};
+      for (const [key, now] of Object.entries(prev)) {
+        const written = keys.includes(key) && sameValue(now, touched[key]);
+        if (!written) {
+          next[key] = now;
+        }
+      }
+      return next;
+    });
   } catch (error) {
     console.error("[quality-gate] save write failed:", error);
     setBusy(false);

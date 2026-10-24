@@ -1,0 +1,38 @@
+# 依赖更新：action 一条线。
+#
+# action 侧覆盖本仓的全部 workflow 引用：这些引用都钉了 commit SHA，Dependabot 提的 PR
+# 会把「换了哪个提交」变成一次可评审的 diff。
+#
+# 这里刻意**没有** npm 更新块。本仓的依赖分三类，Dependabot 对其中两类做不出有意义的 PR：
+#   · catalog: 书写的那批，范围的真源在伞根 pnpm-workspace.yaml，改这里改不动它；
+#   · 字面版本书写的那批，绝大多数在 overrides 里被钉成确切版本（宿主族统一 0.2.1-rc.2），
+#     Dependabot 提的 PR 会被 overrides 解析回原版本，合进去也不改变安装树。
+# 例外有两处，且都留在这里明写：devDependencies 的 `react` 写 `^19.3.0`、peer 的
+# `@deepseek-ai/dsh` 写 `^0.2.1-rc.2`，这两条都不在 overrides 里，会随 lockfile 漂移。
+# 它们仍不该交给更新机器人：react 的版本由宿主客户端模块表决定（与宿主换 React 大版本
+# 是同一件事），`@deepseek-ai/dsh` 的 peer 面是发布契约，两者都要人工决定，不是「有新版就升」。
+# 代价也说清：这两条目前没有任何 PR 提醒。要升它们只能由人盯宿主版本线。
+#
+# 冷却（cooldown）刻意不写：Dependabot 对**版本更新**默认已经套 3 天冷却（新版本发布满 3 天
+# 才进版本更新 PR），显式配一遍同样的值不改变行为。安全更新不吃这层冷却——那类更新应当立刻提，
+# 而本仓的 action 引用都钉着 commit SHA，安全更新也只能在评审后才被合并。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      # 本仓引用的 action 全部放进一组，避免每个 action 各占一个 PR 去抢同一个名额。
+      # 模式按 `<owner>/<repo>` 写：通配符覆盖该仓库下的全部条目（codeql-action 的 init、
+      # analyze、upload-sarif 就是三条不同的引用），跨仓库不会互相匹配，所以各 owner 各列一条。
+      # 末尾那条 `*` 是兜底：新增 workflow 引进别的 owner 的 action 时它默认入组，
+      # 不会悄悄掉到组外单独占一个 PR 名额（名字匹配靠前几条，兜底不改变现有归属）。
+      actions:
+        patterns:
+          - "actions/*"
+          - "pnpm/*"
+          - "github/codeql-action*"
+          - "ossf/scorecard-action*"
+          - "*"

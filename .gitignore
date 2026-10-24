@@ -1,5 +1,19 @@
 node_modules/
-client.js
+# 构建产物：只由根目录 build-client.mjs / build-host.mjs 产出（package.json 的
+# main/exports/files 也都指向根级），所以按仓库根锚定，别让嵌套同名文件被一起忽略。
+/client.js
 .toolchain/
-host.js
-coverage/
+/host.js
+/coverage/
+# 本地调试可能顺手落下的凭据与中间产物。本仓的 .npmrc 是刻意跟踪的（只含 registry
+# 设置、不含 token），别把它写进来。
+.env
+.env.*
+*.pem
+*.key
+*.tgz
+*.log
+.DS_Store
+
+# 统一构建件的原子落盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
+/.tmp/

@@ -82,7 +82,7 @@ import type { Session, SessionId, SessionLogOffset } from "@deepseek-ai/dsh-sess
 // lib/types/index.d.ts:23-27）：type-only，运行时由 ctx 注入。见下面 SessionQueryFace。
 import type { SessionObservation } from "@deepseek-ai/dsh-session-query";
 import type { Agent } from "@deepseek-ai/dsh-agent";
-import { EditAccumulator } from "./lib/accumulator.ts";
+import { EDIT_TOOLS, EditAccumulator } from "./lib/accumulator.ts";
 import { detectGate } from "./lib/gate-detect.ts";
 import type { Gate, ProjectRoot } from "./lib/gate-detect.ts";
 import { MESSAGES, renderTemplate } from "./lib/messages.ts";
@@ -94,7 +94,7 @@ import {
   resolveLocalePreference,
 } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 import { pushGateFeedback } from "./lib/gateway-feedback.ts";
-import { isCredentialSafeUrl, resolveGatewayUrl } from "./lib/gateway-target.ts";
+import { isCredentialSafeUrl, resolveGatewayUrl, resolveServiceId } from "./lib/gateway-target.ts";
 import type { GatewayTarget } from "./lib/gateway-target.ts";
 import type { GateFeedbackInput } from "./lib/feedback-content.ts";
 // 共享记账骨架：事件流 → tool/call+tool/result 两张表 + 编辑路径提取，与 danger-guard
@@ -118,11 +118,13 @@ import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
  * 也就永远没有门禁。
  */
 const PKG_MANIFEST = "package.json";
+const TSCONFIG_MANIFEST = "tsconfig.json";
+const PYPROJECT_MANIFEST = "pyproject.toml";
 
 const MANIFESTS = [
   PKG_MANIFEST,
   "Cargo.toml",
-  "pyproject.toml",
+  PYPROJECT_MANIFEST,
   "pnpm-workspace.yaml",
   "ruff.toml",
 ];
@@ -925,9 +927,11 @@ function classifyRun(
   };
 }
 
-/** 是否是会被记账的编辑类工具（edit/write + str_replace_editor）。 */
+/** 是否是会被记账的编辑类工具（edit/write + str_replace_editor）。名单的真源在
+ *  lib/accumulator.ts 的 EDIT_TOOLS：host 先用它过滤、累加器再用同一集合过滤一次，
+ *  两边各写一份时新增编辑器工具只改一侧就会静默分叉。 */
 function isEditTool(name: string): boolean {
-  return name === "edit" || name === "write" || name === "str_replace_editor";
+  return EDIT_TOOLS.has(name);
 }
 
 /**
@@ -940,7 +944,7 @@ function declaredScriptsOf(root: string): readonly string[] | undefined {
   let names: readonly string[] | undefined;
   try {
     // JSON.parse 返回 any：先经 unknown 再守卫投影（不经 unsafe 断言）
-    const raw: unknown = JSON.parse(readFileSync(`${root}/package.json`, "utf8"));
+    const raw: unknown = JSON.parse(readFileSync(path.join(root, PKG_MANIFEST), "utf8"));
     const scripts = fieldOf(raw, "scripts");
     // scripts 不是对象（缺字段 / `"scripts": 42`）与读失败同一口径：names 保持 undefined，
     // 即"没有信息"——不替项目猜一条门禁。
@@ -959,6 +963,35 @@ function declaredScriptsOf(root: string): readonly string[] | undefined {
 /** 数组性判据（**不是** type predicate，故不产生类型收窄；理由见 resolveEventWindow）。 */
 function isArrayDelivery(value: unknown): boolean {
   return Array.isArray(value);
+}
+
+/**
+ * pyproject 里 ruff 段头的字面形状：`[tool.ruff]` 或它的子表 `[tool.ruff.lint]` 等。
+ *
+ * `^` 加 `m` 旗标限定为行首；`[tool.ruff]` 与 `[tool.ruff.<子表>]` 都要认——只写子表、
+ * 不写父表的 pyproject 是常见写法。数组表（`[[tool.ruff...]]`）同样命中段名，一并算声明。
+ */
+const RUFF_SECTION = /^\[\[?tool\.(?:"ruff"|ruff)[\].]/mu;
+
+/**
+ * 根 pyproject.toml 里是否声明了 ruff 配置段（段头形状见 RUFF_SECTION）。
+ *
+ * 只按行首段头字面匹配，不引 TOML 解析器：判据只需要回答"有没有这一段"，而段头在
+ * TOML 里必须独占一行（行内写法 `[a.b] c = 1` 非法），故行首匹配与解析器同解。带引号的
+ * 键形式（`[tool."ruff"]`）在 TOML 里合法且等价，一并认。
+ *
+ * 读不到 / 解码失败 → undefined（"没有信息"），由 gate-detect 按保守口径处理：不发 ruff
+ * 门禁。这里与 declaredScriptsOf 同一方向，理由见 gate-detect 的 ruffGateReady。
+ */
+function ruffConfiguredOf(root: string): boolean | undefined {
+  let configured: boolean | undefined;
+  try {
+    const text = readFileSync(path.join(root, PYPROJECT_MANIFEST), "utf8");
+    configured = RUFF_SECTION.test(text);
+  } catch {
+    configured = undefined;
+  }
+  return configured;
 }
 
 /**
@@ -1071,7 +1104,10 @@ function findManifestRoot(
   let hitDepthLimit = false;
   for (let depth = 0; depth < maxDepth; depth += 1) {
     for (const manifest of MANIFESTS) {
-      if (existsSync(`${dir}/${manifest}`)) {
+      // 拼子项走平台实现：Win32 的路径转换把 `/` 也当分隔符，手拼的混形查得到，但会与别处
+      // 用 path.join 拼出的同一路径成为两个字符串——下面要把 found 当项目根用于比较与缓存键，
+      // 两种写法则会让同一目录看起来是两个根。
+      if (existsSync(path.join(dir, manifest))) {
         found = dir;
         break;
       }
@@ -1098,7 +1134,7 @@ function findManifestRoot(
 function workspaceRootUpgrade(root: string, maxDepth: number): string {
   let up = path.dirname(root);
   for (let depth = 0; depth < maxDepth; depth += 1) {
-    if (existsSync(`${up}/pnpm-workspace.yaml`)) {
+    if (existsSync(path.join(up, "pnpm-workspace.yaml"))) {
       return up;
     }
     const parent = path.dirname(up);
@@ -1117,16 +1153,29 @@ function workspaceRootUpgrade(root: string, maxDepth: number): string {
  * - tsconfig.json 不作为"根标记"（不进 MANIFESTS，避免改动根向上探测的语义），
  *   但要进清单集合——gate-detect 用它区分"真 TS 项目"与"只有 package.json 的空壳"；
  * - scripts：根 package.json 已声明的脚本名清单，交给 gate-detect 判定 pnpm check
- *   是否可用。**这里只做如实登记，不做取舍**（探测策略集中在纯函数里）。
+ *   是否可用。**这里只做如实登记，不做取舍**（探测策略集中在纯函数里）；
+ * - ruffConfigured：根 pyproject.toml 里是否真有 `[tool.ruff]` 一族段，交给 gate-detect
+ *   判定 ruff 门禁是否可用。理由同上——只登记，不取舍。
  */
 function probeProjectRoot(root: string): ProjectRoot {
-  const manifests = MANIFESTS.filter((manifest) => existsSync(`${root}/${manifest}`));
-  if (existsSync(`${root}/tsconfig.json`)) {
-    manifests.push("tsconfig.json");
+  const manifests = MANIFESTS.filter((manifest) => existsSync(path.join(root, manifest)));
+  if (existsSync(path.join(root, TSCONFIG_MANIFEST))) {
+    manifests.push(TSCONFIG_MANIFEST);
   }
   // 没有 package.json 时不读脚本清单（那次 IO 无意义：pnpm 分支要求 package.json 在场）
   const scripts = manifests.includes("package.json") ? declaredScriptsOf(root) : undefined;
-  return scripts === undefined ? { root, files: manifests } : { root, files: manifests, scripts };
+  // 同理：没有 pyproject.toml 时不读它（ruff 的 pyproject 分支要求该文件在场）
+  const ruffConfigured = manifests.includes(PYPROJECT_MANIFEST)
+    ? ruffConfiguredOf(root)
+    : undefined;
+  const entry: ProjectRoot = { root, files: manifests };
+  if (scripts !== undefined) {
+    entry.scripts = scripts;
+  }
+  if (ruffConfigured !== undefined) {
+    entry.ruffConfigured = ruffConfigured;
+  }
+  return entry;
 }
 
 /** 注入载荷组装（id 唯一，同一毫秒多次注入也不碰撞）。 */
@@ -1219,7 +1268,8 @@ async function resolveFeedbackTarget(
   if (hit === undefined) {
     return { ok: false, reason: `凭据 ${cfg.memoryGatewayKeyRef} 未配置（值不落在设置里）` };
   }
-  return { ok: true, target: { url, key: hit.value } };
+  // 服务名在这一层与 url/key 一起解析：投递模块只发它拿到的目标，不再自己去读 env。
+  return { ok: true, target: { url, key: hit.value, serviceId: resolveServiceId() } };
 }
 
 /**

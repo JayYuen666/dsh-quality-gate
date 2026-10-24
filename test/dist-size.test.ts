@@ -1,29 +1,40 @@
-// 产物体积预算：钉的是「第三方实现被内联进发布物」这一类跳变。
+// test/dist-size.test.ts —— 产物体积闸门。
 //
-// 为什么用字节数当判据：这类回归没有更早的报警器。类型检查照绿（外部化与否不影响类型），
-// 单测照绿（本包的测试在源码侧跑），装出去才发现产物里多了一份官方实现的副本——而副本正是
-// 「同一个契约两份声明、各自漂移」事故的起点。所以预算按当前体积上浮一档，只关心**量级**：
-// 正常改文案改逻辑碰不到这个数量级，把整包依赖吃进来一定会。
-import { statSync } from "node:fs";
+// 为什么要有：本仓 `npm run check` 的顺序是 build 在 test 之前，所以这道门读到的是**当轮刚产出**
+// 的产物，不是上一次遗留的。它挡的是「有人在切面里塞进大对象字面量或整段查表」这类回退——
+// 体积不是行为，任何现有用例都不会因此变红，所以必须有一把单独的尺子。
+//
+// 预算怎么定的：取当前实测值上浮约 15%，再向上取整到 500 B。留这一档是给正常演进的——加一条规则、
+// 改一句文案不该立刻要人改预算；把一枚宿主包的实现整段内联进产物一定会顶穿。真需要突破时，改这些
+// 常量并写明理由。
+//
+// 只有 host.js 与 client.js 两项：本仓没有 build-types.mjs，发布面里没有类型声明目录可量。
+import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, it } from "vitest";
 
-const pkgDir = path.join(import.meta.dirname, "..");
+const pkgDir = path.resolve(import.meta.dirname, "..");
 
-/** 每个产物的字节上限。 */
-const BUDGETS: readonly { readonly file: string; readonly maxBytes: number }[] = [
-  // 上限够容纳若干轮文案与判据的增长，不够容纳一枚宿主包的函数体。
-  { file: "host.js", maxBytes: 96 * 1024 },
-  // client 半只有一张设置卡，翻倍即说明有东西被错误打包进来。
-  { file: "client.js", maxBytes: 32 * 1024 },
+/** host 半产物体积预算（实测 61,110 B）：宿主按包名载入它，这些字节是真实装载成本。 */
+const HOST_BUDGET_BYTES = 70_500;
+/** client 半产物体积预算（实测 20,222 B）：浏览器侧加载，按平台计账。 */
+const CLIENT_BUDGET_BYTES = 23_500;
+
+/** 产物文件名与预算的对照。 */
+const BUDGETS: readonly (readonly [string, number])[] = [
+  ["host.js", HOST_BUDGET_BYTES],
+  ["client.js", CLIENT_BUDGET_BYTES],
 ];
 
-describe("发布产物体积", () => {
-  it.each(BUDGETS)("$file 不超过 $maxBytes 字节", ({ file, maxBytes }) => {
-    const stats = statSync(path.join(pkgDir, file));
-    expect(stats.isFile(), `${file} 不在盘上：先跑 pnpm run build && pnpm run build:client`).toBe(
-      true,
+describe("产物体积", () => {
+  it.each(BUDGETS)("%s 不超过 %s 字节预算", (file, budget) => {
+    const bytes = readFileSync(path.join(pkgDir, file)).byteLength;
+    assert.ok(
+      bytes <= budget,
+      `${file} 实测 ${bytes.toLocaleString("en-US")} B，超出预算 ` +
+        `${budget.toLocaleString("en-US")} B：多半是某个切面塞进了大查表或字面量。` +
+        `确属正常演进就改 test/dist-size.test.ts 里对应的预算常量，并写明理由。`,
     );
-    expect(stats.size, `${file} 当前 ${stats.size} 字节，预算 ${maxBytes}`).toBeLessThan(maxBytes);
   });
 });
