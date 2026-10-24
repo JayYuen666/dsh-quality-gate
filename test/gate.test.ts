@@ -3,7 +3,7 @@
 // gate-detect：项目根 → 质量门禁命令的自动探测（ECC stop-format-typecheck 的按项目分组思想）。
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import { EditAccumulator } from "../lib/accumulator.ts";
+import { EDIT_TOOLS, EditAccumulator } from "../lib/accumulator.ts";
 import { detectGate } from "../lib/gate-detect.ts";
 import type { ProjectRoot } from "../lib/gate-detect.ts";
 
@@ -16,6 +16,8 @@ const PKG_JSON = "package.json";
 const WORKSPACE_MANIFEST = "pnpm-workspace.yaml";
 /** 根目录下的 Rust 清单名。 */
 const CARGO_MANIFEST = "Cargo.toml";
+/** 根目录下的 Python 工程元数据文件名（ruff 段的宿主）。 */
+const PYPROJECT = "pyproject.toml";
 /** 根目录下的 TypeScript 配置名（tsc 门禁的必要条件）。 */
 const TSCONFIG = "tsconfig.json";
 /** 记账用例里那个「编辑过的 TS 源码」路径。 */
@@ -67,13 +69,30 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
     assert.ok(!drained.includes("/w/1.ts"), "最旧的被淘汰");
   });
 
-  it("退化配置 maxFiles 0：空集时「无最旧可淘汰」——不删不计数，这笔照常入账", () => {
-    // evictOldest 取的是插入序首项，集合为空时那一项不存在（调用点 size>=maxFiles 在
-    // maxFiles=0 时对空集也成立）。这一支与迁移前 for-of 空迭代同形状：什么都不做。
-    const none = new EditAccumulator({ maxFiles: 0 });
-    none.note("edit", "/w/1.ts");
-    assert.equal(none.droppedCount(), 0, "空集不产生淘汰计数");
-    assert.deepEqual(none.drain(), ["/w/1.ts"]);
+  it("重复编辑要把顺序刷到最近（否则反复编辑的文件最早被淘汰）", () => {
+    const small = new EditAccumulator({ maxFiles: 2 });
+    small.note("edit", "/w/1.ts");
+    small.note("edit", "/w/2.ts");
+    // 再编辑一次 1.ts → 它变成最新，被淘汰的应是 2.ts
+    small.note("edit", "/w/1.ts");
+    small.note("edit", "/w/3.ts");
+    assert.deepEqual(small.drain(), ["/w/1.ts", "/w/3.ts"]);
+  });
+
+  it.each([
+    ["NaN", Number.NaN],
+    ["负数", -1],
+    ["0", 0],
+    ["小数", 2.5],
+  ])("非法 maxFiles（%s）回退默认值：记账照常、不淘汰", (_label, bad) => {
+    // 归一化之前这四种入参各自出问题：NaN 让 `size >= NaN` 恒假（永不淘汰、Set 无限增长），
+    // 负数每次 note 都淘汰一项，0 让容量实际变成 1。合法值为正整数，其余按"没给"处理。
+    const acc2 = new EditAccumulator({ maxFiles: bad });
+    for (let i = 0; i < 10; i += 1) {
+      acc2.note("edit", `/w/${String(i)}.ts`);
+    }
+    assert.equal(acc2.droppedCount(), 0, "默认上限远大于 10，不应产生淘汰");
+    assert.equal(acc2.drain().length, 10);
   });
 
   it("容量淘汰计数可查 droppedCount（drain 后清零，host 侧 warn 用）", () => {
@@ -85,6 +104,12 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
     assert.equal(small.droppedCount(), 1);
     assert.deepEqual(small.drain(), ["/w/2.ts", "/w/3.ts"]);
     assert.equal(small.droppedCount(), 0, "drain 后计数清零");
+  });
+
+  it("accumulator 的 EDIT_TOOLS 是 host 与累加器共用的唯一真源", () => {
+    // host.ts 的 isEditTool 从同一集合取值：两边各写一份时新增编辑器工具只改一侧就会
+    // 静默分叉（只改 host 则累加器丢记账，只改累加器则 host 根本不调用 note）。
+    assert.deepEqual([...EDIT_TOOLS].toSorted(), ["edit", "str_replace_editor", "write"]);
   });
 });
 
@@ -105,14 +130,32 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(detectGate(roots), [{ root: "/w/rs", command: ["cargo", "check"] }]);
   });
 
-  it("纯 Python（pyproject.toml）→ ruff check", () => {
-    const roots: ProjectRoot[] = [{ root: "/w/py", files: ["pyproject.toml", "src/a.py"] }];
+  it("pyproject.toml 里有 [tool.ruff] 段 → ruff check", () => {
+    const roots: ProjectRoot[] = [
+      { root: "/w/py", files: [PYPROJECT, "src/a.py"], ruffConfigured: true },
+    ];
     assert.deepEqual(detectGate(roots), [{ root: "/w/py", command: ["ruff", "check", "."] }]);
   });
 
   it("只有 ruff.toml（无 pyproject）→ 同样拿到 ruff 门禁（host MANIFESTS 已登记该根标记）", () => {
     const roots: ProjectRoot[] = [{ root: "/w/py2", files: ["ruff.toml", "a.py"] }];
     assert.deepEqual(detectGate(roots), [{ root: "/w/py2", command: ["ruff", "check", "."] }]);
+  });
+
+  it("pyproject.toml 在场但无 ruff 段 → 不发 ruff 门禁（假失败回归）", () => {
+    // pyproject.toml 不是 ruff 的配置标记，只是 Python 工程最常见的元数据文件。
+    // 只写 [project]、lint 交给 pytest-flake8 / pylint 的工程大量存在；对它们发
+    // `ruff check .`，宿主 PATH 上只要有 ruff，就会拿默认规则集判一个从未声明用
+    // ruff 的项目，再把结果经同一个注入通道当成真实缺陷。
+    const roots: ProjectRoot[] = [
+      { root: "/w/py3", files: [PYPROJECT, "src/a.py"], ruffConfigured: false },
+    ];
+    assert.deepEqual(detectGate(roots), []);
+  });
+
+  it("pyproject.toml 存在但 ruff 配置信息缺失（undefined）→ 不猜，不发 ruff 门禁", () => {
+    const roots: ProjectRoot[] = [{ root: "/w/py4", files: ["pyproject.toml", "a.py"] }];
+    assert.deepEqual(detectGate(roots), []);
   });
 
   it("TypeScript 项目（package.json + tsconfig.json，无 workspace）→ tsc --noEmit", () => {

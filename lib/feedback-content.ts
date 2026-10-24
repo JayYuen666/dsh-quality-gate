@@ -18,7 +18,18 @@ export interface GateFeedbackInput {
   failure: string;
 }
 
+/** 空白折叠成单个空格并去首尾：让副本身处"一行正文"的契约之内。
+ *  参数收 `unknown` 而不是 `string`：这是运行时边界（门禁执行结果由 spawn 与上游透传拼出来），
+ *  类型注释拦不住 undefined/null。原先直接 `text.replaceAll` 时，异常会冒到
+ *  pushFeedbackToMemory 的 catch 里 → "门禁失败却一条记忆都没写"，且日志里只有一句
+ *  "memory feedback skipped"，看起来像网关挂了。 */
+function oneLine(text: unknown): string {
+  return typeof text === "string" ? text.replaceAll(/\s+/gu, " ").trim() : "";
+}
+
 /** 门禁失败 → 记忆正文：单行化（防换行噪音）。
+ *  三处插值都要折叠：`failure` 来自被检查仓库的自由文本，`command` 来自配置里的自定义命令，
+ *  `root` 可以是任何路径——任一处带换行/制表符，这条"一条记忆正文"就会被 auto-recall 拆成多段。
  *  不截断：截尾会吃掉多根错误里的中间根因；记忆网关的入库限额由网关侧把关，这里送全文。
  *  正文语言随官方 locale 偏好走（messages 由调用方按回合取出后传进来）——这条文本会被
  *  auto-recall 注入后续会话的上下文，是模型读的，不是日志。 */
@@ -26,7 +37,9 @@ export function buildFeedbackText(
   { command, root, failure }: GateFeedbackInput,
   messages: QualityGateMessages,
 ): string {
-  const cmd = command.join(" ");
-  const tail = failure.replaceAll(/\s+/gu, " ").trim();
-  return renderTemplate(messages.memoryFeedback, { command: cmd, root, failure: tail });
+  return renderTemplate(messages.memoryFeedback, {
+    command: oneLine(command.join(" ")),
+    root: oneLine(root),
+    failure: oneLine(failure),
+  });
 }

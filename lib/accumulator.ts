@@ -14,13 +14,17 @@
 const GATED_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|py|json|ya?ml|toml)$/iu;
 
 /** 编辑类工具名。str_replace_editor 是 dsh-base 并存的另一套编辑器
- *  （host 侧只对 create/str_replace/insert 记账，view 只读不入这里）。 */
-const EDIT_TOOLS = new Set(["edit", "write", "str_replace_editor"]);
+ *  （host 侧只对 create/str_replace/insert 记账，view 只读不入这里）。
+ *
+ *  这是**唯一真源**：host 侧的同名判定（isEditTool）也用这一份，两边各写一份时新增
+ *  编辑器工具只改一侧就会静默分叉——只改 host 则累加器静默丢弃记账，只改这里则 host
+ *  根本不会调用 note。 */
+export const EDIT_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "str_replace_editor"]);
 
 const DEFAULT_MAX_FILES = 500;
 
 export interface AccumulatorOptions {
-  /** 记忆的最大文件数；超出按插入序淘汰最旧（防超长回合内存膨胀）。 */
+  /** 记忆的最大文件数；非法值（NaN / 负数 / 0 / 小数）一律回退默认值。 */
   maxFiles?: number;
 }
 
@@ -32,7 +36,14 @@ export class EditAccumulator {
   private dropped = 0;
 
   public constructor(options: AccumulatorOptions = {}) {
-    this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
+    // 容量契约必须对任意入参成立：NaN 会让 `size >= NaN` 恒假（永不淘汰、Set 无限增长），
+    // 负数会让每次 note 都淘汰一项，0 会让容量实际变成 1（比上限 1 还多收一个）——
+    // 三种都按"没给"处理，回退默认值。
+    const configured = options.maxFiles;
+    this.maxFiles =
+      configured !== undefined && Number.isInteger(configured) && configured > 0
+        ? configured
+        : DEFAULT_MAX_FILES;
   }
 
   /** 记一笔：编辑类工具 + 代码/配置扩展名 + 非空路径才收；容量淘汰时计数。 */
@@ -46,22 +57,24 @@ export class EditAccumulator {
     if (!GATED_EXT.test(filePath)) {
       return;
     }
-    if (this.files.size >= this.maxFiles && !this.files.has(filePath)) {
+    // 重复编辑要把顺序刷到最近：`Set.add` 对已存在元素不改变顺序，否则"整回合被反复编辑、
+    // 也最可能触发门禁失败"的那个文件会因为最早插入而最先被淘汰（淘汰即漏检该根）。
+    this.files.delete(filePath);
+    if (this.files.size >= this.maxFiles) {
       this.evictOldest();
     }
     this.files.add(filePath);
   }
 
   /**
-   * 淘汰插入序最旧的一项并计数。`maxFiles` 配成 0 时调用点对空集也成立，所以取到的首项
-   * 可以不存在——那一支什么都不做，由该退化配置的用例钉住。
-   * 这里只需要**取首项这一次动作**，不需要迭代：`for…of` + 无条件 `break` 正是
-   * eslint(no-unreachable-loop) 判的「循环体只允许一次迭代」——循环结构在这里不承载任何语义。
+   * 淘汰顺序最旧的一项并计数。
+   *
+   * 归一化后 `maxFiles >= 1`，而调用点只在 `size >= maxFiles` 时进来，所以集合必有可取首项。
    */
   private evictOldest(): void {
     const [oldest] = this.files;
+    /* v8 ignore next 3 —— 上面那条不变量的直接推论：这一支只为类型收窄而写，正常配置下不可达。 */
     if (oldest === undefined) {
-      // 空集 = 无最旧可淘汰，什么都不做。默认配置下调用点走不到这一支。
       return;
     }
     this.files.delete(oldest);

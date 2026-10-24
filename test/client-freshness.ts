@@ -22,7 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** 指纹门禁：磁盘 client.js 与最新构建逐字节一致时返回空数组，否则返回说明。 */
 export async function clientFreshnessProblems(testFileUrl: string): Promise<string[]> {
@@ -32,7 +32,11 @@ export async function clientFreshnessProblems(testFileUrl: string): Promise<stri
     /"name":\s*"(?<name>[^"]+)"/u.exec(readFileSync(path.resolve(pkgDir, "package.json"), "utf8"))
       ?.groups?.["name"] ?? "unknown";
 
-  const { buildClient } = (await import(path.resolve(pkgDir, "build-client.mjs"))) as {
+  // import() 只收 URL 或说明符，不收裸文件系统路径：Windows 上 `C:\…\build-client.mjs`
+  // 会被当成协议 `c:` 解析而抛 ERR_UNSUPPORTED_ESM_URL_SCHEME；POSIX 的 `/…` 只是恰好能过。
+  const { buildClient } = (await import(
+    pathToFileURL(path.resolve(pkgDir, "build-client.mjs")).href
+  )) as {
     buildClient: () => Promise<string>;
   };
   const expected = await buildClient();
@@ -40,6 +44,8 @@ export async function clientFreshnessProblems(testFileUrl: string): Promise<stri
   return onDisk === expected
     ? []
     : [
-        `[${pkgName}] client.js 已过期：src/client-entry.ts（或其依赖）变更后未重建。请运行：cd ${pkgDir} && node build-client.mjs`,
+        // 不写成 `cd <路径> && node …`：路径里可能有空格（Windows 的 C:\Users\… 尤甚）与反斜杠，
+        // 复制到 POSIX shell 里跑不了。只说在哪个目录跑哪个脚本，路径单独给。
+        `[${pkgName}] client.js 已过期：src/client-entry.ts（或其依赖）变更后未重建。请在包目录 ${pkgDir} 运行 node build-client.mjs`,
       ];
 }

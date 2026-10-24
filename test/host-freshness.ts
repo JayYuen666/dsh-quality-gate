@@ -28,7 +28,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** build-host.mjs 的导出返回形状：单文件正文，或「落盘绝对路径 → 正文」的产物清单。 */
 type BuiltArtifacts = string | Map<string, string>;
@@ -104,6 +104,13 @@ function manifestOf(pkgDir: string, files: Map<string, string>, fromDisk: boolea
     const identity = fromDisk ? digestOf(readText(file)) : digestOf(code);
     rows.push(`${path.relative(pkgDir, file)}\t${identity}`);
   }
+  // 零条目时两侧都折成 "\n"，逐字节相等 —— 空清单会被读成"新鲜"。构建函数交回空 Map
+  // （入口配错、打包器没产出 chunk）恰恰是产物坏了的形态，必须当场红而不是放过。
+  if (rows.length === 0) {
+    throw new Error(
+      `[${pkgDir}] 构建函数交回了空产物清单：两侧都为空会逐字节相等而假绿，门禁无从比对。`,
+    );
+  }
   return `${rows.join("\n")}\n`;
 }
 
@@ -123,10 +130,11 @@ export async function hostFreshnessEvidence(
   const artifact = options.artifact ?? DEFAULT_ARTIFACT;
   const pkgName = packageNameOf(pkgDir);
   // 动态导入 .mjs 对 TS 为 any，先收窄到调用面再 await（避免 no-unsafe-*）。
-  const mod = (await import(path.resolve(pkgDir, "build-host.mjs"))) as unknown as Record<
-    string,
-    (() => Promise<BuiltArtifacts>) | undefined
-  >;
+  // import() 只收 URL 或说明符：Windows 上裸 `C:\…` 会被当成协议 `c:` 解析而抛
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME，故一律经 pathToFileURL。
+  const mod = (await import(
+    pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href
+  )) as unknown as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
   const build = mod[builder];
   if (typeof build !== "function") {
     throw new TypeError(
@@ -135,8 +143,24 @@ export async function hostFreshnessEvidence(
   }
   const built = await build();
   if (typeof built === "string") {
+    // builder 交回空串、磁盘产物又恰好是空文件时两边逐字节相等——那不是"新鲜"，是没产出。
+    if (built === "") {
+      throw new Error(`[${pkgName}] 构建函数交回了空串产物：空产物与空文件相等，门禁无从比对。`);
+    }
     return { pkgName, pkgDir, onDisk: readText(path.resolve(pkgDir, artifact)), built };
   }
+  // 多产物分支：builder 自己决定落哪些文件和路径，`artifact` 在这里没有意义。
+  // 传了它就是配置错误（常见于从单文件形态切过来忘删），静默忽略会让调用方以为在比
+  // 某个特定产物。默认值放行，非默认值当场红。
+  if (artifact !== DEFAULT_ARTIFACT) {
+    throw new TypeError(
+      `[${pkgName}] builder ${builder} 返回的是多产物清单，此时 artifact 选项（${artifact}）不适用：` +
+        "要比哪个产物请直接用单文件 builder，或从清单里自己挑。",
+    );
+  }
+  // 磁盘清单由构建 Map 的 key 反查生成 —— 只纳管"这次构建会产出的那些文件"。
+  // 磁盘上多出来的陈旧产物（builder 已删除的入口）不在名单里，这道门看不见它们；
+  // 残留物的清理归 pack-check 的发布物清单，不在这里。
   return {
     pkgName,
     pkgDir,

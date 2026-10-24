@@ -1,0 +1,12 @@
+# 钉住行尾，不让 checkout 跟着平台走：Windows runner 上 Git for Windows 的机器级
+# core.autocrlf=true 会把工作树换成 CRLF，于是 fmt:check 只在 windows 那一格把每个
+# 文件都判成未格式化（内容一字不差）。
+#
+# 这一行与 oxfmt.config.ts 的 `endOfLine: "lf"` 是同一个约定的两半，必须同时改：
+# 只改一侧，git 认为文件是 LF、格式化器要求另一种，fmt:check 的红就与内容无关了。
+* text=auto eol=lf
+# 例外：cmd.exe 解析无 CRLF 的批处理（尤其含 goto 与多行 if 块）行为不可靠，
+# 这类文件进来就必须保持 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

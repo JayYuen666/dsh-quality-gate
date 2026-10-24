@@ -1487,7 +1487,7 @@ describe("quality-gate: pnpm check script 探测", () => {
     await sleep(20);
     assert.equal(ctx.shellCommands.length, 1);
     const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(cmd, /bin\/tsc --noEmit$/u, "落到下一优先级 tsc，而非 pnpm check");
+    assert.match(cmd, /bin[\\/]tsc'? --noEmit$/u, "落到下一优先级 tsc，而非 pnpm check");
     assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 
@@ -1507,7 +1507,7 @@ describe("quality-gate: pnpm check script 探测", () => {
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
     const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(cmd, /bin\/tsc --noEmit$/u, "空脚本 → 不发 pnpm check");
+    assert.match(cmd, /bin[\\/]tsc'? --noEmit$/u, "空脚本 → 不发 pnpm check");
     assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 
@@ -1520,7 +1520,7 @@ describe("quality-gate: pnpm check script 探测", () => {
     const cmd = String(ctx.shellCommands[0]?.command);
     assert.match(
       cmd,
-      /bin\/tsc --noEmit$/u,
+      /bin[\\/]tsc'? --noEmit$/u,
       "读不到脚本清单时不猜：宁可不给 pnpm 门禁，也不发一条注定命令级失败的检查",
     );
     assert.ok(!cmd.includes("npx"), NO_NPX);
@@ -1536,7 +1536,7 @@ describe("quality-gate: pnpm check script 探测", () => {
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
     const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(cmd, /bin\/tsc --noEmit$/u);
+    assert.match(cmd, /bin[\\/]tsc'? --noEmit$/u);
     assert.ok(!cmd.includes("npx"), NO_NPX);
   });
 });
@@ -1599,14 +1599,20 @@ describe("quality-gate: memoryFeedback 反馈", () => {
     await runTurn(env, "s-fb1", gateEvt(project));
     assert.equal(vi.mocked(pushGateFeedback).mock.calls.length, 1);
     const [input, target] = vi.mocked(pushGateFeedback).mock.calls[0]! as [
-      { command: string[]; root: string; failure: string },
-      { url: string; key: string },
+      { command: readonly string[]; root: string; failure: string },
+      { url: string; key: string; serviceId: string },
       unknown,
     ];
     assert.deepEqual(input.command, ["tsc", "--noEmit"]);
     assert.equal(input.root, project);
     assert.ok(input.failure.includes("mock-gate-output"), "失败证据随反馈沉淀");
-    assert.deepEqual(target, { url: "https://gateway.test:8420", key: CREDENTIAL_FIXTURE_TOKEN });
+    assert.deepEqual(target, {
+      url: "https://gateway.test:8420",
+      key: CREDENTIAL_FIXTURE_TOKEN,
+      // 默认服务名：本用例没设 TDAI_SERVICE_ID，宿主在解析目标时一次定值往下传，
+      // 投递模块不再自己读 env（否则服务名与 url/key 来自两条不同源）。
+      serviceId: "default",
+    });
     assert.deepEqual(env.credentialRequests, ["TDAI_GATEWAY_KEY"], "key 走凭据通道，不拼文件路径");
   });
 

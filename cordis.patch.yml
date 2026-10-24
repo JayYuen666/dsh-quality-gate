@@ -4,7 +4,9 @@
 #   - agent/turn-stopping 批处理：从编辑路径向上探测最近清单根
 #     （pnpm-workspace 且根 package.json 声明了 check→pnpm check /
 #      Cargo.toml→cargo check / pyproject→ruff / package.json+tsconfig→tsc），
-#     门禁失败经 followup 注入修复指令 → 回合物理不结束（agent.ts:304-308 inbox 二次检查）；
+#     门禁失败经 followup 注入修复指令 → 回合物理不结束（宿主 agent 循环在 turn-stopping
+#     之后二次检查 inbox：有排队项就再开一轮。此处刻意不写行号——那是另一个包的源码位置，
+#     随宿主升级漂移，而它恰恰是本插件唯一的机制前提）；
 #     探测只提项目自己声明过的命令，拿不到脚本清单时宁可不给门禁（防假失败注入）；
 #   - 防跑飞：每回合每根至多 2 次注入、总预算封顶、超时按「未执行」注入不静默通过；
 #     inbox 有待处理时不抢话。

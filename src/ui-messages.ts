@@ -114,13 +114,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     budgetHint: "单次门禁最大耗时（10s-600s，默认 300s；超时按失败注入不静默放行）",
     memoryLabel: "门禁失败沉淀记忆",
     memoryHint:
-      "默认关闭。开启后：代码型门禁失败的证据（命令/根/全文报错，不截断）写入记忆网关的 L0 会话层供后续会话召回（需同时填下面两项，任一留空即不启用）；总线 lesson-loop 的同步上报不受此开关影响。关闭后只注入不沉淀",
+      "默认关闭。开启后：代码型门禁失败的证据（命令/根/全文报错，不截断）写入记忆网关的 L0 会话层供后续会话召回；总线 lesson-loop 的同步上报不受此开关影响。关闭后只注入不沉淀。真正决定能否投递的是网关地址能否解析出值（见下面两项）",
     gatewayUrlLabel: "记忆网关地址",
     gatewayUrlHint:
-      "留空 = 不启用记忆反馈。插件不带任何默认地址：本机用户请填自己的网关地址（例如 http://127.0.0.1:8420），没有网关就让它空着",
+      "插件不带任何默认地址：本机用户请填自己的网关地址（例如 http://127.0.0.1:8420），没有网关就让它空着。此项留空时回落到环境变量 TDAI_GATEWAY_URL，两处都空才算未配置、不启用记忆反馈",
     keyRefLabel: "网关密钥引用",
     keyRefHint:
-      "网关鉴权令牌的凭据引用名（环境变量名形态，默认 TDAI_GATEWAY_KEY）。这里存的只是引用名，密钥值由 dsh 凭据服务管理（Web 凭据页或 ~/.dsh/.credentials.yaml 的 refs），不会写进 settings.yaml；清空即恢复默认引用名",
+      "网关鉴权令牌的凭据引用名（环境变量名形态，默认 TDAI_GATEWAY_KEY）。这里存的只是引用名，密钥值由 dsh 凭据服务管理（Web 凭据页或 ~/.dsh/.credentials.yaml 的 refs），不会写进 settings.yaml；清空即恢复默认引用名，而不是停用记忆反馈",
   },
   en: {
     cardTitle: "quality-gate turn-end quality gate",
@@ -146,12 +146,12 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "Max duration of one gate run (10s-600s, default 300s; a timeout injects a failure instead of passing silently)",
     memoryLabel: "Persist gate failures to memory",
     memoryHint:
-      "Off by default. When on: the evidence of code-level gate failures (command, root, full error text, untruncated) is written into the memory gateway's L0 session layer so later sessions can recall it (both fields below must be filled — leaving either empty disables it); synchronous reporting to the lesson-loop bus is unaffected by this switch. When off, repairs are injected but nothing is persisted",
+      "Off by default. When on: the evidence of code-level gate failures (command, root, full error text, untruncated) is written into the memory gateway's L0 session layer so later sessions can recall it; synchronous reporting to the lesson-loop bus is unaffected by this switch. When off, repairs are injected but nothing is persisted. Whether it can actually deliver is decided by the gateway URL resolving to a value (see the two fields below)",
     gatewayUrlLabel: "Memory gateway URL",
     gatewayUrlHint:
-      "Empty = memory feedback disabled. The plugin ships no default address: fill in your own gateway URL (e.g. http://127.0.0.1:8420), or leave it empty if you have no gateway",
+      "The plugin ships no default address: fill in your own gateway URL (e.g. http://127.0.0.1:8420), or leave it empty if you have no gateway. When this is empty the TDAI_GATEWAY_URL environment variable is used instead; only when both are empty is memory feedback unconfigured and disabled",
     keyRefLabel: "Gateway credential ref",
     keyRefHint:
-      "Name of the credential holding the gateway token (POSIX env-var form, default TDAI_GATEWAY_KEY). Only the ref name is stored here — the secret itself is managed by the dsh credentials service (the web credentials page or the refs in ~/.dsh/.credentials.yaml) and never lands in settings.yaml; clearing it restores the default ref name",
+      "Name of the credential holding the gateway token (POSIX env-var form, default TDAI_GATEWAY_KEY). Only the ref name is stored here — the secret itself is managed by the dsh credentials service (the web credentials page or the refs in ~/.dsh/.credentials.yaml) and never lands in settings.yaml; clearing it restores the default ref name rather than disabling memory feedback",
   },
 };
