@@ -12,10 +12,17 @@
 // 顶部 node reference：oxlint 对 .mjs 不自动加载 @types/node，缺它整文件按 error 类型误报。
 // 取全文一律走 execFileSync + stdout：`tar -xzO` 的内容不落到临时目录，避免"检查器自己往
 // 仓库旁边写文件"这类副作用；同步形态也让整脚本没有 Promise 层。
+//
+// 但本脚本不是零副作用：`pnpm pack` 会触发 package.json 的 `prepack`（build:client + build），
+// 于是校验开始前工作区的 client.js / host.js 被重新生成一遍。带来的两个后果要记住——
+//   ①它验的是"打包那一刻重新构建出来的产物"，不是此前留在盘上的那份；
+//   ②本地未提交的产物改动会被这次重建覆盖（产物是 gitignored 的生成物，覆盖不丢源码）。
+// 这也是它同时能查"产物过期"的原因：过期产物在 pack 时就被 rebuild 掉了。
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { REACT_RUNTIME_MODULES } from "./build-client.mjs";
 
 const maxBuffer = 32 * 1024 * 1024;
 
@@ -38,8 +45,11 @@ const FORBIDDEN_ENTRIES = [
  *  注释面的噪音由 test/publish-manifest.test.ts 的注释门禁负责；这一面只防随数据出去的东西。 */
 const FORBIDDEN_CONTENT = [
   /\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b/u,
-  /\/(?:Users|home)\/[A-Za-z0-9._-]+/u,
-  /\.pnpm\//u,
+  // POSIX（/Users、/home）、Windows（C:\Users、\\Users）与 macOS 临时目录（/private/var/folders）
+  // 三种构建机路径形态都算泄露：只列 POSIX 那种时，Windows runner 上的产物会静默通过。
+  /\/(?:Users|home|private\/var\/folders)\/[A-Za-z0-9._-]+/u,
+  /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/u,
+  /\\.pnpm\\|\/\.pnpm\//u,
 ];
 
 /** 随包发布的代码面。 */
@@ -84,12 +94,18 @@ function asRecord(raw) {
 
 /**
  * 取 exports 值里的具体目标文件（条件对象递归展开；含 `*` 的通配项没有固定文件）。
+ *
+ * 数组是 Node 的**回退目标**语法（`"exports": { ".": [{ "import": "./host.js" }, "./host.cjs"] }`），
+ * 每一项都要收；`asRecord` 对数组返回空对象，靠它递归会把整段目标静默丢掉。
  * @param {unknown} value
  * @returns {string[]}
  */
 function exportTargets(value) {
   if (typeof value === "string") {
     return value.includes("*") ? [] : [value];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((nested) => exportTargets(nested));
   }
   if (value !== null && typeof value === "object") {
     return Object.values(asRecord(value)).flatMap((nested) => exportTargets(nested));
@@ -103,18 +119,53 @@ function packageNameOf(specifier) {
   return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : segments[0];
 }
 
+/** Node 内建模块名（无 `node:` 前缀的写法同样不是包依赖）。 */
+const BUILTIN_MODULES = new Set([
+  "assert",
+  "buffer",
+  "child_process",
+  "crypto",
+  "events",
+  "fs",
+  "http",
+  "https",
+  "module",
+  "net",
+  "os",
+  "path",
+  "process",
+  "stream",
+  "string_decoder",
+  "timers",
+  "tty",
+  "url",
+  "util",
+  "worker_threads",
+  "zlib",
+]);
+
 /**
- * 产物文本里引用的裸说明符（node: 内建与相对路径除外）。
+ * 产物文本里引用的裸说明符（node: 内建、无前缀内建、相对路径、`#` 子路径导入除外）。
+ *
+ * 三种引号都要认：rolldown 按源码原样输出引号风格，单引号或模板字面量的 import 在只认
+ * `"` 的正则下会被整条漏掉，依赖声明检查于是变成假阴性。`require(...)` 同样要收——
+ * client.js 是 CJS 外壳，注入的 require 正是它拿宿主模块的唯一通道。
  * @param {string} text
  * @returns {string[]}
  */
 function bareSpecifiers(text) {
   const out = [];
-  for (const match of text.matchAll(/(?:from|import)\s*\(?\s*"(?<spec>[^"]+)"/gu)) {
+  const pattern =
+    /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(?<quote>["'`])(?<spec>[^"'`\n]+)\k<quote>/gu;
+  for (const match of text.matchAll(pattern)) {
     const specifier = match.groups?.spec ?? "";
-    if (specifier !== "" && !specifier.startsWith("node:") && !specifier.startsWith(".")) {
-      out.push(specifier);
+    if (specifier === "" || specifier.startsWith(".") || specifier.startsWith("#")) {
+      continue;
     }
+    if (specifier.startsWith("node:") || BUILTIN_MODULES.has(packageNameOf(specifier))) {
+      continue;
+    }
+    out.push(specifier);
   }
   return out;
 }
@@ -126,10 +177,13 @@ function bareSpecifiers(text) {
  * @returns {void}
  */
 function checkSurface(shipped, manifest) {
-  const targets = [
-    ...(typeof manifest.main === "string" ? [manifest.main] : []),
-    ...Object.values(asRecord(manifest.exports)).flatMap((value) => exportTargets(value)),
-  ];
+  // `"exports": "./host.js"`（字符串简写）与 `"exports": ["./a.js", "./b.js"]` 都是合法形态，
+  // 只按对象展开会把它们当成空集合，于是 `入口 0 项` 静默通过。
+  const exportsValue =
+    typeof manifest.exports === "string" || Array.isArray(manifest.exports)
+      ? exportTargets(manifest.exports)
+      : Object.values(asRecord(manifest.exports)).flatMap((value) => exportTargets(value));
+  const targets = [...(typeof manifest.main === "string" ? [manifest.main] : []), ...exportsValue];
   for (const target of targets) {
     const relative = target.replace(/^\.\//u, "");
     if (relative !== "package.json" && !shipped.has(`package/${relative}`)) {
@@ -152,11 +206,23 @@ function checkSurface(shipped, manifest) {
 /**
  * 依赖形状：宿主包一律不进 dependencies（进了就在宿主进程旁物化第二份类型面）。
  * @param {Record<string, unknown>} manifest
- * @returns {Set<string>} 装载期可解析的包名（dependencies ∪ peerDependencies）
+ * @returns {Set<string>} 装载期可解析的包名（dependencies ∪ peerDependencies ∪ 宿主 client 模块表）
  */
 function checkDependencies(manifest) {
   const dependencies = asRecord(manifest.dependencies);
   const peers = asRecord(manifest.peerDependencies);
+  // tarball 里的 manifest 必须是**已解析**的版本范围：`catalog:` / `workspace:` 是包管理器的
+  // 私有协议，pnpm publish 会改写、npm publish 不会（实测 npm pack 把 `catalog:` 原样写进
+  // 发布物），消费者装到就是 `EUNSUPPORTEDPROTOCOL`。分发路径不止一条，所以在这里判而不
+  // 只靠"记得用 pnpm 发"。
+  for (const section of ["dependencies", "peerDependencies"]) {
+    const record = section === "dependencies" ? dependencies : peers;
+    for (const [name, value] of Object.entries(record)) {
+      if (typeof value === "string" && /^(?:catalog|workspace):/u.test(value)) {
+        note(`${section}.${name} 在发布物里仍是 ${value}：这个范围没被解析，消费者装不上`);
+      }
+    }
+  }
   for (const name of Object.keys(dependencies)) {
     if (name.startsWith("@deepseek-ai/")) {
       note(`${name} 落进 dependencies，会在宿主进程旁物化第二份宿主类型面`);
@@ -165,7 +231,10 @@ function checkDependencies(manifest) {
   console.info(
     `依赖 ${Object.keys(dependencies).length} 枚 · peer ${Object.keys(peers).length} 枚`,
   );
-  return new Set([...Object.keys(dependencies), ...Object.keys(peers)]);
+  // react 家族由宿主的 client 模块表在装载期提供，既不在 dependencies 也不在
+  // peerDependencies——外部化之后产物里就是这几条裸 require。不并入这一组的话，
+  // 「产物引用了 manifest 没声明的包」这条判据会对着一条正确的 require 报红。
+  return new Set([...Object.keys(dependencies), ...Object.keys(peers), ...REACT_RUNTIME_MODULES]);
 }
 
 /**

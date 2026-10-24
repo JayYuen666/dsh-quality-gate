@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import plugin from "../host.ts";
+import type { ConfigShape } from "../host.ts";
 
 /** Config schema 的字段节点（读 meta/type/dict 用，不复制 schema 结构）。 */
 export interface SchemaNode {
@@ -56,14 +57,23 @@ export function refsOf(value: Record<string, unknown>): Record<string, unknown> 
   );
 }
 
-/** apply + 它的 Config：0.1.7 的 config 是引用而不是快照，两处必须同源。 */
+/** apply + 它的 Config：0.1.7 的 config 是引用而不是快照，两处必须同源。
+ *  第二参收窄到导出的 `ConfigShape`（不是 Record）：apply 的签名一变，这一行就先红，
+ *  而这个桩件存在的意义正是「口径漂移要红」。ctx 仍只能强转——宿主 Context 面太大，
+ *  测试里复刻它等于把宿主类型抄一遍。 */
 export function applyGate(ctx: unknown, value: Record<string, unknown>): void {
-  plugin.apply(ctx as never, refsOf(value) as never);
+  plugin.apply(ctx as never, refsOf(value) as unknown as ConfigShape);
 }
 
 /** 逐字段 schema 默认 —— 等价于 0.1.6 交给 `settings.register(ns, schema, { base })`
  *  的那份底座，0.1.7 把它搬到了 schema 的 `.default()` 上（少一层「底座」）。 */
 export function schemaDefaults(): Record<string, unknown> {
+  // 每个字段都必须声明 .default()：漏写时 meta["default"] 是 undefined，而"显式默认
+  // undefined"与"根本没声明"在这里无法区分——把它当部署值交给 apply，探测会静默不执行。
+  const missing = Object.entries(configDict())
+    .filter(([, field]) => !("default" in (field.meta ?? {})))
+    .map(([key]) => key);
+  assert.deepEqual(missing, [], "Config schema 里有字段没写 .default()：新增字段忘了默认值");
   return Object.fromEntries(
     Object.entries(configDict()).map(([key, field]) => [key, field.meta?.["default"]]),
   );

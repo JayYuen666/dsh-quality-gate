@@ -51,9 +51,26 @@ function uninstall(): void {
   originals.clear();
 }
 
+/** 片段下限：`includes("")` 对任意日志恒真，一条空片段就能让下面的"未认领"断言整体失效。
+ *  这里只拦空/近空片段；片段选得特不特异由 log-templates.ts 的维护约定把守，不按长度判。 */
+const MIN_TEMPLATE_LENGTH = 4;
+
+function assertTemplatesUsable(): void {
+  const bad = LOG_TEMPLATES.filter(
+    (fragment) => typeof fragment !== "string" || fragment.length < MIN_TEMPLATE_LENGTH,
+  );
+  if (bad.length > 0) {
+    throw new Error(
+      `log-templates.ts 里有空/过短的模板片段（${JSON.stringify(bad)}）：它们会让任意日志都算"已认领"，断言随之失效。`,
+    );
+  }
+}
+
 function containsTemplate(text: string): boolean {
   return LOG_TEMPLATES.some((fragment) => text.includes(fragment));
 }
+
+assertTemplatesUsable();
 
 beforeEach(() => {
   records = [];

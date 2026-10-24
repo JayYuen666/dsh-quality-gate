@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+import { singleEntryChunk } from "../build-client.mjs";
 import { clientFreshnessProblems } from "./client-freshness.ts";
 import { bundleSlotPinProblems } from "./profile-bundle.ts";
 import { schemaCoverageProblems } from "./schema-coverage.ts";
@@ -96,5 +97,59 @@ describe("quality-gate client 构建", () => {
       text.includes("maxInjectsPerTurn") && text.includes("gateBudgetMs"),
       "保持 3 字段可配",
     );
+  });
+});
+
+/** 输出守卫测试用的最小 chunk 正文。 */
+const CHUNK_CODE = "export {};";
+/** 输出守卫测试用的产物文件名。 */
+const ARTIFACT_FILE = "artifact.js";
+
+/**
+ * 造一个最小输出项；判据只看 type/fileName/isEntry/code。
+ * @param type - rolldown 输出项类型
+ * @param fileName - 产物文件名
+ * @param extra - 该类型需要的其余字段
+ * @returns 可交给 singleEntryChunk 的输出项
+ */
+function outputItem(
+  type: string,
+  fileName: string,
+  extra: Partial<{ isEntry: boolean; code: string }> = {},
+): { type: string; fileName: string } & Partial<{ isEntry: boolean; code: string }> {
+  return { type, fileName, ...extra };
+}
+
+describe("单文件产物的输出守卫", () => {
+  it("拒绝多个 chunk：单文件产物不能静默丢掉第二个", () => {
+    const output = [
+      outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
+      outputItem("chunk", "chunk-abc.js", { isEntry: false, code: CHUNK_CODE }),
+    ];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
+  });
+
+  it("拒绝 asset：单文件产物没有落盘 asset 的位置", () => {
+    const output = [
+      outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
+      outputItem("asset", "x.css"),
+    ];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
+  });
+
+  it("拒绝非 entry 的单个 chunk", () => {
+    const output = [outputItem("chunk", "chunk-abc.js", { isEntry: false, code: CHUNK_CODE })];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /entry chunk/u);
+  });
+
+  it("拒绝空正文的 entry chunk：空产物落盘后卡片静默不渲染", () => {
+    const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: "  \n " })];
+    assert.throws(() => singleEntryChunk(output, "entry.ts"), /entry chunk/u);
+  });
+
+  it("接受唯一的 entry chunk", () => {
+    const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE })];
+    const chunk = singleEntryChunk(output, "entry.ts");
+    assert.equal(chunk.code, CHUNK_CODE);
   });
 });

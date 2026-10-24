@@ -96,6 +96,19 @@ describe("renderTemplate（{name} 插值）", () => {
     assert.equal(renderTemplate("前{missing}后", { other: "x" }), "前后");
   });
 
+  it("原型链上的名字不算「提供了」，自有的同名键照常渲染", () => {
+    // 裸下标（params[key]）会取到 Object.prototype 上的函数对象，String() 之后把源码
+    // 渲染进正文；契约是"未提供的名字留空串"，所以查参数必须走 Object.hasOwn。
+    assert.equal(renderTemplate("前{constructor}后", {}), "前后");
+    assert.equal(renderTemplate("前{toString}后", {}), "前后");
+    assert.equal(renderTemplate("前{valueOf}后", {}), "前后");
+    assert.equal(
+      renderTemplate("{toString}", { toString: "own" }),
+      "own",
+      "自有的同名键仍然正常渲染（只是不给原型链继承的成员开口子）",
+    );
+  });
+
   it("无占位符的文本原样返回", () => {
     assert.equal(
       renderTemplate("门禁执行被调用方取消（aborted），结果未知。", {}),

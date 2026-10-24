@@ -53,6 +53,8 @@ const WORKSPACE_PACKAGES_YAML = "packages:\n  - packages/*\n";
 const SANDBOX_MODE_WORKSPACE_WRITE = "workspace-write";
 /** lesson 总线里"检查没跑成"那一类的 category 期望值。 */
 const BUS_CATEGORY_NOT_RUN = "gate-not-run";
+/** ruff 门禁的命令文本期望值（多个 Python 根用例共用）。 */
+const RUFF_CHECK_CMD = "ruff check .";
 
 interface SandboxFacts {
   mode: "read-only" | "workspace-write" | "danger-full-access";
@@ -296,6 +298,19 @@ function makeRuffProject(name: string): string {
   );
   mkdirSync(root, { recursive: true });
   writeFileSync(path.join(root, "ruff.toml"), "line-length = 100\n");
+  writeFileSync(path.join(root, "a.py"), "x = 1\n");
+  scratch.push(root);
+  return root;
+}
+
+/** 只有 pyproject.toml 的 Python 根：内容由用例给（有无 ruff 段是判据的分界）。 */
+function makePyprojectProject(name: string, pyproject: string): string {
+  const root = path.join(
+    tmpdir(),
+    `qg-pyproj-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  mkdirSync(root, { recursive: true });
+  writeFileSync(path.join(root, "pyproject.toml"), pyproject);
   writeFileSync(path.join(root, "a.py"), "x = 1\n");
   scratch.push(root);
   return root;
@@ -1202,8 +1217,74 @@ describe("quality-gate 门禁完整性", () => {
     applyWith(ctx);
     stopEdits(ctx, "s-py", [fileIn(root, "a.py")]);
     await sleep(20);
-    assert.equal(ctx.specs.at(0)?.command, "ruff check .");
+    assert.equal(ctx.specs.at(0)?.command, RUFF_CHECK_CMD);
     assert.equal(ctx.specs.at(0)?.workdir, root);
+  });
+
+  // pyproject.toml 只是 Python 元数据文件，不是 ruff 的配置标记：只有它在场时发
+  // `ruff check .`，会把从未声明用 ruff 的工程按 ruff 默认规则判一遍——这正是本包
+  // 要压住的假失败注入（与 pnpm check 只在声明了 check 脚本时才发同一方向）。
+  it("pyproject.toml 里没有 ruff 段 → 不发 ruff 门禁（只登记信息，不猜）", async () => {
+    const ctx = makeCtx();
+    const root = makePyprojectProject("norr", '[project]\nname = "t"\n');
+    applyWith(ctx);
+    stopEdits(ctx, "s-norr", [fileIn(root, "a.py")]);
+    await sleep(20);
+    assert.deepEqual(ctx.specs, [], "没有 ruff 声明就不该产生任何门禁命令");
+    assert.equal(ctx.followupCalls.length, 0, "更不该注入修复指令");
+  });
+
+  it("pyproject.toml 里有 [tool.ruff] 段 → 发 ruff 门禁", async () => {
+    const ctx = makeCtx();
+    const root = makePyprojectProject(
+      "withrr",
+      '[project]\nname = "t"\n\n[tool.ruff]\nline-length = 100\n',
+    );
+    ctx.result = {
+      exitCode: 1,
+      stdout: { text: "F401 unused import", truncated: false },
+      stderr: { text: "", truncated: false },
+    };
+    applyWith(ctx);
+    stopEdits(ctx, "s-withrr", [fileIn(root, "a.py")]);
+    await sleep(20);
+    assert.equal(ctx.specs.at(0)?.command, RUFF_CHECK_CMD);
+    assert.equal(ctx.specs.at(0)?.workdir, root);
+  });
+
+  it("pyproject.toml 只写了 [tool.ruff.lint] 子表 → 同样认（不要求父表在场）", async () => {
+    const ctx = makeCtx();
+    const root = makePyprojectProject(
+      "subrr",
+      '[project]\nname = "t"\n\n[tool.ruff.lint]\nselect = ["E"]\n',
+    );
+    ctx.result = {
+      exitCode: 1,
+      stdout: { text: "E501 line too long", truncated: false },
+      stderr: { text: "", truncated: false },
+    };
+    applyWith(ctx);
+    stopEdits(ctx, "s-subrr", [fileIn(root, "a.py")]);
+    await sleep(20);
+    assert.equal(ctx.specs.at(0)?.command, RUFF_CHECK_CMD);
+  });
+
+  // 同名目录也是"清单在场"（existsSync 为真），但读不成字符串：此时按"没有信息"处理，
+  // 与读不到同一个方向——不拿一个没读出来的文件去猜该不该发 ruff 门禁。
+  it("pyproject.toml 读不出来（同名目录）→ 登记信息缺失，不发 ruff 门禁", async () => {
+    const ctx = makeCtx();
+    const root = path.join(
+      tmpdir(),
+      `qg-pyproj-dir-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(path.join(root, "pyproject.toml"), { recursive: true });
+    writeFileSync(path.join(root, "a.py"), "x = 1\n");
+    scratch.push(root);
+    applyWith(ctx);
+    stopEdits(ctx, "s-dirpy", [fileIn(root, "a.py")]);
+    await sleep(20);
+    assert.deepEqual(ctx.specs, [], "读不出 ruff 声明时不发门禁");
+    assert.equal(ctx.followupCalls.length, 0);
   });
 
   // ── 会话预算淘汰边界（pruneToSessionBudget）─────────────────
@@ -1365,7 +1446,7 @@ describe("quality-gate 门禁完整性", () => {
       await sleep(20);
       assert.match(
         String(ctx.specs.at(0)?.command),
-        /bin\/tsc --noEmit$/u,
+        /bin[\\/]tsc'? --noEmit$/u,
         "scripts 不是对象 = 拿不到清单 → 保守不发 pnpm check",
       );
     });
@@ -1385,7 +1466,12 @@ describe("quality-gate 门禁完整性", () => {
 
     it("清单根紧邻文件系统根：workspace 上溯到 / 后停止，门禁仍落在自己根", async () => {
       const ctx = makeCtx();
-      const root = `/tmp/qg-shallow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // 夹具走 tmpdir() 而不是字面量 `/tmp`：win32 上后者是「当前盘符根的 /tmp」，
+      // 与 path.resolve 归一出来的原生路径不是同一个串，断言会拿两种字形相比。
+      const root = path.join(
+        tmpdir(),
+        `qg-shallow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
       mkdirSync(root, { recursive: true });
       writeFileSync(path.join(root, PKG_JSON), '{"name":"t","scripts":{"check":"tsc"}}');
       writeFileSync(path.join(root, TSCONFIG), MINIMAL_TSCONFIG_JSON);
@@ -1433,7 +1519,7 @@ describe("quality-gate 门禁完整性", () => {
       await sleep(20);
       assert.equal(ctx.specs.length, 1, "外层无门禁 → 不升级；子包门禁只能出现一次");
       assert.equal(ctx.specs.at(0)?.workdir, sub, "门禁落在子包自己的根");
-      assert.match(String(ctx.specs.at(0)?.command), /bin\/tsc --noEmit$/u);
+      assert.match(String(ctx.specs.at(0)?.command), /bin[\\/]tsc'? --noEmit$/u);
     });
 
     it("内外层都产不出门禁 → 一条门禁都不给（信息缺失不替项目猜）", async () => {

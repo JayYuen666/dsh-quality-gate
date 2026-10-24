@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** 本包根目录：helper 与 client-freshness.ts 同放 test/，据此定位包内文件。 */
 const PKG_DIR = path.resolve(import.meta.dirname, "..");
@@ -55,10 +56,21 @@ function profileManifestPath(): string {
     : override;
 }
 
-/** profile 的 `dsh.profile.bundles` 清单；没装 profile 的环境（CI、消费者克隆）回 null。 */
+/**
+ * profile 的 `dsh.profile.bundles` 清单。
+ *
+ * 只有**没装 profile 的机器**（CI、消费者克隆）才允许回 null：那时用的是默认路径，文件本来
+ * 就不该存在。显式设了 `DSH_PROFILE_PACKAGE_JSON` 却读不到文件是配置写错了，必须抛——否则
+ * 变量配歪或在 CI 里指错一个路径，这道机器侧漂移针就永远静默跳过，红不了也绿不了。
+ */
 function profileBundleListOrNull(): string[] | null {
   const file = profileManifestPath();
   if (!existsSync(file)) {
+    assert.equal(
+      process.env["DSH_PROFILE_PACKAGE_JSON"] ?? "",
+      "",
+      `DSH_PROFILE_PACKAGE_JSON 指向的 ${file} 不存在：显式指定了 override 就不许静默跳过这道针`,
+    );
     return null;
   }
   const dshSection = readJson(file)["dsh"];
@@ -77,8 +89,10 @@ function profileBundleListOrNull(): string[] | null {
  */
 export function profileBundleName(): string {
   const own = readJson(path.join(PKG_DIR, "package.json"))["name"];
-  assert.equal(typeof own, "string", "本包 package.json 没有 name");
-  const name = typeof own === "string" ? own : "";
+  // assert.ok 带的是类型谓词收窄，assert.equal 不是：用后者就得再写一个永不可达的三元兜底，
+  // 那条死分支会把"根本没有 name"和"name 是空串"混成同一种失败。
+  assert.ok(typeof own === "string" && own !== "", "本包 package.json 没有可用的 name");
+  const name = own;
   const listed = profileBundleListOrNull();
   if (listed !== null) {
     assert.ok(
@@ -128,8 +142,21 @@ function registeredSlotKey(text: string): string {
 
 /** 取产物里 `ctx.configForms.get(<入参>)` 实际用到的条目 id（同样兼容字面量/常量）。 */
 function configFormsEntryId(text: string): string {
-  const arg = /configForms\.get\((?<arg>[^)]*)\)/u.exec(text)?.groups?.["arg"] ?? "";
-  assert.notEqual(arg, "", "产物里没有 ctx.configForms.get(…) 调用");
+  // 锚到 `ctx.configForms.get(` 而不是任意 `configForms.get(`，并要求全产物恰好一处：
+  // 出现第二处（新增 helper、宿主侧代码被内联）时，不锚定就会比到无关的入参上。
+  // 命中处之后按"从该点起的一次匹配"取实参，不看整份产物，避免跨到别处的括号。
+  const matches = [...text.matchAll(/ctx\.configForms\.get\(/gu)];
+  assert.equal(
+    matches.length,
+    1,
+    "产物里 ctx.configForms.get(…) 必须恰好一处：出现多处时无从判断比的是哪一个",
+  );
+  const [hit] = matches;
+  assert.ok(hit !== undefined, "产物里没有 ctx.configForms.get(…) 调用");
+  // 命中本身已经吃到 `(`，其后到第一个 `)` 就是实参面（产物里这一处是简单标识符或字面量）。
+  const after = text.slice(hit.index + hit[0].length);
+  const arg = /^(?<arg>[^)]*)\)/u.exec(after)?.groups?.["arg"] ?? "";
+  assert.notEqual(arg, "", "产物里 ctx.configForms.get(…) 的入参读不出来");
   const inline = /^"(?<value>[^"]*)"$/u.exec(arg)?.groups?.["value"] ?? "";
   if (inline !== "") {
     return inline;
@@ -150,7 +177,11 @@ function configFormsEntryId(text: string): string {
  * 产物结构本身读不出来时仍直接抛（漂移针不许静默放过）。
  */
 export async function bundleSlotPinProblems(): Promise<string[]> {
-  const { buildClient } = (await import(path.join(PKG_DIR, "build-client.mjs"))) as {
+  // import() 只收 URL 或说明符：Windows 上裸 `C:\…` 会被当成协议 `c:` 解析而抛
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME，故一律经 pathToFileURL。
+  const { buildClient } = (await import(
+    pathToFileURL(path.join(PKG_DIR, "build-client.mjs")).href
+  )) as {
     buildClient: () => Promise<string>;
   };
   const out = await buildClient();

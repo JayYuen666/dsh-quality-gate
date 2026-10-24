@@ -5,6 +5,13 @@
       "schemastery": ["./node_modules/schemastery/lib/index.d.ts"]
     }
   },
-  "include": ["host.ts", "lib/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
-  "exclude": ["test/client-card.test.ts"]
+  "include": [
+    "host.ts",
+    "lib/**/*.ts",
+    "test/**/*.ts",
+    "vitest.config.ts",
+    "oxfmt.config.ts",
+    "oxlint.config.ts"
+  ],
+  "exclude": ["test/client-*.test.ts"]
 }

@@ -1,4 +1,5 @@
 {
   "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.client.base.json",
-  "include": ["src/**/*.ts", "test/client-card.test.ts"]
+  "//": "include 是整体替换、不与基线合并（基线没有 include，全靠这里给全）。客户端测试的归属由文件名决定：test/client-*.test.ts 进本程序（DOM lib、types 空），根 tsconfig.json 的 exclude 用同一模式把它们留在 host 程序外；新增客户端测试按这个前缀命名即可，两边无需逐文件登记。",
+  "include": ["src/**/*.ts", "test/client-*.test.ts"]
 }
