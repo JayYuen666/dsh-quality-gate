@@ -30,6 +30,11 @@ vi.mock(import("../lib/gateway-feedback.ts"), async (importOriginal) => {
 /** 本次 fire 交进来的 agent.session（观察面替身的日志来源，见下面 mock 的 on）。 */
 let firedSession: unknown;
 
+/** 观察面释放器的替身：本文件的用例不数释放次数，只需要这一位在场上。 */
+function noopDispose(): void {
+  void 0;
+}
+
 /**
  * 观察面替身的交付：读 fired session 上夹具挂的那份日志与 fork 切点（**只有测试侧**读
  * snapshotEvents 闭包——生产侧已改走官方 ctx.sessionQuery.observeSession，见 host.ts 的
@@ -39,6 +44,7 @@ let firedSession: unknown;
 function observationOfFiredSession(): {
   events: unknown;
   inheritedEventCount: number | undefined;
+  [Symbol.dispose]: () => void;
 } {
   const session = firedSession as
     | { snapshotEvents?: (from?: number) => unknown; inheritedEventCount?: number | undefined }
@@ -48,7 +54,7 @@ function observationOfFiredSession(): {
   // `observation.inheritedEventCount ?? 0` 的兜底分支真的被走到（在本处代它兜底就等于把
   // 那条分支从覆盖率与语义上一起抹掉）。
   const cut = session?.inheritedEventCount;
-  return { events: raw, inheritedEventCount: cut };
+  return { events: raw, inheritedEventCount: cut, [Symbol.dispose]: noopDispose };
 }
 
 interface MockCtx {
@@ -81,6 +87,7 @@ interface MockCtx {
     observeSession: (id: string) => Promise<{
       events: unknown;
       inheritedEventCount: number | undefined;
+      [Symbol.dispose]: () => void;
     }>;
   };
   on: (event: string, handler: (payload: unknown) => void) => void;

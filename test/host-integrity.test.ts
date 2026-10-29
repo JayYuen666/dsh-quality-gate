@@ -99,6 +99,11 @@ interface Report {
 /** 本次 fire 交进来的 agent.session（观察面替身的日志来源，见下面 mock 的 on）。 */
 let firedSession: unknown;
 
+/** 观察面释放器的替身：本文件多数用例不数释放次数，只需要这一位在场上。 */
+function noopDispose(): void {
+  void 0;
+}
+
 /**
  * 观察面替身的交付：读 fired session 上夹具挂的那份日志与 fork 切点（**只有测试侧**读
  * snapshotEvents 闭包——生产侧已改走官方 ctx.sessionQuery.observeSession，见 host.ts 的
@@ -108,6 +113,7 @@ let firedSession: unknown;
 function observationOfFiredSession(): {
   events: unknown;
   inheritedEventCount: number | undefined;
+  [Symbol.dispose]: () => void;
 } {
   const session = firedSession as
     | { snapshotEvents?: (from?: number) => unknown; inheritedEventCount?: number | undefined }
@@ -117,7 +123,7 @@ function observationOfFiredSession(): {
   // `observation.inheritedEventCount ?? 0` 的兜底分支真的被走到（在本处代它兜底就等于把
   // 那条分支从覆盖率与语义上一起抹掉）。
   const cut = session?.inheritedEventCount;
-  return { events: raw, inheritedEventCount: cut };
+  return { events: raw, inheritedEventCount: cut, [Symbol.dispose]: noopDispose };
 }
 
 interface MockCtx {
@@ -158,6 +164,7 @@ interface MockCtx {
     observeSession: (id: string) => Promise<{
       events: unknown;
       inheritedEventCount: number | undefined;
+      [Symbol.dispose]: () => void;
     }>;
   };
   on: (event: string, handler: (payload: unknown) => void) => void;
@@ -903,7 +910,7 @@ describe("quality-gate 门禁完整性", () => {
       applyGate(ctx, schemaDefaults());
       assert.deepEqual(
         guardCalls,
-        ["inject", "effect", "configure", "on", "effect"],
+        ["inject", "effect", "configure", "inject", "on", "effect"],
         "装载只走 inject→(子上下文)effect→configure、on 注册监听、effect 挂卸载封口；" +
           "不注入也不跑门禁（describe 只在回合里读语言时才走）",
       );
@@ -1054,6 +1061,73 @@ describe("quality-gate 门禁完整性", () => {
       assert.deepEqual(seen[0]?.[1], { projectionMode: "none" });
     });
 
+    it("每份取得的观察面恰好释放一次；读面拒绝时不调释放器", async () => {
+      const ctx = makeCtx();
+      const root = makeProject("lease");
+      applyWith(ctx);
+      // 计数独立于被测代码：上游 prepared lease 靠 `[Symbol.dispose]` 归还缓存 pin，
+      // 冷读一次不释放就永久占住一条缓存，容量驱逐永远跳过它。
+      let leased = 0;
+      let released = 0;
+      const leasedObservation = (): {
+        events: unknown;
+        inheritedEventCount: number | undefined;
+        [Symbol.dispose]: () => void;
+      } => {
+        leased += 1;
+        return { ...observationOfFiredSession(), [Symbol.dispose]: () => void (released += 1) };
+      };
+      ctx.sessionQuery = { observeSession: async () => leasedObservation() };
+      stopEdits(ctx, "s-lease", [fileIn(root)]);
+      await sleep(20);
+      assert.equal(leased, 1);
+      assert.equal(released, 1, "成功读到窗口的那一份必须释放");
+      // 再收口一趟：每趟各释放自己那一份，不是"整条生命周期只释放一次"。
+      stopEdits(ctx, "s-lease", [fileIn(root)], {}, 2);
+      await sleep(20);
+      assert.equal(leased, 2);
+      assert.equal(released, 2);
+
+      // 非数组交付：窗口没算出来，观察面照样已经取得，仍要释放。
+      const nonArray = makeCtx();
+      const nonArrayRoot = makeProject("lease-badarr");
+      applyWith(nonArray);
+      let badLeased = 0;
+      let badReleased = 0;
+      nonArray.sessionQuery = {
+        observeSession: async () => {
+          badLeased += 1;
+          return {
+            events: { not: "an array" },
+            inheritedEventCount: undefined,
+            [Symbol.dispose]: () => void (badReleased += 1),
+          };
+        },
+      };
+      stopEdits(nonArray, "s-lease-bad", [fileIn(nonArrayRoot)]);
+      await sleep(20);
+      assert.equal(badLeased, 1);
+      assert.equal(badReleased, 1, "降级路径也要释放：那一份 lease 一样 pin 着缓存");
+      assert.equal(nonArray.specs.length, 0);
+
+      // 读面自己拒绝：没有观察面可释放，不得去调不存在的释放器。
+      const rejecting = makeCtx();
+      applyWith(rejecting);
+      const captured = capture();
+      try {
+        rejecting.sessionQuery = {
+          observeSession: async (): Promise<never> => {
+            throw new Error("session log unreadable");
+          },
+        };
+        stopEdits(rejecting, "s-lease-rej", [fileIn(makeProject("lease-rej"))]);
+        await sleep(20);
+      } finally {
+        captured.restore();
+      }
+      assert.equal(rejecting.specs.length, 0, "拒绝 ⇒ 不推进游标、不开门禁");
+    });
+
     it("snapshotEvents 返回非数组 → 游标不推进、不误报通过", async () => {
       const ctx = makeCtx();
       const root = makeProject("badarr");
@@ -1124,6 +1198,7 @@ describe("quality-gate 门禁完整性", () => {
       const read = Promise.withResolvers<{
         events: unknown[];
         inheritedEventCount: number | undefined;
+        [Symbol.dispose]: () => void;
       }>();
       ctx.sessionQuery = {
         observeSession: () => read.promise,
@@ -1134,7 +1209,11 @@ describe("quality-gate 门禁完整性", () => {
       const disposer = ctx.effects.at(-1)!;
       const unload = disposer() as Promise<void>;
       await sleep(5);
-      read.resolve({ events: [editEvent(fileIn(root))], inheritedEventCount: undefined });
+      read.resolve({
+        events: [editEvent(fileIn(root))],
+        inheritedEventCount: undefined,
+        [Symbol.dispose]: noopDispose,
+      });
       await unload;
       await sleep(20);
       assert.equal(ctx.specs.length, 0, "abort 后批次起步即收口：不开任何门禁");
@@ -1416,13 +1495,13 @@ describe("quality-gate 门禁完整性", () => {
       );
     });
 
-    it("exit 126（命令不可执行）→ 未执行说明", async () => {
+    it("exit 126（门禁命令不可执行）→ 未执行说明", async () => {
       const ctx = makeCtx();
       const root = makeProject("e126");
       ctx.result = {
         exitCode: 126,
         stdout: { text: "", truncated: false },
-        stderr: { text: "permission denied", truncated: false },
+        stderr: { text: "sh: /usr/local/bin/tsc: Permission denied", truncated: false },
       };
       const log = capture();
       applyWith(ctx);
@@ -1434,6 +1513,26 @@ describe("quality-gate 门禁完整性", () => {
       }
       assert.match(injectedText(ctx), /命令不可执行/u);
       assert.ok(log.lines.some((line) => line.includes("gate tool unavailable")));
+    });
+
+    it("exit 127 但 stderr 点名的是脚本内的命令 → 代码失败，不是工具缺失", async () => {
+      const ctx = makeCtx();
+      const root = makeProject("e127-inner");
+      // 实测 `pnpm run check` 对脚本里不存在的命令回 exit 127：
+      // 这不是"门禁工具没装"，而是项目自己的 check 脚本坏了，必须按代码失败上报。
+      ctx.result = {
+        exitCode: 127,
+        stdout: { text: "", truncated: false },
+        stderr: { text: "sh: /usr/local/bin/eslint: command not found", truncated: false },
+      };
+      applyWith(ctx);
+      stopEdits(ctx, "s-127", [fileIn(root)]);
+      await sleep(20);
+      assert.equal(ctx.followupCalls.length, 1, "坏脚本不得静默通过");
+      const text = injectedText(ctx);
+      assert.match(text, /请修复上述问题/u, "127 来自脚本内部 → 必须按代码失败上报");
+      assert.match(text, /exit=127/u);
+      assert.ok(!text.includes("命令不存在"), "不得报成门禁工具缺失");
     });
 
     it("workspace 根 package.json 的 scripts 非对象 → 没有脚本信息 → 不发 pnpm check", async () => {
@@ -1505,6 +1604,33 @@ describe("quality-gate 门禁完整性", () => {
       stopEdits(ctx, "s-ws", [fileIn(sub)]);
       await sleep(20);
       assert.equal(ctx.specs.at(0)?.workdir, ws, "门禁升级到 workspace 根");
+      assert.equal(ctx.specs.at(0)?.command, "pnpm check");
+    });
+
+    it("子包自己就是 workspace 根且声明 check → 门禁止步子包，不再上溯外层伞工作区", async () => {
+      const ctx = makeCtx();
+      const umbrella = path.join(
+        tmpdir(),
+        `qg-umbrella-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      );
+      const sub = path.join(umbrella, "repos", "web");
+      mkdirSync(sub, { recursive: true });
+      writeFileSync(path.join(umbrella, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
+      writeFileSync(
+        path.join(umbrella, PKG_JSON),
+        '{"name":"umbrella","scripts":{"check":"pnpm -r check"}}',
+      );
+      writeFileSync(path.join(sub, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
+      writeFileSync(path.join(sub, PKG_JSON), '{"name":"web","scripts":{"check":"tsc"}}');
+      scratch.push(umbrella);
+      applyWith(ctx);
+      stopEdits(ctx, "s-umbrella-sub", [fileIn(sub)]);
+      await sleep(20);
+      assert.equal(
+        ctx.specs.at(0)?.workdir,
+        sub,
+        "最近的 workspace 根自己就能出门禁，不再放大到伞工作区",
+      );
       assert.equal(ctx.specs.at(0)?.command, "pnpm check");
     });
 

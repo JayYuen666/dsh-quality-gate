@@ -45,8 +45,11 @@
 profile 里那一份实例，因此不存在"把第三方源码打进发布物"的情形，本文件也就不需要附各包的
 许可证全文。
 
-- `@jayyuen66/dsh-plugin-shared`（MIT）——唯一的普通依赖。`lib/locale`、`lib/tool-events`、
+- `@jayyuen66/dsh-plugin-shared`（MIT）——普通依赖。`lib/locale`、`lib/tool-events`、
   `lib/lesson-bus`、`lib/record`、`lib/project-key` 五个子路径来自它。
+- `zod`（MIT）——普通依赖。`lib/edit-ledger.ts` 的投影状态与 `src/client-entry.ts` 的设置卡
+  值面/草稿面用它做形状校验；client 产物按宿主 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
+- `typescript`（Apache-2.0）——普通依赖，`tsc` 门禁的兜底入口。
 - `@deepseek-ai/*`（一律 MIT，由宿主提供，声明为 peer / devDependency，**不进** `dependencies`）
   ——`dsh`、`cordis`、`schemastery`、`dsh-settings`、`dsh-shell`、`dsh-sandbox`、
   `dsh-sandbox-policy`、`dsh-session`、`dsh-session-query`、`dsh-session-projection`、

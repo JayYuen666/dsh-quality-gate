@@ -34,6 +34,16 @@ export interface UiMessages {
   readonly saveRejected: string;
   /** 数字输入越界/非法时的行内提示。 */
   readonly outOfRange: string;
+  /** 门禁小节标题。 */
+  readonly gateSection: string;
+  /** 记忆反馈小节标题。 */
+  readonly memorySection: string;
+  /** 配额单位。 */
+  readonly unitTimes: string;
+  /** 时长单位。 */
+  readonly unitSeconds: string;
+  /** 保存条脏状态（{count} 为改动条数）。 */
+  readonly dirtyCount: string;
   readonly enabledLabel: string;
   readonly enabledHint: string;
   readonly injectsLabel: string;
@@ -106,11 +116,16 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saveFailed: "保存失败：{message}",
     saveRejected: "保存被宿主拒绝（配置校验未通过或写入被跳过），修改未生效",
     outOfRange: "超出允许范围，未保存",
+    gateSection: "门禁",
+    memorySection: "记忆反馈",
+    unitTimes: "次",
+    unitSeconds: "秒",
+    dirtyCount: "已修改 {count} 项",
     enabledLabel: "启用质量门禁",
     enabledHint: "关闭后回合收口不再跑门禁（模型可带病收口）",
     injectsLabel: "每回合注入配额",
     injectsHint: "门禁失败每回合最多注入几次修复指令（1-5，默认 2，防跑飞）",
-    budgetLabel: "门禁预算（毫秒）",
+    budgetLabel: "门禁预算",
     budgetHint: "单次门禁最大耗时（10s-600s，默认 300s；超时按失败注入不静默放行）",
     memoryLabel: "门禁失败沉淀记忆",
     memoryHint:
@@ -136,12 +151,17 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saveRejected:
       "Save rejected by the host (validation failed or write skipped) — changes not applied",
     outOfRange: "Out of the allowed range — not saved",
+    gateSection: "Gate",
+    memorySection: "Memory feedback",
+    unitTimes: "times",
+    unitSeconds: "seconds",
+    dirtyCount: "{count} changed",
     enabledLabel: "Enable the quality gate",
     enabledHint: "When off: no gate runs at turn end (the model may close a turn with broken code)",
     injectsLabel: "Repair injections per turn",
     injectsHint:
       "How many repair instructions a failing gate may inject per turn (1-5, default 2 — runaway protection)",
-    budgetLabel: "Gate budget (milliseconds)",
+    budgetLabel: "Gate budget",
     budgetHint:
       "Max duration of one gate run (10s-600s, default 300s; a timeout injects a failure instead of passing silently)",
     memoryLabel: "Persist gate failures to memory",

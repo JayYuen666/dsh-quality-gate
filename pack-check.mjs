@@ -47,8 +47,8 @@ const FORBIDDEN_CONTENT = [
   /\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b/u,
   // POSIX（/Users、/home）、Windows（C:\Users、\\Users）与 macOS 临时目录（/private/var/folders）
   // 三种构建机路径形态都算泄露：只列 POSIX 那种时，Windows runner 上的产物会静默通过。
-  /\/(?:Users|home|private\/var\/folders)\/[A-Za-z0-9._-]+/u,
-  /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+/u,
+  /\/(?:Users|home|private\/var\/folders)\/[\w.-]+/u,
+  /[A-Za-z]:\\Users\\[\w.-]+/u,
   /\\.pnpm\\|\/\.pnpm\//u,
 ];
 
@@ -156,7 +156,7 @@ const BUILTIN_MODULES = new Set([
 function bareSpecifiers(text) {
   const out = [];
   const pattern =
-    /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(?<quote>["'`])(?<spec>[^"'`\n]+)\k<quote>/gu;
+    /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)(?<quote>["'`])(?<spec>[^"'`\n]+)\k<quote>/gu;
   for (const match of text.matchAll(pattern)) {
     const specifier = match.groups?.spec ?? "";
     if (specifier === "" || specifier.startsWith(".") || specifier.startsWith("#")) {

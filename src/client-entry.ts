@@ -3,7 +3,7 @@
 // 参照 zvec-grep / session-rescue 的卡片模式：keyed plugins.bundle.config 槽，
 // React 由模块系统提供（rolldown external），只用 createElement。
 
-import { createElement, useEffect, useState } from "react";
+import { createElement, useState } from "react";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -23,7 +23,18 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
+import { z } from "zod";
 import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
+import {
+  CARD_UI_CSS,
+  CardForm,
+  NumberField,
+  SaveBar,
+  Section,
+  TextField,
+  ToggleField,
+  splitHint,
+} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 
@@ -45,37 +56,6 @@ const NS: LocaleNs = "quality-gate";
 // 包名真源：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；
 // test/profile-bundle.ts 把真源读进测试，test/build-client.test.ts 的漂移针据此钉。
 const BUNDLE_PKG = "@jayyuen66/dsh-quality-gate";
-
-const CARD_CSS = [
-  ".qgc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}",
-  ".qgc-card:hover{border-color:var(--dsw-alias-label-dimmed)}",
-  ".qgc-card-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}",
-  ".qgc-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:transparent;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}",
-  ".qgc-head{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}",
-  ".qgc-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}",
-  ".qgc-desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}",
-  ".qgc-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}",
-  ".qgc-chevron-open{transform:rotate(180deg)}",
-  ".qgc-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:8px 0 12px}",
-  ".qgc-row{display:flex;flex-direction:row;justify-content:space-between;align-items:center;gap:12px;padding:9px 0}",
-  ".qgc-label{font-size:13px;color:var(--dsw-alias-label-primary,inherit)}",
-  ".qgc-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99);line-height:1.5;margin-top:2px}",
-  ".qgc-switch{appearance:none;position:relative;width:34px;height:20px;border-radius:10px;background:var(--dsw-alias-fill-primary,#d8dbe2);transition:background .16s;cursor:pointer;border:0;flex:none}",
-  '.qgc-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-bg-layer-1,#fff);transition:left .16s}',
-  ".qgc-switch-on{background:var(--dsw-alias-brand-primary,#e07856)}",
-  ".qgc-switch-on::after{left:16px}",
-  ".qgc-switch:disabled{cursor:not-allowed;opacity:.6}",
-  ".qgc-input{width:100%;box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,transparent);border-radius:8px;padding:6px 8px;margin-top:4px}",
-  // 保存条（改动先暂存，点「保存」才写入生效；「撤销」丢弃本地改动）
-  ".qgc-savebar{display:flex;gap:8px;align-items:center;padding:10px 0 2px;border-top:1px dashed var(--dsw-alias-border-l2);margin-top:6px;flex-wrap:wrap}",
-  ".qgc-btn{appearance:none;font:inherit;font-size:12px;cursor:pointer;border-radius:6px;padding:4px 12px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit)}",
-  ".qgc-btn:hover:not(:disabled){border-color:var(--dsw-alias-label-dimmed)}",
-  ".qgc-btn-primary{background:var(--dsw-alias-brand-primary,#e07856);border-color:var(--dsw-alias-brand-primary,#e07856);color:var(--dsw-alias-label-primary-foreground,#fff)}",
-  ".qgc-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#e07856);outline-offset:1px}",
-  ".qgc-btn:disabled{opacity:.5;cursor:not-allowed}",
-  ".qgc-dirty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
-  ".qgc-saveerr{font-size:12px;color:#c4483f}",
-].join("\n");
 
 /** 客户端配置面直接取官方声明：`@deepseek-ai/dsh-client-ui-settings/client` 交出的
  *  `ConfigForm<T>`（getSnapshot / subscribe / mutate / set / unset）与其快照
@@ -107,223 +87,102 @@ interface CardSnapshot extends Pick<ConfigPageForm["state"], "status" | "writabl
   value: Record<string, unknown>;
 }
 
-interface ToggleRowProps {
-  label: string;
-  hint: string;
-  /** 稳定锚点（schema-coverage 门禁按此识别绑定字段）。 */
-  field: string;
-  checked: boolean;
-  disabled?: boolean;
-  onToggle: () => void;
-}
-
-function ToggleRow(props: ToggleRowProps): ReactNode {
-  return createElement(
-    "div",
-    { className: "qgc-row" },
-    createElement(
-      "div",
-      null,
-      createElement("div", { className: "qgc-label" }, props.label),
-      createElement("div", { className: "qgc-hint" }, props.hint),
-    ),
-    createElement("button", {
-      type: "button",
-      className: `qgc-switch${props.checked ? " qgc-switch-on" : ""}`,
-      role: "switch",
-      "aria-checked": props.checked,
-      "data-field": props.field,
-      disabled: props.disabled === true,
-      onClick: props.onToggle,
-    }),
-  );
-}
-
-interface NumberInputRowProps {
-  /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
-  t: Translate;
-  label: string;
-  hint: string;
-  field: string;
-  value: unknown;
-  disabled?: boolean;
-  onChange: (field: string, value: unknown) => void;
-  onClear: (field: string) => void;
-  min?: number;
-  max?: number;
-}
-
-/** 数字输入行：settings 数字字段 ↔ UI 字符串（v7 配置面补齐）。 */
-function NumberInputRow(props: NumberInputRowProps): ReactNode {
-  const num =
-    typeof props.value === "number" && Number.isFinite(props.value) ? String(props.value) : "";
-  const [text, setText] = useState(num);
-  // 越界/非法值不静默不落盘：输入框显示的值必须与落盘的值一致，否则用 invalid 状态
-  // 标 aria-invalid + 显示"未保存"提示，避免用户以为已生效。
-  const [invalid, setInvalid] = useState(false);
-  // 外部值变更（他处改设置 / unset 恢复默认）回同步输入框，不留过期快照
-  useEffect(() => {
-    setText(num);
-    setInvalid(false);
-  }, [num]);
-  // 越界提示先取成变量：嵌进 createElement 里再调 t() 会超 max-nested-calls 上限。
-  const invalidHint = props.t("outOfRange");
-  return createElement(
-    "div",
-    { className: "qgc-row" },
-    createElement(
-      "div",
-      null,
-      createElement("div", { className: "qgc-label" }, props.label),
-      createElement("div", { className: "qgc-hint" }, props.hint),
-      createElement("input", {
-        type: "number",
-        className: "qgc-input",
-        value: text,
-        disabled: props.disabled === true,
-        "aria-invalid": invalid || undefined,
-        onChange: (event: { target: { value: string } }) => {
-          const next = event.target.value;
-          setText(next);
-          // 清空 → unset（恢复 schema 默认，不留过期值）
-          if (next === "") {
-            setInvalid(false);
-            props.onClear(props.field);
-            return;
-          }
-          const numeric = Number(next);
-          if (!Number.isFinite(numeric)) {
-            setInvalid(true);
-            return;
-          }
-          const min = props.min ?? -Infinity;
-          const max = props.max ?? Infinity;
-          if (numeric >= min && numeric <= max) {
-            setInvalid(false);
-            props.onChange(props.field, numeric);
-          } else {
-            setInvalid(true);
-          }
-        },
-      }),
-      invalid
-        ? createElement(
-            "div",
-            { className: "qgc-hint", style: { color: "var(--dsw-alias-danger, #e5484d)" } },
-            invalidHint,
-          )
-        : null,
-    ),
-  );
-}
-
-interface TextInputRowProps {
-  label: string;
-  hint: string;
-  /** 稳定锚点（schema-coverage 门禁按此识别绑定字段）。 */
-  field: string;
-  value: unknown;
-  placeholder?: string;
-  disabled?: boolean;
-  onChange: (field: string, value: unknown) => void;
-  onClear: (field: string) => void;
-}
-
 /**
- * 文本输入行：settings 字符串字段 ↔ UI 字符串。
- * 清空 = unset（回到 schema 默认值）——对本卡的两个网关字段，默认值就是"留空 = 不启用"。
+ * 两个数值字段的闭区间只写在 zod schema 上：host schema（`Schema.natural().min/max`）
+ * 与卡片输入框都从这里取。zod 4.6 的 `.minValue`/`.maxValue` 直接读出折叠后的边界，
+ * `NumberField` 的 `min/max` 因此不再另抄一份数字。
  */
-function TextInputRow(props: TextInputRowProps): ReactNode {
-  const text = typeof props.value === "string" ? props.value : "";
-  const [draft, setDraft] = useState(text);
-  // 外部值变更（他处改设置 / unset 恢复默认）回同步输入框，不留过期快照（与数字行同一口径）
-  useEffect(() => {
-    setDraft(text);
-  }, [text]);
-  return createElement(
-    "div",
-    { className: "qgc-row" },
-    createElement(
-      "div",
-      null,
-      createElement("div", { className: "qgc-label" }, props.label),
-      createElement("div", { className: "qgc-hint" }, props.hint),
-      createElement("input", {
-        type: "text",
-        className: "qgc-input",
-        value: draft,
-        placeholder: props.placeholder ?? "",
-        disabled: props.disabled === true,
-        onChange: (event: { target: { value: string } }) => {
-          const next = event.target.value;
-          setDraft(next);
-          if (next.trim() === "") {
-            props.onClear(props.field);
-            return;
-          }
-          // 落盘前 trim：地址/引用名带空格是手滑，不是值的一部分
-          props.onChange(props.field, next.trim());
-        },
-      }),
-    ),
-  );
-}
+const MAX_INJECTS_VALUE = z.int().min(1).max(5);
+const GATE_BUDGET_MS_VALUE = z.int().min(10_000).max(600_000);
 
-interface SaveBarProps {
-  /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
-  t: Translate;
-  dirty: boolean;
-  writable: boolean;
-  busy: boolean;
-  error: string | null;
-  onSave: () => void;
-  onDiscard: () => void;
-}
-
-function SaveBar(props: SaveBarProps): ReactNode {
-  const { t } = props;
-  const dis = !props.writable || props.busy;
-  // 状态条三态先取成变量：嵌进 createElement 里再调 t() 会超 max-nested-calls 上限。
-  let dirtyText: string;
-  if (props.writable) {
-    dirtyText = props.dirty ? t("statusDirty") : t("statusClean");
-  } else {
-    dirtyText = t("statusReadOnly");
+/** 把 zod 折叠后的显式边界摊成可选 props（null = 该方向没声明，不伪造一个上限）。 */
+function boundsOf(schema: z.ZodNumber): { readonly min?: number; readonly max?: number } {
+  const bounds: { min?: number; max?: number } = {};
+  if (schema.minValue !== null) {
+    bounds.min = schema.minValue;
   }
-  return createElement(
-    "div",
-    { className: "qgc-savebar" },
-    createElement(
-      "button",
-      {
-        type: "button",
-        className: "qgc-btn qgc-btn-primary",
-        "data-field": "save",
-        disabled: dis || !props.dirty,
-        onClick: props.onSave,
-      },
-      props.busy ? t("saving") : t("save"),
-    ),
-    createElement(
-      "button",
-      {
-        type: "button",
-        className: "qgc-btn",
-        "data-field": "discard",
-        disabled: dis || !props.dirty,
-        onClick: props.onDiscard,
-      },
-      t("revert"),
-    ),
-    props.error === null
-      ? createElement("span", { className: "qgc-dirty" }, dirtyText)
-      : createElement("span", { className: "qgc-saveerr" }, props.error),
-  );
+  if (schema.maxValue !== null) {
+    bounds.max = schema.maxValue;
+  }
+  return bounds;
+}
+
+const MAX_INJECTS_BOUNDS = boundsOf(MAX_INJECTS_VALUE);
+const GATE_BUDGET_MS_BOUNDS = boundsOf(GATE_BUDGET_MS_VALUE);
+
+/** 两个数值 schema 的对外投影：测试用 `.minValue`/`.maxValue` 与 `z.toJSONSchema` 钉边界。 */
+export const CARD_NUMBER_SCHEMAS = {
+  maxInjectsPerTurn: MAX_INJECTS_VALUE,
+  gateBudgetMs: GATE_BUDGET_MS_VALUE,
+} as const;
+
+/** 可选整数：越界/小数/非有限值折成 undefined，只丢那一格而不是整份快照。
+ *  `.validate()` 只回答合法性、不建 ZodError，失败路径比 `.safeParse().success` 短。
+ *  不引 `z.compile`：编译器给客户端 bundle 增约 28 KB，且 CSP 环境会拒绝 `new Function`；
+ *  卡片每帧只解析一枚快照对象，收益抵不上这两条代价。 */
+const MAX_INJECTS_SCHEMA = z.preprocess(
+  (value) => (typeof value === "number" && MAX_INJECTS_VALUE.validate(value) ? value : undefined),
+  MAX_INJECTS_VALUE.optional(),
+);
+const GATE_BUDGET_MS_SCHEMA = z.preprocess(
+  (value) =>
+    typeof value === "number" && GATE_BUDGET_MS_VALUE.validate(value) ? value : undefined,
+  GATE_BUDGET_MS_VALUE.optional(),
+);
+
+/** 卡片可编辑字段的值面。逐字段先把错误类型折成 undefined：宿主给了坏形状时只丢掉
+ *  那一格，其余字段照常渲染；整份快照不是对象时才整体回落到空表。 */
+const optionalBoolean = z.preprocess(
+  (value) => (typeof value === "boolean" ? value : undefined),
+  z.boolean().optional(),
+);
+const optionalString = z.preprocess(
+  (value) => (typeof value === "string" ? value : undefined),
+  z.string().optional(),
+);
+
+/** 网关地址是 HTTP(S) URL；空串与坏文本折成未设置。本地回环/端口由 `z.url` 放行。 */
+const HTTP_URL_SCHEMA = z.url({ protocol: /^https?$/u });
+const optionalHttpUrl = z.preprocess((value: unknown): string | undefined => {
+  let text: string | undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      text = trimmed;
+    }
+  }
+  return text;
+}, HTTP_URL_SCHEMA.optional());
+const CARD_VALUES = z.object({
+  enabled: optionalBoolean,
+  maxInjectsPerTurn: MAX_INJECTS_SCHEMA,
+  gateBudgetMs: GATE_BUDGET_MS_SCHEMA,
+  memoryFeedback: optionalBoolean,
+  memoryGatewayUrl: optionalHttpUrl,
+  memoryGatewayKeyRef: optionalString,
+});
+export type CardValues = z.infer<typeof CARD_VALUES>;
+type CardField = keyof CardValues;
+/** 草稿面仍按宽 string 读：`TextField` 没有 invalid 态，URL 收口只放在快照投影上，
+ *  用户输入中的半截地址不会被当场折成空串。 */
+const CARD_FIELD_SCHEMAS: { readonly [Field in CardField]: z.ZodType<CardValues[Field]> } = {
+  enabled: optionalBoolean,
+  maxInjectsPerTurn: MAX_INJECTS_SCHEMA,
+  gateBudgetMs: GATE_BUDGET_MS_SCHEMA,
+  memoryFeedback: optionalBoolean,
+  memoryGatewayUrl: optionalString,
+  memoryGatewayKeyRef: optionalString,
+};
+
+/** 快照值投影：整份一次解析；每个字段的坏形状与越界值各自折成 undefined，其余字段照常渲染。 */
+export function projectCardValues(raw: Record<string, unknown>): CardValues {
+  const parsed = CARD_VALUES.safeParse(raw);
+  return parsed.success ? parsed.data : {};
 }
 
 /** save() 落到表单上需要的全部依赖：写通道（含 0.1.7 受理位）+ 本回合的 touched 快照 +
  *  三个状态位的 setter（React 的 setState 身份稳定，逐次渲染传同一引用）。 */
-interface SaveChannels {
+export interface SaveChannels {
   t: Translate;
   set: (field: string, value: unknown) => Promise<boolean>;
   unset: (field: string) => Promise<boolean>;
@@ -390,178 +249,105 @@ async function writeTouched(channels: SaveChannels): Promise<void> {
   }
 }
 
-/** 卡片头部的渲染输入（标题/描述/折叠箭头，元素与从前的内联写法逐个同形）。 */
-interface CardHeaderProps {
-  /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
-  t: Translate;
-  open: boolean;
-  onToggle: () => void;
-}
-
-/** 头部：渲染子树扁平化（规避 max-nested-calls）——DOM 各层拆成独立 createElement 元素
- *  const，逐层用变量组合，避免 createElement 回调逐层内嵌。 */
-function buildCardHeader(props: CardHeaderProps): ReactNode {
-  const { t, open, onToggle } = props;
-  const nameEl = createElement("div", { className: "qgc-name" }, t("cardTitle"));
-  const descEl = createElement("div", { className: "qgc-desc" }, t("cardDescription"));
-  const headDiv = createElement("div", { className: "qgc-head" }, nameEl, descEl);
-  const chevronPathData = "M3 5l4 4 4-4";
-  // SVG path 的 `d` 属性名只有 1 字符：用 ≥2 字符的变量作计算键，规避 id-length /
-  // no-useless-computed-key（字面量 'd' 会被 oxfmt 反引号回短标识符而撞 id-length）。
-  const chevronPathAttr = "d";
-  const chevronPath = createElement("path", {
-    [chevronPathAttr]: chevronPathData,
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.5,
-    strokeLinecap: "round",
-    strokeLinejoin: "round",
-  });
-  const chevron = createElement(
-    "svg",
-    {
-      width: 14,
-      height: 14,
-      viewBox: "0 0 14 14",
-      "aria-hidden": true,
-      className: `qgc-chevron${open ? " qgc-chevron-open" : ""}`,
-    },
-    chevronPath,
-  );
-  return createElement(
-    "button",
-    {
-      type: "button",
-      className: "qgc-header",
-      "aria-expanded": open,
-      onClick: onToggle,
-    },
-    headDiv,
-    chevron,
-  );
-}
-
-/** 展开态六个设置行 + 保存条的渲染输入（与卡片渲染状态一一对应，逐项同形）。 */
-interface CardRowsProps {
-  /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
+interface SectionInputs {
+  /** 取文案（官方 ctx.locale.bind 的结果）。 */
   t: Translate;
   writable: boolean;
-  /** 渲染取值：touched 优先，快照兜底（未触碰字段实时跟随外部快照）。 */
-  eff: (field: string) => unknown;
-  setField: (field: string, val: unknown) => void;
-  clearField: (field: string) => void;
-  dirty: boolean;
-  busy: boolean;
-  saveError: string | null;
-  onSave: () => void;
-  onDiscard: () => void;
+  /** 渲染取值：touched 优先，快照兜底。 */
+  eff: <Field extends CardField>(field: Field) => CardValues[Field];
+  setField: (field: CardField, value: unknown) => void;
 }
 
-/** 展开态的 `ul` 本体：行元素仍按从前的顺序逐个传给同一个 createElement（不折成数组
- *  子节点，保持宿主侧 children 形状一致）。 */
-function buildCardBody(props: CardRowsProps): ReactNode {
-  const { t, writable, eff, setField, clearField, dirty, busy, saveError, onSave, onDiscard } =
-    props;
-  const rowEnabled = createElement(ToggleRow, {
+/** 门禁小节：总开关 + 注入配额 + 预算（毫秒按秒显示）。 */
+function buildGateSection(props: SectionInputs): ReactNode {
+  const { t, writable, eff, setField } = props;
+  const maxInjects = eff("maxInjectsPerTurn");
+  const budgetMs = eff("gateBudgetMs");
+  const budgetSeconds = budgetMs === undefined ? undefined : budgetMs / 1000;
+  const budgetMinSeconds = (GATE_BUDGET_MS_BOUNDS.min ?? 0) / 1000;
+  const budgetMaxSeconds = (GATE_BUDGET_MS_BOUNDS.max ?? 0) / 1000;
+  const enabled = createElement(ToggleField, {
     label: t("enabledLabel"),
-    hint: t("enabledHint"),
+    ...splitHint(t("enabledHint")),
     field: "enabled",
-    checked: eff("enabled") !== false,
+    checked: eff("enabled") ?? true,
     disabled: !writable,
-    onToggle: () => {
-      setField("enabled", eff("enabled") === false);
+    onChange: (next: boolean): void => {
+      setField("enabled", next);
     },
   });
-  const rowInjects = createElement(NumberInputRow, {
-    t,
+  const injects = createElement(NumberField, {
     label: t("injectsLabel"),
-    hint: t("injectsHint"),
+    ...splitHint(t("injectsHint")),
     field: "maxInjectsPerTurn",
-    value: eff("maxInjectsPerTurn"),
+    value: maxInjects,
+    ...MAX_INJECTS_BOUNDS,
+    step: 1,
+    unit: t("unitTimes"),
+    invalidHint: t("outOfRange"),
     disabled: !writable,
-    onChange: (field: string, val: unknown) => {
-      setField(field, val);
+    onChange: (next: number | undefined): void => {
+      setField("maxInjectsPerTurn", next);
     },
-    onClear: (field: string) => {
-      clearField(field);
-    },
-    min: 1,
-    max: 5,
   });
-  const rowBudget = createElement(NumberInputRow, {
-    t,
+  const budget = createElement(NumberField, {
     label: t("budgetLabel"),
-    hint: t("budgetHint"),
+    ...splitHint(t("budgetHint")),
     field: "gateBudgetMs",
-    value: eff("gateBudgetMs"),
+    value: budgetSeconds,
+    min: budgetMinSeconds,
+    max: budgetMaxSeconds,
+    step: 1,
+    unit: t("unitSeconds"),
+    invalidHint: t("outOfRange"),
     disabled: !writable,
-    onChange: (field: string, val: unknown) => {
-      setField(field, val);
+    onChange: (next: number | undefined): void => {
+      setField("gateBudgetMs", next === undefined ? undefined : next * 1000);
     },
-    onClear: (field: string) => {
-      clearField(field);
-    },
-    min: 10_000,
-    max: 600_000,
   });
-  const rowMemory = createElement(ToggleRow, {
+  return createElement(Section, { title: t("gateSection") }, enabled, injects, budget);
+}
+
+/** 记忆反馈小节：开关 + 网关地址 + 密钥引用。 */
+function buildMemorySection(props: SectionInputs): ReactNode {
+  const { t, writable, eff, setField } = props;
+  const gatewayUrl = eff("memoryGatewayUrl") ?? "";
+  const keyRef = eff("memoryGatewayKeyRef") ?? "";
+  const memory = createElement(ToggleField, {
     label: t("memoryLabel"),
-    hint: t("memoryHint"),
+    ...splitHint(t("memoryHint")),
     field: "memoryFeedback",
     checked: eff("memoryFeedback") === true,
     disabled: !writable,
-    onToggle: () => {
-      setField("memoryFeedback", eff("memoryFeedback") !== true);
+    onChange: (next: boolean): void => {
+      setField("memoryFeedback", next);
     },
   });
-  const rowGatewayUrl = createElement(TextInputRow, {
+  const url = createElement(TextField, {
     label: t("gatewayUrlLabel"),
-    hint: t("gatewayUrlHint"),
+    ...splitHint(t("gatewayUrlHint")),
     field: "memoryGatewayUrl",
-    value: eff("memoryGatewayUrl"),
+    value: gatewayUrl,
     placeholder: "http://127.0.0.1:8420",
+    monospace: true,
     disabled: !writable,
-    onChange: (field: string, val: unknown) => {
-      setField(field, val);
-    },
-    onClear: (field: string) => {
-      clearField(field);
+    onChange: (next: string): void => {
+      setField("memoryGatewayUrl", next.trim() === "" ? undefined : next.trim());
     },
   });
-  const rowGatewayKeyRef = createElement(TextInputRow, {
+  const keyRefField = createElement(TextField, {
     label: t("keyRefLabel"),
-    hint: t("keyRefHint"),
+    ...splitHint(t("keyRefHint")),
     field: "memoryGatewayKeyRef",
-    value: eff("memoryGatewayKeyRef"),
+    value: keyRef,
     placeholder: "TDAI_GATEWAY_KEY",
+    monospace: true,
     disabled: !writable,
-    onChange: (field: string, val: unknown) => {
-      setField(field, val);
-    },
-    onClear: (field: string) => {
-      clearField(field);
+    onChange: (next: string): void => {
+      setField("memoryGatewayKeyRef", next.trim() === "" ? undefined : next.trim());
     },
   });
-  const rowSave = createElement(SaveBar, {
-    t,
-    dirty,
-    writable,
-    busy,
-    error: saveError,
-    onSave,
-    onDiscard,
-  });
-  return createElement(
-    "ul",
-    { className: "qgc-body" },
-    rowEnabled,
-    rowInjects,
-    rowBudget,
-    rowMemory,
-    rowGatewayUrl,
-    rowGatewayKeyRef,
-    rowSave,
-  );
+  return createElement(Section, { title: t("memorySection") }, memory, url, keyRefField);
 }
 
 function DgCard(props: {
@@ -572,31 +358,27 @@ function DgCard(props: {
   unset: (field: string) => Promise<boolean>;
 }): ReactNode {
   const { t } = props;
-  const [open, setOpen] = useState(false);
   // 框架把 slots.register 注入的 hooks.card 映射为 useCard prop（client-runner PropsHooks）——
   // 直接读 props.hooks.card 会崩（props.hooks 不存在）。与 zvec-grep 卡同契约。
   const snap = props.useCard((cardSnap) => cardSnap);
-  // 快照恒有值：框架把 hooks.card 绑成 `selector(getSnapshot())`（installed
-  // dsh-client-ui-renderer/lib/client.js 的 bindSnapshotSelector → useSyncExternalStoreWithSelector），
-  // 而本卡 cardStore.getSnapshot 的返回类型是必选的 CardSnapshot（无快照时交 EMPTY_SNAPSHOT），
-  // 官方 ConfigForm.getSnapshot 同样必回 ConfigFormSnapshot ⇒ 这里没有任何 nullish 面，
-  // `?.` / `??` 是死守卫（value 的兜底在 cardStore 里已做过一次）。
-  const { value } = snap;
-  // 官方快照的 writable 是必选 boolean（memory 模式永假），故直接取值即可，
-  // 不再 `=== true` 假装它可能是别的形状；status==='ready' 仍是必要前置。
+  const value = projectCardValues(snap.value);
   const writable = snap.status === "ready" && snap.writable;
   // 保存条状态：touched = 用户动过的字段（undefined = 恢复默认/unset）
   const [touched, setTouched] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  /** 渲染取值：touched 优先，快照兜底（未触碰字段实时跟随外部快照）。 */
-  const eff = (field: string): unknown => (field in touched ? touched[field] : value[field]);
-  const dirty = diffTouched(touched, value).length > 0;
-  const setField = (field: string, val: unknown): void => {
-    setTouched((prev) => ({ ...prev, [field]: val }));
+  /** 渲染取值：touched 优先（经 zod 收窄），快照兜底（未触碰字段实时跟随外部快照）。 */
+  const eff = <Field extends CardField>(field: Field): CardValues[Field] => {
+    if (!(field in touched)) {
+      return value[field];
+    }
+    const parsedTouched = CARD_FIELD_SCHEMAS[field].safeParse(touched[field]);
+    return parsedTouched.success ? parsedTouched.data : undefined;
   };
-  const clearField = (field: string): void => {
-    setTouched((prev) => ({ ...prev, [field]: undefined }));
+  const dirtyKeys = diffTouched(touched, value);
+  const dirty = dirtyKeys.length > 0;
+  const setField = (field: CardField, val: unknown): void => {
+    setTouched((prev) => ({ ...prev, [field]: val }));
   };
   const save = (): void => {
     const keys = diffTouched(touched, value);
@@ -620,33 +402,24 @@ function DgCard(props: {
     setTouched({});
     setSaveError(null);
   };
-  const header = buildCardHeader({
-    t,
-    open,
-    onToggle: () => {
-      setOpen(!open);
-    },
+  const inputs: SectionInputs = { t, writable, eff, setField };
+  const gate = buildGateSection(inputs);
+  const memory = buildMemorySection(inputs);
+  const saveBar = createElement(SaveBar, {
+    dirty,
+    busy,
+    writable,
+    error: saveError,
+    saveLabel: t("save"),
+    savingLabel: t("saving"),
+    revertLabel: t("revert"),
+    dirtyLabel: t("dirtyCount", { count: dirtyKeys.length }),
+    cleanLabel: t("statusClean"),
+    readOnlyLabel: t("statusReadOnly"),
+    onSave: save,
+    onDiscard: discard,
   });
-  const body = open
-    ? buildCardBody({
-        t,
-        writable,
-        eff,
-        setField,
-        clearField,
-        dirty,
-        busy,
-        saveError,
-        onSave: save,
-        onDiscard: discard,
-      })
-    : null;
-  return createElement(
-    "li",
-    { className: `qgc-card${open ? " qgc-card-open" : ""}` },
-    header,
-    body,
-  );
+  return createElement(CardForm, null, gate, memory, saveBar);
 }
 
 /**
@@ -743,8 +516,8 @@ const inject = ["slots", "configForms", "locale"];
 function apply(ctx: ClientCtx): void {
   ctx.effect(() => {
     const tag = document.createElement("style");
-    tag.id = "quality-gate-card-css";
-    tag.textContent = CARD_CSS;
+    tag.id = "dsh-card-ui-css-quality-gate";
+    tag.textContent = CARD_UI_CSS;
     document.head.append(tag);
     return () => {
       tag.remove();
@@ -802,4 +575,6 @@ function apply(ctx: ClientCtx): void {
   });
 }
 
-export { inject, apply };
+// writeTouched 一并导出：保存期间「编辑不丢」的行为用例要直接驱动它（渲染面留在覆盖率
+// 分母外，但这段纯异步逻辑不值得只为测它起一套 DOM——接缝见 test/save-during-edit.test.ts）。
+export { inject, apply, writeTouched };

@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-quality-gate?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
-  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-quality-gate?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-quality-gate?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
@@ -62,9 +62,10 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 22.12`。** 产物用到 `AbortSignal.any` 这类较新的运行面。
-- **要求宿主 `dsh` 在 `0.2.1-rc.3` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.3`），它**单独决定**兼容性；预发布版本参与范围比较，`0.3.0` 及以后要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。
+- **要求宿主 `dsh` 在 `0.2.1-rc.3` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.3`），它**单独决定**兼容性；预发布版本参与范围比较，`0.3.0` 及以后要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须已在同一 registry 上**，否则整组 404。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行期无网络动作，从不走 `npx` 的自动下载。
+- **`zod` 也是真实的 `dependencies`**：编辑台账投影状态与设置卡的值面/草稿面用它校验形状；版本走伞根 catalog。client 产物按宿主 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
 - **`@deepseek-ai/schemastery` 由宿主解析、不由本包安装**：只有宿主 fork 的那一枚能把 `.volatile()` 字段解析成活引用，换成公共 schemastery 就变成改设置要重启才生效。`@deepseek-ai/dsh-credentials` 的两枚校验函数是值导入，因此落在 `peerDependencies`——`dependencies` 里不放任何 `@deepseek-ai/*` 是发布契约（`test/publish-manifest.test.ts` 钉着：写在 `dependencies` 里的宿主包会在消费方 profile 里物化出第二份，与运行中的宿主并存）。
 - 本地目录形态安装需 pnpm ≥ 12.3.0（12.0.0 的本地目录 `add` 有已知缺陷）。
 
@@ -110,7 +111,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 | `tsc --noEmit` | 根同时有 `package.json` 与 `tsconfig.json`；缺 `tsconfig.json` 不算 TS 项目 |
 
 - `tsc` 在命令里只是逻辑名：入口在运行期解析——工程自己装的 `typescript` 优先，其次随包那份，最后 PATH 上的 `tsc`（由「工具不可用」出口报成未执行）；绝不走 `npx` 的自动下载。
-- 根探测：从编辑文件向上最多 `maxRootDepth`（默认 10）层找最近清单根；monorepo 子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只在该根**产得出门禁**时升级，否则保留子包自己的根（外层没有 `check` 脚本的 workspace 不得吃掉子包的 `tsc` / `ruff` 门禁）。
+- 根探测：从编辑文件向上最多 `maxRootDepth`（默认 10）层找最近清单根；子包**自己就是** workspace 根且能产出 `pnpm check` 时就地执行（改一个包不得把整棵伞工作区拖进来）；否则 monorepo 子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只在该根**产得出门禁**时升级，再否则保留子包自己的根（外层没有 `check` 脚本的 workspace 不得吃掉子包的 `tsc` / `ruff` 门禁）。
 - 预算与并发：总预算 `gateBudgetMs`；每根取 `max(10s, 预算/根数)` 与实际剩余的较小值；剩余不足 5s 的尾段不再起跑，按「未执行」注入清单。门禁顺序执行，一次只注入一个失败。
 - 证据上限：每条流内存留存 64 KiB（截断保尾部，首条错误才是根因），被截断时从落盘文件有界读回 4 KiB 头部；单会话编辑记账 500 个文件，超出按插入序淘汰并 warn。
 
@@ -122,7 +123,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | 总开关；关掉即收口不再核验 |
 | `maxInjectsPerTurn` | natural，1–5 | `2` | 修复指令注入配额，按会话跨回合累计 |
-| `gateBudgetMs` | natural，10000–600000 | `300000` | 门禁总预算；超时按失败注入，不静默放行 |
+| `gateBudgetMs` | natural，10000–600000 | `300000` | 门禁总预算；超时按「未执行」注入，不静默放行 |
 | `memoryFeedback` | boolean | `false` | 是否把代码型失败额外沉淀到记忆网关 |
 | `memoryGatewayUrl` | string | `""`（未配置） | 网关基址；设置值优先，留空回落 env `TDAI_GATEWAY_URL` |
 | `memoryGatewayKeyRef` | string（凭据引用名） | `TDAI_GATEWAY_KEY` | 网关密钥的引用名；值走宿主凭据服务，不落设置 |
@@ -168,7 +169,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 | 问题 | 回答 |
 | --- | --- |
 | pnpm 工程为什么没跑 `pnpm check`？ | 根 `package.json` 没声明非空 `check` 脚本。刻意取舍：假失败比漏检查更贵 |
-| 门禁说「未能执行」，是代码错了吗？ | 不是。沙箱策略拒绝、runner 起不来、超时、取消、exit 126/127、预算不足都属此类。注入文案明确要求**不要为此修改代码**，并以 `gate-not-run` 单独上报总线 |
+| 门禁说「未能执行」，是代码错了吗？ | 不是。沙箱策略拒绝、runner 起不来、超时、取消、预算不足，以及 stderr **点名门禁命令自身**（工具没装）的 exit 126/127 都属此类。注入文案明确要求**不要为此修改代码**，并以 `gate-not-run` 单独上报总线。若 126/127 来自你自己的 `check` 脚本内部，那是代码失败，按代码失败上报 |
 | 会不会无限修下去？ | 配额耗尽后注入一次用户可见的放行说明并停止自动修复，直到某次全部干净通过才重新计数 |
 | 临时停掉？ | 设置卡关 `enabled`，或 `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate` |
 | `tsc` 用哪个版本？ | 工程自己装的那份优先，其次随包安装的 `typescript`，都不在才回落 PATH——从不经 `npx` 下载 |

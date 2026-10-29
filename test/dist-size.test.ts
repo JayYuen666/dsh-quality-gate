@@ -16,10 +16,15 @@ import { describe, it } from "vitest";
 
 const pkgDir = path.resolve(import.meta.dirname, "..");
 
-/** host 半产物体积预算（实测 61,110 B）：宿主按包名载入它，这些字节是真实装载成本。 */
-const HOST_BUDGET_BYTES = 70_500;
-/** client 半产物体积预算（实测 20,222 B）：浏览器侧加载，按平台计账。 */
-const CLIENT_BUDGET_BYTES = 23_500;
+/** host 半产物体积预算（实测 75,036 B）：宿主按包名载入它，这些字节是真实装载成本。
+ *  本轮新增编辑台账投影（折叠 + 双协议读口 + zod 状态校验）后按实测值上浮约 15% 取 86,500 B。 */
+const HOST_BUDGET_BYTES = 86_500;
+/** client 半产物体积预算（实测 34,895 B）：浏览器侧加载，按平台计账。
+ *  设置卡改用 shared card-ui 后曾按 28,650 B 实测取 33,000 B；本轮数值字段改用
+ *  zod 区间声明（`.int().min().max()`，NumberField 的 min/max 读 schema 的
+ *  `.minValue`/`.maxValue`），网关地址改用 `z.url()`，按 34,895 B 实测上浮约 15%
+ *  取 40,500 B。 */
+const CLIENT_BUDGET_BYTES = 40_500;
 
 /** 产物文件名与预算的对照。 */
 const BUDGETS: readonly (readonly [string, number])[] = [

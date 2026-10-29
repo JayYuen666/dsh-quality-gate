@@ -189,7 +189,7 @@ function skipLiteralAt(text: string, from: number): number | undefined {
  */
 function schemaObjectSites(hostTs: string): number[] {
   const sites: number[] = [];
-  for (const match of hostTs.matchAll(/[\s]*=[\s]*Schema\.object[\s]*\(/gu)) {
+  for (const match of hostTs.matchAll(/\s*=\s*Schema\.object\s*\(/gu)) {
     sites.push(match.index);
   }
   return sites;

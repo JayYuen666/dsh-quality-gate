@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-quality-gate?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
-  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-quality-gate?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-quality-gate?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
@@ -50,7 +50,7 @@
 - **Turn-end, not in-flight.** The hook is the host event `agent/turn-stopping`: read this session's **successful** edits → walk each file up to the nearest manifest root → detect the gate → run it. A failure is injected back via `agent.followup`; the host still checks the inbox after turn-stopping, so a repair instruction opens a new turn.
 - **One run has exactly three outcomes**: `pass` (it really finished with exit 0), `code-failure` (it ran and reported code errors), `not-run` (it never ran). A check that did not truly complete is never recorded as passed; and "could not run" is never conflated with "code error" — the former injects "please confirm manually", writes no memory and never reaches the lesson bus as `gate-failure`.
 - **Only commands the project itself declares.** One of four whitelist commands per root; without a declaration the gate is simply not issued — better no gate than an invented command that fails deterministically (see "The four gate commands").
-- **Runaway protection.** Repair injections are quota'd per session across turns; once spent, one user-visible release note is injected and auto-repair stops. The total gate time is budget-capped; a timeout injects a failure instead of passing silently.
+- **Runaway protection.** Repair injections are quota'd per session across turns; once spent, one user-visible release note is injected and auto-repair stops. The total gate time is budget-capped; a timeout is injected as "could not run" instead of passing silently.
 - **It does not edit code, does not block dangerous commands (that is danger-guard's job) and does not write any file.**
 
 ## <img src="https://api.iconify.design/lucide/package.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Install
@@ -62,9 +62,10 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`. The package is on the public npm registry, so installation needs no credentials.
 
 - **Requires Node.js `>= 22.12`.** The artifacts use newer runtime faces such as `AbortSignal.any`.
-- **Requires a host `dsh` on the `0.2.1-rc.3` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.3`), and it **decides alone**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit, risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`.
+- **Requires a host `dsh` on the `0.2.1-rc.3` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.3`), and it **decides alone**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit, risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`.The support window rolls: this package is verified against the three most recently released host versions at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **The runtime dependency `@jayyuen66/dsh-plugin-shared` must already be on the same registry**, otherwise the whole set 404s.
 - **`typescript` is a real `dependencies` entry**: the fallback entry for the `tsc` gate — the project's own install wins, then the copy shipped with this package; no network action at runtime, never an `npx` auto-download.
+- **`zod` is also a real `dependencies` entry**: the edit-ledger projection state and the settings card's value/draft faces use it for shape validation, versioned through the umbrella catalog. The client artifact keeps `require("zod")` externalized via the host's `PLATFORM_MODULES`.
 - **`@deepseek-ai/schemastery` is resolved from the host, not installed by this package**: only the host's fork resolves `.volatile()` fields into live references; a public schemastery turns "edit a setting" into "restart to apply". Two validator functions of `@deepseek-ai/dsh-credentials` are value imports, so that package sits in `peerDependencies` — no `@deepseek-ai/*` under `dependencies` is a publishing contract (`test/publish-manifest.test.ts` enforces it: a host package there materializes a second copy in the consumer's profile, next to the running host).
 - Installing a local directory needs pnpm ≥ 12.3.0 (12.0.0 has a known bug in that path).
 
@@ -108,7 +109,7 @@ The whitelist is locked at type level (the `GateCommand` union in `lib/gate-dete
 | `tsc --noEmit` | The root has both `package.json` and `tsconfig.json`; without `tsconfig.json` it is not a TS project |
 
 - `tsc` is only a logical name in the command: the entry is resolved at runtime — the project's own `typescript` first, then the copy shipped with this package, finally `tsc` on PATH (reported as not-run by the "tool unavailable" exit); never an `npx` auto-download.
-- Root detection: from each edited file, up to `maxRootDepth` (default 10) levels to the nearest manifest root; a monorepo package is upgraded to the workspace root holding `pnpm-workspace.yaml` — but only when that root **yields a gate**; otherwise the package keeps its own root (an outer workspace without a `check` script must not swallow the package's `tsc`/`ruff` gate).
+- Root detection: from each edited file, up to `maxRootDepth` (default 10) levels to the nearest manifest root; a package that is **itself** a workspace root yielding `pnpm check` keeps its own root (a change in one package must not fan out into the whole umbrella workspace), and otherwise a monorepo package is upgraded to the workspace root holding `pnpm-workspace.yaml` — but only when that root **yields a gate**; otherwise the package keeps its own root (an outer workspace without a `check` script must not swallow the package's `tsc`/`ruff` gate).
 - Budget and concurrency: total budget `gateBudgetMs`; each root gets the smaller of `max(10s, budget / root count)` and the time actually left; a tail with under 5s left does not start and is injected as "did not run". Gates run sequentially and only one failure is injected at a time.
 - Evidence caps: 64 KiB per stream stays in memory (the tail is kept; the first error is the root cause), and when truncated a bounded 4 KiB head excerpt is read back from the spill file; the per-session edit accumulator holds 500 files, evicting oldest-first with a warning.
 
@@ -120,7 +121,7 @@ The namespace `quality-gate` is the settings entry id; the fields projected into
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | Master switch; off means no turn-end verification at all |
 | `maxInjectsPerTurn` | natural, 1–5 | `2` | Repair-injection quota, accumulated per session across turns |
-| `gateBudgetMs` | natural, 10000–600000 | `300000` | Total gate budget; a timeout injects a failure instead of passing silently |
+| `gateBudgetMs` | natural, 10000–600000 | `300000` | Total gate budget; a timeout is injected as "could not run" instead of passing silently |
 | `memoryFeedback` | boolean | `false` | Additionally persist code-level failures to the memory gateway |
 | `memoryGatewayUrl` | string | `""` (unset) | Gateway base URL; the setting wins, empty falls back to the env `TDAI_GATEWAY_URL` |
 | `memoryGatewayKeyRef` | string (credential ref name) | `TDAI_GATEWAY_KEY` | Ref name of the gateway key; the value lives in the host credential service, never in settings |
@@ -166,7 +167,7 @@ Settings persist in the host's settings file under the dsh data directory; the c
 | Question | Answer |
 | --- | --- |
 | Why did my pnpm project not run `pnpm check`? | Its root `package.json` declares no non-empty `check` script — a deliberate trade: a false failure costs more than a missed check |
-| The gate said "could not run" — is my code broken? | No. Sandbox policy denial, a runner that will not start, a timeout, a cancellation, exit 126/127 and an exhausted budget all land here. The injected text explicitly says **do not change code because of it**, and it is reported separately as `gate-not-run` |
+| The gate said "could not run" — is my code broken? | No. Sandbox policy denial, a runner that will not start, a timeout, a cancellation, an exhausted budget, and exit 126/127 **whose stderr names the gate command itself** (tool not installed) all land here. The injected text explicitly says **do not change code because of it**, and it is reported separately as `gate-not-run`. A 126/127 raised *inside* your own `check` script is a code failure and is reported as such |
 | Can it loop forever? | Once the quota is spent it injects one user-visible release note, stops auto-repair, and only counts again after a fully clean pass |
 | Stop it temporarily? | Turn off `enabled` on the card, or run `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate` |
 | Which `tsc` is used? | The project's own install first, then the `typescript` shipped with this package, and PATH only as the last resort — never an `npx` download |

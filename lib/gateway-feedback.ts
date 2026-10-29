@@ -22,6 +22,9 @@ import { deriveAgentId } from "./gateway-target.ts";
 import type { GatewayTarget } from "./gateway-target.ts";
 import type { QualityGateMessages } from "./messages.ts";
 
+/** 基址末尾斜杠。 */
+const TRAILING_SLASHES = /\/+$/u;
+
 /** 反馈尽力而为：5s 封顶，超时/失败只 warn（不吃掉门禁主流程）。 */
 const FEEDBACK_TIMEOUT_MS = 5000;
 
@@ -34,7 +37,7 @@ export async function pushGateFeedback(
   // 目标面在**发请求之前**校验：本函数是导出的公共入口，不能假定调用方已走过
   // resolveGatewayUrl 的归一（空 url 会拼出相对路径、fetch 抛 `Failed to parse URL`；
   // 空 key 会发出 `Authorization: Bearer `，网关侧只会回 401，光看日志分辨不出是配置空）。
-  const base = target.url.trim().replace(/\/+$/u, "");
+  const base = target.url.trim().replace(TRAILING_SLASHES, "");
   if (base === "" || target.key.trim() === "") {
     throw new Error("投递目标不完整：url 与 key 都必须非空（目标面应由调用方解析后传入）");
   }

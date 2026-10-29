@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Quality gate",
+    "description": "Runs the project's own checks when a turn ends and feeds failures back to the model, so a turn does not close with a red gate.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -78,7 +78,14 @@ function profileBundleListOrNull(): string[] | null {
   const listed = isRecord(profileSection) ? profileSection["bundles"] : [];
   assert.ok(Array.isArray(listed), `${file} 的 dsh.profile.bundles 不是数组`);
   const items: unknown[] = listed;
-  return items.filter((item): item is string => typeof item === "string");
+  const bundles = items.filter((item): item is string => typeof item === "string");
+  // 同名 profile 未必属于本工作面：`--from-default-profile web` 也会造一个只装官方基座的
+  // web profile。清单里一个 @jayyuen66 包都没有时按「没装 profile」处理——机器侧针只钉
+  // 在真装着本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
+  if (!bundles.some((name) => name.startsWith("@jayyuen66/"))) {
+    return null;
+  }
+  return bundles;
 }
 
 /**
@@ -130,7 +137,7 @@ function registeredSlotKey(text: string): string {
   // 只看注册点之后的一小段：产物里别处也有 `key:`（React list key），不能全局抓。
   const nearby = text.slice(marker, marker + 500);
   const groups =
-    /key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][A-Za-z0-9_$]*))/u.exec(nearby)?.groups ?? {};
+    /key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][\w$]*))/u.exec(nearby)?.groups ?? {};
   const literal = groups["literal"] ?? "";
   if (literal !== "") {
     return literal;

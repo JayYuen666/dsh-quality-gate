@@ -95,6 +95,11 @@ interface MockLog {
 
 let firedSession: unknown;
 
+/** 观察面释放器的替身：本文件的用例不数释放次数，只需要这一位在场上。 */
+function noopDispose(): void {
+  void 0;
+}
+
 /**
  * 观察面替身的交付：读 fired session 上夹具自己挂的那份日志与 fork 切点
  * （**只有测试侧**读 snapshotEvents 闭包——生产侧已改走官方观察面，见 mock 的 on）。
@@ -103,6 +108,7 @@ let firedSession: unknown;
 function observationOfFiredSession(): {
   events: unknown;
   inheritedEventCount: number | undefined;
+  [Symbol.dispose]: () => void;
 } {
   const session = firedSession as
     | {
@@ -115,7 +121,7 @@ function observationOfFiredSession(): {
   // `observation.inheritedEventCount ?? 0` 的兜底分支真的被走到（在本处代它兜底就等于把
   // 那条分支从覆盖率与语义上一起抹掉）。
   const cut = session?.inheritedEventCount;
-  return { events: raw, inheritedEventCount: cut };
+  return { events: raw, inheritedEventCount: cut, [Symbol.dispose]: noopDispose };
 }
 
 interface MockCtx {
@@ -171,10 +177,16 @@ interface MockCtx {
    * 切片，游标由生产侧自己切（见 host.ts 的 resolveEventWindow）。要模拟“未装配”就
    * `delete ctx.sessionQuery`，要模拟“拒绝/非数组交付”就整个换掉本字段（见 host-integrity）。
    */
+  /** 官方会话投影注册表（可选注入）：缺省 undefined = 精简组合，门禁回退全量扫描。 */
+  sessionProjections?: {
+    register: (definition: unknown) => unknown;
+    stateOf: (session: unknown, key: string) => unknown;
+  };
   sessionQuery?: {
     observeSession: (id: string) => Promise<{
       events: unknown;
       inheritedEventCount: number | undefined;
+      [Symbol.dispose]: () => void;
     }>;
   };
   on: (event: string, handler: (payload: unknown) => void) => void;
@@ -254,8 +266,12 @@ function createMockCtx(): MockCtx {
       },
       describe: () => ctx.describeRows,
     },
-    inject: (_deps, attach) => {
-      attach(ctx);
+    inject: (deps, attach) => {
+      // cordis 只在依赖齐备时激活子 fiber；替身按 ctx.get 判在位（settings 永远在，
+      // sessionProjections 只有在用例显式装配时才注入）。
+      if (deps.every((dep) => ctx.get(dep) !== undefined)) {
+        attach(ctx);
+      }
     },
     on(event, handler) {
       // 记录本次 fire 的 agent.session，好让观察面替身交回该夹具自己挂的那份日志——
@@ -1194,6 +1210,8 @@ describe("quality-gate host 接线", () => {
     };
     try {
       ctx.gateExitCode = 127;
+      // 127 只有 stderr 点名门禁命令自己（tsc）时才是"工具缺失"；这条用例验的就是那一支。
+      ctx.gateStderr = "sh: tsc: command not found";
       ctx.handlers["agent/turn-stopping"]!({ agent: agentWith(1, gateEvt(project)), turn: 1 });
       await sleep(20);
       assert.equal(ctx.followupCalls.length, 1, "没跑成的门禁不得静默通过");
@@ -1940,6 +1958,8 @@ describe("quality-gate 注入文案双语（@deepseek-ai/dsh-client-locale 的 s
     const project = makeProject("i18n-notrun");
     const env = createMockCtx();
     env.gateExitCode = 127;
+    // 127 只有 stderr 点名门禁命令（tsc）时才是「工具装不上」；验证按语言渲染 not-run 文案。
+    env.gateStderr = "sh: tsc: command not found";
     env.describeRows = [localeRow({ preference: "en" })];
     applyGate(env, env.value);
     await runTurn(env, "s-i18n-notrun", gateEvt(project));
@@ -1957,5 +1977,107 @@ describe("门禁命令拼接的引号处理", () => {
     assert.equal(shellArg("/usr/local/bin/tsc"), "/usr/local/bin/tsc");
     assert.equal(shellArg("/opt/my tools/tsc"), "'/opt/my tools/tsc'");
     assert.equal(shellArg("/opt/it's/tsc"), String.raw`'/opt/it'\''s/tsc'`);
+  });
+});
+
+// ── 编辑台账投影读取路径 ────────────────────────────────────────────────
+// 投影是性能优化，不是判据前提：读口缺席/坏形状/fork 会话一律回退到观察面全量扫描。
+describe("编辑台账投影读取路径", () => {
+  let ctx: MockCtx;
+  let project: string;
+  let observed: number;
+
+  /** 装配一台带 sessionProjections 的样子：state 现取（用例可中途换形状/换代）。 */
+  async function armProjection(state: () => unknown): Promise<void> {
+    ctx.sessionProjections = {
+      register: () => (): void => {
+        void 0;
+      },
+      stateOf: () => state(),
+    };
+    const original = ctx.sessionQuery;
+    assert.ok(original !== undefined, "默认夹具应带观察面");
+    observed = 0;
+    ctx.sessionQuery = {
+      observeSession: (id: string) => {
+        observed += 1;
+        return original.observeSession(id);
+      },
+    };
+    applyGate(ctx, ctx.value);
+    // 挂载是异步的（register 的返回值只能在 await 之后判别）：等一拍再发回合。
+    await sleep(0);
+  }
+
+  const agentOf = (seq: number | undefined, isSeeded = false): unknown => ({
+    session: {
+      id: "s-proj",
+      header: { cwd: project, isSeeded },
+      ...(seq === undefined ? {} : { seq }),
+      snapshotEvents: () => [],
+    },
+    status: "running",
+    inbox: { nextTurn: [], nextStep: [] },
+    followup(msg: unknown) {
+      ctx.followupCalls.push(msg);
+    },
+  });
+
+  const validLedger = (): unknown => ({
+    edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: false }],
+  });
+
+  beforeEach(() => {
+    ctx = createMockCtx();
+    project = makeProject("proj");
+    ctx.gateExitCode = 1;
+  });
+
+  afterEach(recycleScratchRoots);
+
+  it("投影在位：读台账、不碰整日志观察面，编辑照常触发门禁", async () => {
+    // 第二条没有路径（空串）→ 记进台账但不会被解析成项目根；门禁仍由有路径的那条触发。
+    await armProjection(() => ({
+      edits: [
+        { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: false },
+        { seq: 1, callId: "c2", name: "edit", path: "", failed: false },
+      ],
+    }));
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
+    await sleep(20);
+    assert.equal(observed, 0, "台账可读时不调 observeSession");
+    assert.equal(ctx.shellCommands.length, 1, "台账里的编辑触发门禁");
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+  });
+
+  it("失败条目被跳过：只剩失败编辑时门禁不跑", async () => {
+    await armProjection(() => ({
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: true }],
+    }));
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
+    await sleep(20);
+    assert.equal(observed, 0);
+    assert.equal(ctx.shellCommands.length, 0, "被失败结果否定的编辑不记账");
+  });
+
+  it("fork 会话（isSeeded）→ 回退观察面：继承前缀的切点只有观察面给得出", async () => {
+    await armProjection(validLedger);
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1, true), turn: 1 });
+    await sleep(20);
+    assert.equal(observed, 1);
+  });
+
+  it("台账不可读（坏形状）→ 回退观察面", async () => {
+    await armProjection(() => ({ edits: "not-an-array" }));
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
+    await sleep(20);
+    assert.equal(observed, 1, "坏状态按不可读处理，不当作没有编辑");
+  });
+
+  it("会话没有 seq → 回退观察面", async () => {
+    await armProjection(validLedger);
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(undefined), turn: 1 });
+    await sleep(20);
+    assert.equal(observed, 1, "推不动游标就不该走投影");
   });
 });

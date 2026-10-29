@@ -10,6 +10,10 @@
 
 import { deriveProjectKey } from "@jayyuen66/dsh-plugin-shared/lib/project-key";
 
+/** 基址末尾斜杠与 IPv4 单段。 */
+const TRAILING_SLASHES = /\/+$/u;
+const IPV4_OCTET = /^\d{1,3}$/u;
+
 /** env 值 trim 后非空则用之，否则回到 fallback（保留原 `||` 语义，
  *  又以显式比较规避 prefer-nullish-coalescing 与 strict-boolean-expressions）。 */
 function envOr(key: string, fallback: string): string {
@@ -35,7 +39,7 @@ export function resolveGatewayUrl(settingUrl: string): string {
     return "";
   }
   // 尾部斜杠剥离：拼出 `//v2/...` 会被多数网关判 404，那是配置手滑而不是功能缺失
-  const normalized = candidate.replace(/\/+$/u, "");
+  const normalized = candidate.replace(TRAILING_SLASHES, "");
   let parsed: URL;
   try {
     parsed = new URL(normalized);
@@ -58,7 +62,7 @@ function isIpv4Loopback(host: string): boolean {
   if (parts.length !== 4 || parts[0] !== "127") {
     return false;
   }
-  return parts.every((part) => /^\d{1,3}$/u.test(part) && Number(part) <= 255);
+  return parts.every((part) => IPV4_OCTET.test(part) && Number(part) <= 255);
 }
 
 /**
@@ -98,7 +102,7 @@ export function isCredentialSafeUrl(url: string): boolean {
 /** `x-tdai-service-id` 的合法形状：网关侧按服务名路由，空白与控制字符会让请求头
  *  在 fetch 处直接抛 TypeError（undici 拒收含换行的头值），把一次投递变成一条异常。
  *  不合规的值一律回落到默认服务名，而不是把用户的笔误送上网关。 */
-const SERVICE_ID_RE = /^[A-Za-z0-9._-]{1,64}$/u;
+const SERVICE_ID_RE = /^[\w.-]{1,64}$/u;
 
 /** 默认服务名：网关协议的匿名服务名（不含任何机器信息）。 */
 const DEFAULT_SERVICE_ID = "default";

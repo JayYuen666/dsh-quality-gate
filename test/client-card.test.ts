@@ -12,7 +12,8 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 import type { LocaleDictOf } from "@deepseek-ai/dsh-client-ui-slots";
 import type { ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-settings/client";
-import { apply, inject } from "../src/client-entry.ts";
+import { z } from "zod";
+import { apply, inject, CARD_NUMBER_SCHEMAS, projectCardValues } from "../src/client-entry.ts";
 import { UI_MESSAGES } from "../src/ui-messages.ts";
 import type { LocaleNs, Translate } from "../src/ui-messages.ts";
 import { patchEntryId, profileBundleName } from "./profile-bundle.ts";
@@ -67,6 +68,9 @@ function localeText(
 
 /** 中日韩统一表意文字区段：判"这段文本里还有中文"。 */
 const CJK = /[\u4E00-\u9FFF]/u;
+
+/** 网关地址样例：同一字面量在断言的输入与期望里各出现一次，会被重复串规则盯上。 */
+const GATEWAY_URL = "http://127.0.0.1:8420";
 
 /** 两语字典的 `Record<string, string>` 面：取值断言与 translator 共用同一份投影。 */
 const zh: Record<string, string> = { ...UI_MESSAGES.zh };
@@ -145,6 +149,64 @@ describe("卡片双语字典（UI_MESSAGES）", () => {
   it("卡片源码的非注释行不再有中文字面量（文案全在字典里）", () => {
     const src = fileURLToPath(new URL("../src/client-entry.ts", import.meta.url));
     assert.doesNotMatch(codeOnly(readFileSync(src, "utf8")), CJK);
+  });
+});
+
+describe("卡片值面的 zod 区间", () => {
+  it("数值字段按 host schema 的闭区间取整数：边界收下，越界/小数折成未设置", () => {
+    assert.equal(projectCardValues({ maxInjectsPerTurn: 1 }).maxInjectsPerTurn, 1);
+    assert.equal(projectCardValues({ maxInjectsPerTurn: 5 }).maxInjectsPerTurn, 5);
+    assert.equal(projectCardValues({ maxInjectsPerTurn: 6 }).maxInjectsPerTurn, undefined);
+    assert.equal(projectCardValues({ maxInjectsPerTurn: 1.5 }).maxInjectsPerTurn, undefined);
+    assert.equal(projectCardValues({ gateBudgetMs: 10_000 }).gateBudgetMs, 10_000);
+    assert.equal(projectCardValues({ gateBudgetMs: 600_000 }).gateBudgetMs, 600_000);
+    assert.equal(projectCardValues({ gateBudgetMs: 9999 }).gateBudgetMs, undefined);
+    assert.equal(projectCardValues({ gateBudgetMs: 600_001 }).gateBudgetMs, undefined);
+  });
+
+  it("区间同时能从 schema 元数据与 JSON Schema 读出", () => {
+    const injects = CARD_NUMBER_SCHEMAS.maxInjectsPerTurn;
+    const budget = CARD_NUMBER_SCHEMAS.gateBudgetMs;
+    assert.equal(injects.minValue, 1);
+    assert.equal(injects.maxValue, 5);
+    assert.equal(budget.minValue, 10_000);
+    assert.equal(budget.maxValue, 600_000);
+    const injectsJson = z.toJSONSchema(injects);
+    assert.equal(injectsJson.minimum, 1);
+    assert.equal(injectsJson.maximum, 5);
+    const budgetJson = z.toJSONSchema(budget);
+    assert.equal(budgetJson.minimum, 10_000);
+    assert.equal(budgetJson.maximum, 600_000);
+  });
+
+  it("网关地址按 URL 收口：http(s) 与本地回环收下，缺 scheme/别家协议折成未设置", () => {
+    assert.equal(
+      projectCardValues({ memoryGatewayUrl: GATEWAY_URL }).memoryGatewayUrl,
+      GATEWAY_URL,
+    );
+    assert.equal(
+      projectCardValues({ memoryGatewayUrl: "https://example.com/gateway" }).memoryGatewayUrl,
+      "https://example.com/gateway",
+    );
+    assert.equal(
+      projectCardValues({ memoryGatewayUrl: "127.0.0.1:8420" }).memoryGatewayUrl,
+      undefined,
+    );
+    assert.equal(
+      projectCardValues({ memoryGatewayUrl: "ftp://example.com" }).memoryGatewayUrl,
+      undefined,
+    );
+  });
+
+  it("一格越界不拖掉同快照的其余字段", () => {
+    const values = projectCardValues({
+      maxInjectsPerTurn: 99,
+      enabled: true,
+      memoryGatewayUrl: GATEWAY_URL,
+    });
+    assert.equal(values.maxInjectsPerTurn, undefined, "越界数值只丢自己这一格");
+    assert.equal(values.enabled, true, "同快照的布尔字段不受影响");
+    assert.equal(values.memoryGatewayUrl, GATEWAY_URL, "同快照的字符串字段不受影响");
   });
 });
 

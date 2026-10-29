@@ -110,6 +110,8 @@ import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events"
 // 同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
 import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { mountEditLedgerReader } from "./lib/edit-ledger-reader.ts";
+import type { EditLedgerReader, ProjectionsRegistry } from "./lib/edit-ledger-reader.ts";
 
 /**
  * 常见项目根标记文件：向上找最近的含清单目录。
@@ -159,8 +161,11 @@ const MANIFESTS = [
  * 宿主注入的官方面兑现。
  */
 /** 官方回包在本包读面上的形状：`events` 就此取官方那一位，`inheritedEventCount` 按运行时
- *  形状收成可空（类型在说谎，见上方注记）。 */
-type SessionObservationFace = Pick<SessionObservation, "events"> & {
+ *  形状收成可空（类型在说谎，见上方注记）。`Disposable` 那一位一并收下：官方
+ *  `SessionObservation extends Disposable`，冷读交回的是 prepared lease，它按引用计数 pin 住
+ *  上游缓存条目、refs 归零才允许容量驱逐。窄接口不收这一位就等于把"上游没有释放要求"
+ *  当成事实——那正是漏释放的由来。 */
+type SessionObservationFace = Pick<SessionObservation, "events" | keyof Disposable> & {
   readonly inheritedEventCount: SessionLogOffset | undefined;
 };
 
@@ -333,6 +338,8 @@ type SettingsFormsService = Pick<SettingsForms, "configure" | "describe">;
 /** `ctx.inject(deps, callback)` 回调收到的子上下文（本包只用到 settings + effect）。 */
 interface InjectedCtx {
   settings: SettingsFormsService;
+  /** 官方会话投影注册表（可选注入：`inject(["sessionProjections"], …)` 才会激活）。 */
+  sessionProjections: ProjectionsRegistry;
   /** 官方效应面（`interface Context extends Pick<Fiber, 'effect'>`，installed
    *  `@deepseek-ai/cordis/lib/types/fiber.d.ts`，两条重载）——本地不再重述工厂签名。
    *  官方返回域 `SyncEffect`/`Effect`（fiber.d.ts:49-52）**不收 `undefined`**：「这一趟没有
@@ -676,10 +683,13 @@ function gateCommandArgs(gate: Gate): readonly string[] {
   return [tscEntry(gate.root) ?? "tsc", "--noEmit"];
 }
 
+/** shell 里无需加引号的参数形状。 */
+const SHELL_SAFE_ARG = /^[\w./:=@+-]+$/u;
+
 /** 拼 shell 串：路径可能带空格，含空白或元字符的参数加单引号。
  *  导出只为直接测这段引号处理：tsc 入口是绝对路径，它所在目录未必没有空格。 */
 export function shellArg(part: string): string {
-  return /^[\w./:=@+-]+$/u.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`;
+  return SHELL_SAFE_ARG.test(part) ? part : `'${part.replaceAll("'", `'\\''`)}'`;
 }
 
 /** 门禁命令的展示/执行串（与 gateCommandArgs 同源）。 */
@@ -851,12 +861,30 @@ function interruptedRunOutcome(
   return outcome;
 }
 
+/** 门禁工具不可用的 stderr 措辞。 */
+const TOOL_UNAVAILABLE_TEXT =
+  /command not found|not recognised|not recognized|permission denied|not executable/u;
+
 /**
- * 门禁工具本身不可用（exit 126/127 = 不可执行/未找到）→ not-run，并 warn 给运维。
- *
- * 环境问题非代码问题：走失败注入会让模型去"修"装不了的工具（配合配额环更糟）。
- * 但它同样是"没跑成的检查"，所以按 not-run 注入"请手动确认"，不再算作通过
- * ——没跑成 ≠ 通过。
+ * exit 126/127 只有在 stderr 点名门禁命令自己的首 token 时才算「工具不可用」：
+ * `pnpm check` 的脚本里缺命令 pnpm 同样回 127（`[ELIFECYCLE] Command failed with exit code 127`），
+ * 混判会把项目自己的坏脚本当成环境问题放掉。判据按行：同一行既有「不可用」措辞又出现该 token。
+ */
+function gateToolUnavailable(gate: Gate, res: ShellRunResult): boolean {
+  if (res.exitCode !== 126 && res.exitCode !== 127) {
+    return false;
+  }
+  const token = gate.command[0].toLowerCase();
+  return res.stderr.text
+    .toLowerCase()
+    .split("\n")
+    .some((line) => line.includes(token) && TOOL_UNAVAILABLE_TEXT.test(line));
+}
+
+/**
+ * 门禁工具本身不可用（exit 126/127 且 stderr 点名门禁命令）→ not-run，并 warn 给运维。
+ * 环境问题非代码问题：失败注入会逼模型去修装不了的工具；但没跑成 ≠ 通过。
+ * 脚本内部的 126/127 不走这支（见 gateToolUnavailable），按代码失败。
  */
 function unavailableToolOutcome(
   messages: QualityGateMessages,
@@ -865,7 +893,7 @@ function unavailableToolOutcome(
   log: Log,
 ): GateOutcome | undefined {
   let outcome: GateOutcome | undefined;
-  if (res.exitCode === 126 || res.exitCode === 127) {
+  if (gateToolUnavailable(gate, res)) {
     log.warn(
       `[quality-gate] gate tool unavailable (exit ${res.exitCode}): ${gateCommandText(gate)} — reported as not-run, not as pass`,
     );
@@ -1015,8 +1043,11 @@ async function resolveEventWindow(
 ): Promise<{ from: number; events: readonly SessionEvent[] } | undefined> {
   // 单 return（consistent-return 与 treatUndefinedAsUnspecified：不混 undefined 与值返回）
   let window: { from: number; events: readonly SessionEvent[] } | undefined;
+  // 观察面在 try 之外声明：`observeSession` 自己拒绝时它仍是 undefined，收尾就不会去调一个
+  // 不存在的释放器；一旦交回，成功、非数组交付与后续抛错三条路都由 finally 归还这一份 lease。
+  let observation: SessionObservationFace | undefined;
   try {
-    const observation = await query.observeSession(sessionId, { projectionMode: "none" });
+    observation = await query.observeSession(sessionId, { projectionMode: "none" });
     // 游标下限 = fork 切点（root 会话为 0）：首见会话（含进程重启后）从下限重放
     // 本会话自己的历史编辑——这是有意的，turn-stopping 时本回合编辑已在日志里，
     // 从末尾起步会跳过正在要检查的回合。代价是重启后首轮会多跑几次门禁（预算与
@@ -1030,6 +1061,10 @@ async function resolveEventWindow(
   } catch {
     // 观察面读不出来：与迁移前"snapshotEvents 缺失/非数组"同一档降级——不推进游标。
     window = undefined;
+  } finally {
+    // 窗口里是 `slice` 出来的独立数组，归还 lease 不会动到它；上游按 refs 计数决定
+    // 这条冷读缓存能否被容量驱逐，不归还就永久占住一格。
+    observation?.[Symbol.dispose]();
   }
   return window;
 }
@@ -1345,14 +1380,29 @@ function isGateHost(value: unknown): value is Context & HostCtx {
 }
 
 /**
- * 一个文件的最近清单根 → 实际要跑的根：workspace 根优先，**但只在外层真能产出门禁时**才升级。
+ * 子包自己就产得出 `pnpm check`（自带 `pnpm-workspace.yaml` 且声明了 check）时，它就是离
+ * 文件最近、又真能跑的那一层门禁；再上溯外层工作区只会把「改一个子包」放大成「跑整棵
+ * workspace 的全套检查」——门禁的作用域应当止步于最近的 workspace 根。
+ */
+function hasPnpmCheckGate(root: ProjectRoot): boolean {
+  return detectGate([root]).some((gate) => gate.command[0] === "pnpm");
+}
+
+/**
+ * 一个文件的最近清单根 → 实际要跑的根：最近的 workspace 根优先，**但只在外层真能产出门禁时**才升级。
  *
  * 只判「上面有没有 pnpm-workspace.yaml」就升级是漏门禁的一条路：外层若是"有 workspace 清单、
  * 却没有 check 脚本也没有 tsconfig"的根，gate-detect 对它返回空表，子包本来有的
  * `npx tsc --noEmit` / `ruff check` 会被这次上溯抹掉，且没有任何输出。
+ *
+ * 反方向也一样：子包本身就是 workspace 根且能出门禁时不再上溯——否则「本仓自己的门禁」
+ * 会被外层伞工作区的全套 `pnpm check` 顶掉，单仓改动要等着跑九个仓。
  */
 function rootForFile(useRoot: string, maxDepth: number): ProjectRoot {
   const inner = probeProjectRoot(useRoot);
+  if (hasPnpmCheckGate(inner)) {
+    return inner;
+  }
   const upgraded = workspaceRootUpgrade(useRoot, maxDepth);
   if (upgraded === useRoot) {
     return inner;
@@ -1495,6 +1545,8 @@ interface GateRuntime {
   /** 事件读面缺席/读失败各只警告一次（整条门禁面静默失活必须可见，但不逐回合刷屏）。 */
   queryMissingWarned: boolean;
   queryReadWarned: boolean;
+  /** 编辑台账投影读口：`sessionProjections` 到位时由 inject 回调装上（缺席 ⇒ 回退全量扫描）。 */
+  editLedger: { value: EditLedgerReader | undefined };
   /** 插件已卸载（disposer 已跑）：新到的收口整体放弃——不读事件、不开门禁、不注入。 */
   disposed: boolean;
 }
@@ -1577,6 +1629,39 @@ function accumulatorOf(rt: GateRuntime, sessionId: string): EditAccumulator {
  * Session.inheritedEventCount（0.1.2-rc.1 起公开只读）给出 fork 切点——首读下限
  * 取切点而非 0，父前缀天然跳过；缺属性退回 0（旧行为，保守不漏门禁）。
  */
+/**
+ * 只用投影台账记本回合编辑。返回 false = 走不了投影（读口缺席、fork 会话、读数不可信、
+ * 或会话交不出日志长度），调用方回退观察面。
+ *
+ * fork 会话（isSeeded）不进这条路：继承前缀的精确长度只有观察面的 `inheritedEventCount`
+ * 给得出，投影的 `apply` 看不到那条边界。读口交回 undefined 同样回退，且**不推游标**——
+ * 把一次不可读当成「没有编辑」会静默跳过本回合的门禁。
+ */
+function noteLedgerEdits(
+  rt: GateRuntime,
+  session: TurnAgent["session"],
+  note: (name: string, pathValue: string | undefined) => void,
+): boolean {
+  const reader = rt.editLedger.value;
+  const directSeq = session.seq;
+  if (reader === undefined || session.header.isSeeded || typeof directSeq !== "number") {
+    return false;
+  }
+  const ledger = reader(session);
+  if (ledger === undefined) {
+    return false;
+  }
+  const from = rt.lastSeqBySession.get(session.id) ?? 0;
+  for (const entry of ledger) {
+    if (entry.seq >= from && !entry.failed) {
+      note(entry.name, entry.path === "" ? undefined : entry.path);
+    }
+  }
+  rt.lastSeqBySession.set(session.id, directSeq);
+  pruneToSessionBudget(rt.lastSeqBySession, session.id);
+  return true;
+}
+
 async function readEditedFiles(
   rt: GateRuntime,
   agent: TurnAgent,
@@ -1597,6 +1682,18 @@ async function readEditedFiles(
     }
     return;
   }
+  const { cwd } = session.header;
+  const note = (name: string, pathValue: string | undefined): void => {
+    // 相对路径按会话 cwd 解析（edit 常报相对路径；不按 host 进程 CWD）
+    let resolvedPath = pathValue;
+    if (resolvedPath !== undefined && cwd !== undefined && !path.isAbsolute(resolvedPath)) {
+      resolvedPath = path.resolve(cwd, resolvedPath);
+    }
+    acc.note(name, resolvedPath);
+  };
+  if (noteLedgerEdits(rt, session, note)) {
+    return;
+  }
   const window = await resolveEventWindow(query, sessionId, rt.lastSeqBySession);
   if (window === undefined) {
     if (!rt.queryReadWarned) {
@@ -1612,15 +1709,6 @@ async function readEditedFiles(
   // 游标 Map 越界时按插入序淘汰最旧的其他会话（不整体清空 → 避免全量重读历史）。
   pruneToSessionBudget(rt.lastSeqBySession, sessionId);
   const edits = collectEdits(window.events);
-  const { cwd } = session.header;
-  const note = (name: string, pathValue: string | undefined): void => {
-    // 相对路径按会话 cwd 解析（edit 常报相对路径；不按 host 进程 CWD）
-    let resolvedPath = pathValue;
-    if (resolvedPath !== undefined && cwd !== undefined && !path.isAbsolute(resolvedPath)) {
-      resolvedPath = path.resolve(cwd, resolvedPath);
-    }
-    acc.note(name, resolvedPath);
-  };
   for (const entry of edits.noCallId) {
     note(entry.name, entry.path);
   }
@@ -2014,8 +2102,25 @@ export function apply(ctx: Context, config: ConfigShape): void {
     shellWarned: false,
     queryMissingWarned: false,
     queryReadWarned: false,
+    editLedger: { value: undefined },
     disposed: false,
   };
+
+  // 编辑台账投影是**可选**增强：注册表不在位（精简组合、旧宿主）时整条回退全量扫描，
+  // 门禁面不受影响。注册失败只警告一次：投影读不到是性能问题，不是判据缺失。
+  svc.inject(["sessionProjections"], (child) => {
+    void mountEditLedgerReader(child.sessionProjections, {
+      publish: (reader) => {
+        rt.editLedger.value = reader;
+      },
+      effect: (factory) => child.effect(factory),
+      onError: (error) => {
+        log.warn(
+          `[quality-gate] sessionProjections register failed, falling back to full scan: ${String(error)}`,
+        );
+      },
+    });
+  });
 
   svc.on("agent/turn-stopping", async (payload) => {
     // 门禁是增强能力，绝不能因自身异常杀死整轮对话：turn-stopping 走

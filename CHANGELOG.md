@@ -3,6 +3,18 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。最新版本在最上。
 
+## 0.1.4
+
+这一版收窄回合门禁的作用域：子包自己的 workspace 门禁不再被外层伞工作区顶掉，改单仓的回合不再跑整棵树。
+
+### Fixed
+
+- **单仓安装态下两份 zod 的 `ZodType` 不兼容**：宿主投影包自带 zod 4.4.3，本包 catalog 是
+  4.6.7；`editLedgerProjection.stateSchema` 经宿主声明的类型做一次窄桥接，运行期仍交给宿主
+  `safeParse`，不改依赖版本。
+- **子包自己的 workspace 门禁被外层伞工作区顶掉。** 编辑一个自带 `pnpm-workspace.yaml` 且声明了 `check` 的子包时，根探测会继续上溯到外层伞工作区，把「改一个仓」放大成「整棵树跑一遍 `pnpm check`」：回合收口的预算被单条命令吃光，改本仓的回合反而反复超时。现在子包自己产得出 `pnpm check` 时就地执行、不再上溯；外层升级只在子包自己产不出门禁时发生。`test/host-integrity.test.ts` 新增一条伞工作区用例钉住这一面。
+- **脚本内部的 exit 126/127 被误报成「门禁工具缺失」。** 126/127 是整条命令的退出码，不是「工具没装」的充分证据：`pnpm check` 的 check 脚本里缺命令时 pnpm 同样以 127 退出（实测 `pnpm run check` 对不存在的脚本命令回 `[ELIFECYCLE] Command failed with exit code 127`），tsc 的脚本也可能因缺 devDependency 回 127。原先这两档一律按 not-run 注入「command not found (tool not installed) — the gate did not run」，项目自己的坏脚本被当成环境问题放掉。现在只有 stderr **点名门禁命令自己的首 token**（`sh: pnpm: command not found`、`command not found: tsc`、Windows 的 `'pnpm' is not recognized`）才判工具不可用，其余 126/127 按代码失败上报并附证据；126 同理只在点名「不可执行」时判 not-run。`test/host.test.ts` 与 `test/host-integrity.test.ts` 的 126/127 用例补上点名证据，并新增一条「脚本内 127 仍报代码失败」的用例。
+
 ## 0.1.3
 
 这一版把判定面与构建/CI 面一起收口：ruff 不再对只写了 `pyproject.toml` 的工程发门禁，卡片保存期间的编辑不再被静默丢弃，记忆反馈的文案与来源一致，Windows 与发布链的静默降级补上判据。宿主线抬到 `0.2.1-rc.3`。
