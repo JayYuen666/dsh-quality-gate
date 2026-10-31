@@ -38,10 +38,24 @@ const TSCONFIG = "tsconfig.json";
 const TS_SOURCE_BODY = "export const x = 1\n";
 /** 记忆反馈降级 warn 的行内片段（warn 只该出现一次的计数判据）。 */
 const MEMORY_SKIP_WARN_TEXT = "memory feedback skipped";
+
+/** 轮询直到条件成立；到期返回 false（由调用方决定那一条红怎么写）。 */
+async function waitUntil(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  const poll = async (): Promise<boolean> => {
+    if (condition()) {
+      return true;
+    }
+    if (Date.now() - start > timeoutMs) {
+      return false;
+    }
+    await sleep(20);
+    return poll();
+  };
+  return poll();
+}
 /** 本包的插件 id（logger 具名、patch 条目 id、设置命名空间三处同值）。 */
 const PLUGIN_ID = "quality-gate";
-/** tsc 门禁不经 npx 取包（那段历史事故的判据，多处复用）。 */
-const NO_NPX = "门禁不再经 npx 取包";
 
 // 本文件创建的临时项目根统一登记，各 suite 的 afterEach 显式回收。
 // 只靠"系统清理 tmp 目录"不算回收：macOS 的 TMPDIR 清理并不激进，套件跑完的残留会一直
@@ -93,24 +107,24 @@ interface MockLog {
   error: (...args: unknown[]) => void;
 }
 
-let firedSession: unknown;
-
 /** 观察面释放器的替身：本文件的用例不数释放次数，只需要这一位在场上。 */
 function noopDispose(): void {
   void 0;
 }
 
 /**
- * 观察面替身的交付：读 fired session 上夹具自己挂的那份日志与 fork 切点
+ * 观察面替身的交付：读本次 fire 的 session 上夹具自己挂的那份日志与 fork 切点
  * （**只有测试侧**读 snapshotEvents 闭包——生产侧已改走官方观察面，见 mock 的 on）。
+ * 状态挂在 ctx 上而不是模块级变量：模块级变量会让上一条用例的 session 泄漏到本条，
+ * 且文件级 beforeEach 与 vitest 的用例结构规则冲突。
  * 返回刻意用 unknown 让被测代码自己的数组判据生效，好让“交回非数组”那档也能喂进去。
  */
-function observationOfFiredSession(): {
+function observationOfFiredSession(ctx: MockCtx): {
   events: unknown;
   inheritedEventCount: number | undefined;
   [Symbol.dispose]: () => void;
 } {
-  const session = firedSession as
+  const session = ctx.firedSession as
     | {
         snapshotEvents?: (from?: number) => unknown;
         inheritedEventCount?: number | undefined;
@@ -128,6 +142,8 @@ interface MockCtx {
   value: Record<string, unknown>;
   /** 本插件 fiber 的替身：configure 的 owner 必须原样带回它（身份断言用）。 */
   fiber: unknown;
+  /** 最近一次 fire 的 agent.session：观察面替身据此交回夹具自己挂的日志与 fork 切点。 */
+  firedSession?: unknown;
   /** settings.configure 的调用记录（页面策略断言用）。 */
   configureCalls: ConfigureCall[];
   handlers: Record<string, (payload: unknown) => void>;
@@ -255,7 +271,7 @@ function createMockCtx(): MockCtx {
     describeRows: [],
     logCalls: [],
     sessionQuery: {
-      observeSession: async () => observationOfFiredSession(),
+      observeSession: async () => observationOfFiredSession(ctx),
     },
     settings: {
       configure: (presentation: { auto?: boolean }, owner?: unknown) => {
@@ -277,7 +293,7 @@ function createMockCtx(): MockCtx {
       // 记录本次 fire 的 agent.session，好让观察面替身交回该夹具自己挂的那份日志——
       // **只有测试侧代码**去读夹具上的 snapshotEvents 闭包（生产侧已不读它）。
       ctx.handlers[event] = (payload: unknown) => {
-        firedSession = (payload as { agent?: { session?: unknown } }).agent?.session;
+        ctx.firedSession = (payload as { agent?: { session?: unknown } }).agent?.session;
         handler(payload);
       };
     },
@@ -920,17 +936,14 @@ describe("quality-gate host 接线", () => {
     ctx.gateExitCode = 1;
     ctx.value["gateBudgetMs"] = 10_000;
     // 3 个项目根 → 3 gates：默认 ctx mock 无 projectRootsOf 注入点，
-    // 用 3 个真实临时根各放一个 edit 事件
-    const { mkdirSync: mk, writeFileSync: wf } = await import("node:fs");
-    const { tmpdir: td } = await import("node:os");
-    const { default: pathModule } = await import("node:path");
+    // 用 3 个真实临时根各放一个 edit 事件（复用文件顶部的静态导入，别在用例里再 import 一次）
     const roots: string[] = [];
     for (let i = 0; i < 3; i += 1) {
-      const root = pathModule.join(td(), `qg-test-budget-${i}-${Date.now()}-${i}`);
-      mk(root, { recursive: true });
-      wf(pathModule.join(root, PKG_JSON), '{"name":"t"}');
+      const root = path.join(tmpdir(), `qg-test-budget-${i}-${Date.now()}-${i}`);
+      mkdirSync(root, { recursive: true });
+      writeFileSync(path.join(root, PKG_JSON), '{"name":"t"}');
       // tsconfig.json 必须存在——B1 之后只有 package.json 的空壳不发 tsc 门禁
-      wf(pathModule.join(root, TSCONFIG), '{"compilerOptions":{}}');
+      writeFileSync(path.join(root, TSCONFIG), '{"compilerOptions":{}}');
       roots.push(root);
       scratchRoots.push(root);
     }
@@ -979,9 +992,12 @@ describe("quality-gate host 接线", () => {
     };
     const t0 = Date.now();
     ctx.handlers["agent/turn-stopping"]!({ agent, turn: 9 });
-    await sleep(14_000);
+    // 轮询等注入落定，而不是固定 sleep：固定等待会把「正确实现 ~3s 跑完」与「无界实现跑满」
+    // 压成同一段 14s，紧随其后的耗时断言于是恒真。到期未注入即是无界实现的判据（fail-closed）。
+    const settled = await waitUntil(() => ctx.followupCalls.length > 0, 14_000);
     const elapsed = Date.now() - t0;
-    assert.ok(elapsed < 14_500, `3 gates 小预算总耗时必须有界（实测 ${elapsed}ms）`);
+    assert.ok(settled, `3 gates 小预算下门禁链未在 14s 内注入（实测 ${elapsed}ms）：总耗时无界`);
+    assert.ok(elapsed < 10_000, `3 gates 小预算总耗时必须有界（实测 ${elapsed}ms）`);
     for (const budget of budgets) {
       assert.ok((budget ?? 0) <= 10_000, `per-gate 不得超总预算（实测 ${budget}）`);
     }
@@ -989,7 +1005,8 @@ describe("quality-gate host 接线", () => {
       budgets.length >= 2 && (budgets[1] ?? 0) < (budgets[0] ?? 0),
       `后门 per-gate 必须随剩余预算收缩（实测 ${JSON.stringify(budgets)}），否则总时长无界`,
     );
-    assert.ok(ctx.followupCalls.length <= 1, "一次只注入一个失败");
+    // 注入恰好一次：等待条件已保证“至少一次”，等值断言才真正排除了“每次都注入”。
+    assert.equal(ctx.followupCalls.length, 1, "一次只注入一个失败");
   });
 
   it("相对 file_path 沿 header.cwd 螺纹传递解析（不按 host CWD）", async () => {
@@ -1498,15 +1515,15 @@ describe("quality-gate: pnpm check script 探测", () => {
 
   afterEach(recycleScratchRoots);
 
-  it("workspace 根未声明 check script → 退化为 tsc 门禁（不发 pnpm check 假失败）", async () => {
+  it("workspace 根未声明 check script → 不发门禁（workspace 根不降级到 tsc）", async () => {
     ctx.gateExitCode = 1;
     const ws = makeWsProject("nocheck", { checkScript: false });
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    assert.equal(ctx.shellCommands.length, 1);
-    const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(cmd, /bin[\\/]tsc'? --noEmit$/u, "落到下一优先级 tsc，而非 pnpm check");
-    assert.ok(!cmd.includes("npx"), NO_NPX);
+    // 这种根的 tsconfig 多为 solution-style：`tsc --noEmit` 不检查子工程就退 0，
+    // 发它就是一条恒绿门禁。没有声明 check 就按「没有门禁」处理。
+    assert.equal(ctx.shellCommands.length, 0, "不发 pnpm check，也不退化为 tsc");
+    assert.equal(ctx.followupCalls.length, 0, "没有门禁就没有注入");
   });
 
   it("workspace 根声明了 check script → 仍发 pnpm check（作者同款工程行为不变）", async () => {
@@ -1518,33 +1535,28 @@ describe("quality-gate: pnpm check script 探测", () => {
     assert.equal(ctx.shellCommands[0]?.command, "pnpm check");
   });
 
-  it("scripts 值为空字符串 → 不算声明了 check（pnpm 跑不起来一条空命令）", async () => {
+  it("scripts 值为空字符串 → 不算声明了 check（也不退化为 tsc）", async () => {
     ctx.gateExitCode = 1;
     const ws = makeWsProject("emptyscript", { checkScript: false });
     writeFileSync(path.join(ws, PKG_JSON), '{"name":"t","scripts":{"check":""}}');
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(cmd, /bin[\\/]tsc'? --noEmit$/u, "空脚本 → 不发 pnpm check");
-    assert.ok(!cmd.includes("npx"), NO_NPX);
+    assert.equal(ctx.shellCommands.length, 0, "空脚本 → 不发 pnpm check，也没有 tsc 兜底");
+    assert.equal(ctx.followupCalls.length, 0);
   });
 
-  it("package.json 非法 JSON（scripts 读不出来）→ 保守不发 pnpm check", async () => {
+  it("package.json 非法 JSON（scripts 读不出来）→ 保守不发门禁", async () => {
     ctx.gateExitCode = 1;
     const ws = makeWsProject("badjson", { checkScript: true });
     writeFileSync(path.join(ws, PKG_JSON), "{not-json");
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(
-      cmd,
-      /bin[\\/]tsc'? --noEmit$/u,
-      "读不到脚本清单时不猜：宁可不给 pnpm 门禁，也不发一条注定命令级失败的检查",
-    );
-    assert.ok(!cmd.includes("npx"), NO_NPX);
+    // 信息缺失时连 tsc 都不发：那是这条假失败防线的一贯取向（宁可不给门禁，不猜）。
+    assert.equal(ctx.shellCommands.length, 0, "读不到脚本清单时不猜");
+    assert.equal(ctx.followupCalls.length, 0);
   });
 
-  it("package.json 根本读不到（不可读路径）→ 同样不发 pnpm check", async () => {
+  it("package.json 根本读不到（不可读路径）→ 同样不发门禁", async () => {
     ctx.gateExitCode = 1;
     const ws = makeWsProject("unreadable", { checkScript: true });
     // 「存在但读不出内容」的确定性形态：把 package.json 换成同名目录 → existsSync 命中、
@@ -1553,9 +1565,8 @@ describe("quality-gate: pnpm check script 探测", () => {
     mkdirSync(path.join(ws, PKG_JSON));
     ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(ws)), turn: 1 });
     await sleep(20);
-    const cmd = String(ctx.shellCommands[0]?.command);
-    assert.match(cmd, /bin[\\/]tsc'? --noEmit$/u);
-    assert.ok(!cmd.includes("npx"), NO_NPX);
+    assert.equal(ctx.shellCommands.length, 0);
+    assert.equal(ctx.followupCalls.length, 0);
   });
 });
 
@@ -1744,7 +1755,9 @@ describe("quality-gate: memoryFeedback 反馈", () => {
     );
     assert.ok(text.startsWith("[quality-gate 反馈]"));
     assert.ok(text.includes("exit=1 line1 line2 more"));
-    assert.ok(!text.includes("\n"), "反馈正文单行化");
+    // 正文保持一段，第二行是固定的证据边界标注（来自仓库的失败文本不得以指令身份被召回）。
+    assert.equal(text.split("\n").length, 2, "反馈正文一段 + 一行固定边界标注");
+    assert.ok(text.endsWith(MESSAGES.zh.memoryEvidenceNotice), "带数据边界标注");
   });
 
   it("deriveAgentId：与网关插件同分桶语义（尾目录名-8位哈希）", () => {

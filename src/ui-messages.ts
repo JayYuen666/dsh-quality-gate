@@ -12,14 +12,8 @@ import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包设置卡产出的全部界面文案。 */
 export interface UiMessages {
-  /** 卡片标题（设置页插件列表里的那一行）。 */
-  readonly cardTitle: string;
-  /** 卡片副标题：一句话说明本包做什么。 */
-  readonly cardDescription: string;
   /** 作用域只读（非 loopback 页面）时的状态条文本。 */
   readonly statusReadOnly: string;
-  /** 有未保存改动时的状态条文本。 */
-  readonly statusDirty: string;
   /** 无未保存改动时的状态条文本。 */
   readonly statusClean: string;
   /** 保存按钮（空闲态）。 */
@@ -32,6 +26,10 @@ export interface UiMessages {
   readonly saveFailed: string;
   /** 保存被宿主拒绝（受理位 false：校验未通过或写入被跳过），修改未生效。 */
   readonly saveRejected: string;
+  /** 网关地址不接受：带 userinfo，或明文 http 指向非回环地址。 */
+  readonly invalidGatewayUrl: string;
+  /** 凭据引用名不接受：宿主只认 [A-Za-z_][A-Za-z0-9_]*。 */
+  readonly invalidKeyRef: string;
   /** 数字输入越界/非法时的行内提示。 */
   readonly outOfRange: string;
   /** 门禁小节标题。 */
@@ -104,17 +102,16 @@ export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 
 export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   zh: {
-    cardTitle: "quality-gate 回合收口质量门禁",
-    cardDescription:
-      "回合收口质量门禁（ECC stop-format-typecheck 移植）：本回合编辑过代码文件时，收口前自动跑项目门禁（根 package.json 声明了 check 才用 pnpm check，否则 cargo check / ruff / tsc），失败自动开新回合注入修复指令；失败事实同步 lesson-loop 总线，记忆网关沉淀默认关闭",
     statusReadOnly: "当前作用域只读",
-    statusDirty: "有未保存的修改，点「保存」生效",
     statusClean: "无未保存的修改",
     save: "保存",
     saving: "保存中…",
     revert: "撤销",
     saveFailed: "保存失败：{message}",
     saveRejected: "保存被宿主拒绝（配置校验未通过或写入被跳过），修改未生效",
+    invalidGatewayUrl:
+      "网关地址不接受：不能带用户名/口令；远端地址必须是 https，明文 http 只允许本机回环",
+    invalidKeyRef: "凭据引用名不接受：只能由字母、数字、下划线组成，且不能以数字开头",
     outOfRange: "超出允许范围，未保存",
     gateSection: "门禁",
     memorySection: "记忆反馈",
@@ -123,26 +120,23 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     dirtyCount: "已修改 {count} 项",
     enabledLabel: "启用质量门禁",
     enabledHint: "关闭后回合收口不再跑门禁（模型可带病收口）",
-    injectsLabel: "每回合注入配额",
-    injectsHint: "门禁失败每回合最多注入几次修复指令（1-5，默认 2，防跑飞）",
-    budgetLabel: "门禁预算",
-    budgetHint: "单次门禁最大耗时（10s-600s，默认 300s；超时按失败注入不静默放行）",
+    injectsLabel: "每会话注入配额",
+    injectsHint: "门禁失败后最多注入几次修复指令；配额按会话累计，门禁通过后重置",
+    budgetLabel: "门禁总预算",
+    budgetHint:
+      "一次回合内所有门禁共享的总耗时预算（多根均分）；超时按「未能执行」注入，不静默放行",
     memoryLabel: "门禁失败沉淀记忆",
     memoryHint:
-      "默认关闭。开启后：代码型门禁失败的证据（命令/根/全文报错，不截断）写入记忆网关的 L0 会话层供后续会话召回；总线 lesson-loop 的同步上报不受此开关影响。关闭后只注入不沉淀。真正决定能否投递的是网关地址能否解析出值（见下面两项）",
+      "默认关闭。开启后：代码型门禁失败的证据（命令/根/全文报错，不截断）写入记忆网关的 L0 会话层供后续会话召回；总线 lesson-loop 的同步上报不受此开关影响。关闭后只注入不沉淀。投递要求网关地址与凭据引用都可用（见下面两项）",
     gatewayUrlLabel: "记忆网关地址",
     gatewayUrlHint:
-      "插件不带任何默认地址：本机用户请填自己的网关地址（例如 http://127.0.0.1:8420），没有网关就让它空着。此项留空时回落到环境变量 TDAI_GATEWAY_URL，两处都空才算未配置、不启用记忆反馈",
+      "插件不带任何默认地址：本机用户请填自己的网关地址（例如 http://127.0.0.1:8420），没有网关就让它空着。此项留空时回落到环境变量 TDAI_GATEWAY_URL，两处都空才算未配置、不启用记忆反馈。远端地址必须 https，明文 http 只允许本机回环（127.0.0.0/8、::1、localhost）",
     keyRefLabel: "网关密钥引用",
     keyRefHint:
       "网关鉴权令牌的凭据引用名（环境变量名形态，默认 TDAI_GATEWAY_KEY）。这里存的只是引用名，密钥值由 dsh 凭据服务管理（Web 凭据页或 ~/.dsh/.credentials.yaml 的 refs），不会写进 settings.yaml；清空即恢复默认引用名，而不是停用记忆反馈",
   },
   en: {
-    cardTitle: "quality-gate turn-end quality gate",
-    cardDescription:
-      "Turn-end quality gate (ported from ECC stop-format-typecheck): when this turn edited code files, the project gate runs automatically before the turn closes (pnpm check only if the root package.json declares a check script, otherwise cargo check / ruff / tsc); a failure opens a new turn with repair instructions. Failure facts are also reported to the lesson-loop bus; memory-gateway persistence is off by default",
     statusReadOnly: "This scope is read-only",
-    statusDirty: "Unsaved changes — press Save to apply",
     statusClean: "No unsaved changes",
     save: "Save",
     saving: "Saving…",
@@ -150,6 +144,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saveFailed: "Save failed: {message}",
     saveRejected:
       "Save rejected by the host (validation failed or write skipped) — changes not applied",
+    invalidGatewayUrl:
+      "Gateway URL rejected: it must not embed credentials; remote addresses must use https, plain http is only allowed for loopback",
+    invalidKeyRef:
+      "Credential reference rejected: use letters, digits and underscores only, and do not start with a digit",
     outOfRange: "Out of the allowed range — not saved",
     gateSection: "Gate",
     memorySection: "Memory feedback",
@@ -158,18 +156,18 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     dirtyCount: "{count} changed",
     enabledLabel: "Enable the quality gate",
     enabledHint: "When off: no gate runs at turn end (the model may close a turn with broken code)",
-    injectsLabel: "Repair injections per turn",
+    injectsLabel: "Repair injections per session",
     injectsHint:
-      "How many repair instructions a failing gate may inject per turn (1-5, default 2 — runaway protection)",
-    budgetLabel: "Gate budget",
+      "How many repair instructions a failing gate may inject; the quota accumulates across turns in one session and resets after a clean gate pass",
+    budgetLabel: "Gate total budget",
     budgetHint:
-      "Max duration of one gate run (10s-600s, default 300s; a timeout injects a failure instead of passing silently)",
+      'Shared time budget for all gates in one turn (split across project roots); a timeout is injected as "could not run", never as a silent pass',
     memoryLabel: "Persist gate failures to memory",
     memoryHint:
-      "Off by default. When on: the evidence of code-level gate failures (command, root, full error text, untruncated) is written into the memory gateway's L0 session layer so later sessions can recall it; synchronous reporting to the lesson-loop bus is unaffected by this switch. When off, repairs are injected but nothing is persisted. Whether it can actually deliver is decided by the gateway URL resolving to a value (see the two fields below)",
+      "Off by default. When on: the evidence of code-level gate failures (command, root, full error text, untruncated) is written into the memory gateway's L0 session layer so later sessions can recall it; synchronous reporting to the lesson-loop bus is unaffected by this switch. When off, repairs are injected but nothing is persisted. Delivery requires both the gateway URL and the credential ref to be usable (see the two fields below)",
     gatewayUrlLabel: "Memory gateway URL",
     gatewayUrlHint:
-      "The plugin ships no default address: fill in your own gateway URL (e.g. http://127.0.0.1:8420), or leave it empty if you have no gateway. When this is empty the TDAI_GATEWAY_URL environment variable is used instead; only when both are empty is memory feedback unconfigured and disabled",
+      "The plugin ships no default address: fill in your own gateway URL (e.g. http://127.0.0.1:8420), or leave it empty if you have no gateway. When this is empty the TDAI_GATEWAY_URL environment variable is used instead; only when both are empty is memory feedback unconfigured and disabled. Remote addresses must use https; plain http is only allowed for loopback (127.0.0.0/8, ::1, localhost)",
     keyRefLabel: "Gateway credential ref",
     keyRefHint:
       "Name of the credential holding the gateway token (POSIX env-var form, default TDAI_GATEWAY_KEY). Only the ref name is stored here — the secret itself is managed by the dsh credentials service (the web credentials page or the refs in ~/.dsh/.credentials.yaml) and never lands in settings.yaml; clearing it restores the default ref name rather than disabling memory feedback",

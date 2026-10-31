@@ -23,7 +23,7 @@ export interface EditLedgerState {
   readonly edits: readonly EditLedgerEntry[];
 }
 
-const entrySchema = z.strictObject({
+const entrySchema = z.object({
   seq: z.int().nonnegative(),
   callId: z.string(),
   name: z.string(),
@@ -52,11 +52,11 @@ function failEntry(state: readonly EditLedgerEntry[], callId: string): readonly 
       break;
     }
   }
-  const next =
-    index < 0
-      ? state
-      : state.map((entry, at) => (at === index ? { ...entry, failed: true } : entry));
-  return next;
+  // 已标记失败时原样返回：重复投递同一 result 不该持续产生新状态对象。
+  if (index < 0 || state[index]?.failed === true) {
+    return state;
+  }
+  return state.map((entry, at) => (at === index ? { ...entry, failed: true } : entry));
 }
 
 export const editLedgerProjection = {
@@ -83,7 +83,12 @@ export const editLedgerProjection = {
         ];
       }
     }
-    if (result !== undefined && result.isError && result.callId !== undefined) {
+    if (
+      result !== undefined &&
+      result.isError &&
+      result.callId !== undefined &&
+      result.callId !== ""
+    ) {
       edits = failEntry(edits, result.callId);
     }
     const bounded =

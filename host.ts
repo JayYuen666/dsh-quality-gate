@@ -29,7 +29,8 @@
 //     永不复查（静默丢门禁），失败配额与容量淘汰计数也会记到错误的会话上。
 //
 // 防跑飞（复用 session-rescue 验证过的配额模式）：
-//   - 每回合每根至多 N 次门禁注入（默认 2）；循环修不好就放行并提示用户；
+//   - 每个会话至多 N 次门禁注入（默认 2）：配额按 sessionId 跨回合累计、所有项目根共用一份，
+//     全部门禁干净通过后才重置；循环修不好就放行并提示用户；
 //   - 门禁总时长预算封顶（默认 300s），超时/预算耗尽一律按 not-run 注入说明。
 //
 // 本文件只以 host.js 形态被宿主载入（入口面由 test/publish-manifest.test.ts 钉住）。
@@ -129,6 +130,7 @@ const MANIFESTS = [
   PYPROJECT_MANIFEST,
   "pnpm-workspace.yaml",
   "ruff.toml",
+  ".ruff.toml",
 ];
 
 /**
@@ -495,7 +497,7 @@ interface HostCtx {
 // ── 内置默认：就是下面 schema 各字段的 `.default()`（单一来源，没有第二层「底座」）──
 // cordis 装载期用同一份 schema 填默认再交进 apply。声明在 Config 之前是为了避开 const 的 TDZ。
 
-/** 每回合每根的门禁注入上限：循环修不好就放行并提示用户。 */
+/** 注入配额：按 **sessionId 跨回合累计**，门禁全部通过后重置（不是每回合每根各一份）。 */
 const DEFAULT_MAX_INJECTS_PER_TURN = 2;
 
 /** 记忆网关密钥的默认凭据引用名（值由凭据服务侧存，本包只登记引用）。 */
@@ -1062,9 +1064,14 @@ async function resolveEventWindow(
     // 观察面读不出来：与迁移前"snapshotEvents 缺失/非数组"同一档降级——不推进游标。
     window = undefined;
   } finally {
-    // 窗口里是 `slice` 出来的独立数组，归还 lease 不会动到它；上游按 refs 计数决定
-    // 这条冷读缓存能否被容量驱逐，不归还就永久占住一格。
-    observation?.[Symbol.dispose]();
+    // 窗口里是 `slice` 出来的独立数组，归还 lease 不会动到它；释放是尽力而为：
+    // 旧宿主可能没有 Symbol.dispose，释放器自己也可能抛错——两者都不该把一次读窗
+    // 变成 reject，否则本回合门禁会被整条跳过。
+    try {
+      observation?.[Symbol.dispose]();
+    } catch {
+      // 释放失败不改变本次读窗的结论。
+    }
   }
   return window;
 }
@@ -1551,6 +1558,11 @@ interface GateRuntime {
   disposed: boolean;
 }
 
+/** 卸载旗的读口：函数调用阻断 TS 对属性窄化，异步段恢复后才能重新看到 dispose 后的真值。 */
+function runtimeDisposed(rt: GateRuntime): boolean {
+  return rt.disposed;
+}
+
 /**
  * 软依赖 shell 的唯一入口——用 ctx.get（可选服务官方读法，未注册返回 undefined）。
  *
@@ -1618,18 +1630,6 @@ function accumulatorOf(rt: GateRuntime, sessionId: string): EditAccumulator {
 }
 
 /**
- * 从事件流读本回合**成功**编辑的文件（按官方观察面给的增量窗），记进本会话的账。
- * 被 danger-guard 拒绝或执行失败的编辑，其 tool/call 仍在事件流里——照记就会对未真正
- * 改动的文件（若落在独立项目根）多跑一次门禁。所以 tool/call 建 callId→{name,path}，
- * tool/result 的 isError 标记失败 callId，只记成功的。
- * turn-stopping 时本回合 call+result 同处一个增量窗，单次扫描即可关联；无 callId 的事件
- * （异常/旧形状/测试 mock）保守直记，避免漏门禁。
- * fork 前缀：子代理会话 fork 自父会话时，
- * 事件流含父事件前缀，游标从 0 首读会把父会话的历史编辑一并计入、多跑门禁。
- * Session.inheritedEventCount（0.1.2-rc.1 起公开只读）给出 fork 切点——首读下限
- * 取切点而非 0，父前缀天然跳过；缺属性退回 0（旧行为，保守不漏门禁）。
- */
-/**
  * 只用投影台账记本回合编辑。返回 false = 走不了投影（读口缺席、fork 会话、读数不可信、
  * 或会话交不出日志长度），调用方回退观察面。
  *
@@ -1652,16 +1652,32 @@ function noteLedgerEdits(
     return false;
   }
   const from = rt.lastSeqBySession.get(session.id) ?? 0;
+  // 台账有硬上限（EDIT_LEDGER_MAX），超限时旧条目被丢弃；若此时把游标直接推到日志末端，
+  // 被丢掉的 seq 永远不会再被读到。只推进到台账实际覆盖到的末端，让下一回合还能从缺口重读。
+  let covered = from;
   for (const entry of ledger) {
+    covered = Math.max(covered, entry.seq + 1);
     if (entry.seq >= from && !entry.failed) {
       note(entry.name, entry.path === "" ? undefined : entry.path);
     }
   }
-  rt.lastSeqBySession.set(session.id, directSeq);
+  rt.lastSeqBySession.set(session.id, Math.min(directSeq, covered));
   pruneToSessionBudget(rt.lastSeqBySession, session.id);
   return true;
 }
 
+/**
+ * 从事件流读本回合**成功**编辑的文件（按官方观察面给的增量窗），记进本会话的账。
+ * 被 danger-guard 拒绝或执行失败的编辑，其 tool/call 仍在事件流里——照记就会对未真正
+ * 改动的文件（若落在独立项目根）多跑一次门禁。所以 tool/call 建 callId→{name,path}，
+ * tool/result 的 isError 标记失败 callId，只记成功的。
+ * turn-stopping 时本回合 call+result 同处一个增量窗，单次扫描即可关联；无 callId 的事件
+ * （异常/旧形状/测试 mock）保守直记，避免漏门禁。
+ * fork 前缀：子代理会话 fork 自父会话时，
+ * 事件流含父事件前缀，游标从 0 首读会把父会话的历史编辑一并计入、多跑门禁。
+ * Session.inheritedEventCount（0.1.2-rc.1 起公开只读）给出 fork 切点——首读下限
+ * 取切点而非 0，父前缀天然跳过；缺属性退回 0（旧行为，保守不漏门禁）。
+ */
 async function readEditedFiles(
   rt: GateRuntime,
   agent: TurnAgent,
@@ -1850,10 +1866,9 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
   if (gate === undefined) {
     return;
   }
-  // 卸载收口（disposer 已 abort）：不再开新门——在飞那门由组合信号终止。
-  if (gateAborted(rt)) {
-    return;
-  }
+  // 卸载收口由调用方在批次起步前（handleTurnGate 的 runtimeDisposed）与每门结果后
+  // （下面的 gateAborted）各判一次；这里不再重复一遍——两处已覆盖「开局已卸载」与
+  // 「在飞期间卸载」，中间只剩同步段，没有可插入卸载的 await。
   const remaining = budget - (Date.now() - started);
   if (remaining < MIN_USEFUL_GATE_MS) {
     batch.blocked = true;
@@ -1982,6 +1997,11 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   // 一次只有一趟在读游标）；下面的门禁执行照旧 detached，不拖回合收尾。
   const acc = accumulatorOf(rt, sessionId);
   await readEditedFiles(rt, agent, acc);
+  // 卸载可能发生在这趟异步读期间：恢复后不再起步门禁，否则会在 dispose 的
+  // allSettled 快照之后新建 flight、并重新写回已被清理的游标。
+  if (runtimeDisposed(rt)) {
+    return;
+  }
   const dropped = acc.droppedCount();
   const files = acc.drain();
   // 累加器容量上限的淘汰要可观测（drain 已清零计数，先读后排）

@@ -49,9 +49,11 @@ describe("deriveAgentId（cwd → 记忆桶）", () => {
     assert.match(derivedA, /^src-[0-9a-f]{8}$/u);
   });
 
-  it("cwd 含空格 → 目录名空格转下划线", () => {
-    const id = deriveAgentId("/repo/my project/src");
-    assert.match(id, /^src-[0-9a-f]{8}$/u);
+  it("cwd 末段目录含空格 → 目录名空格转下划线", () => {
+    // 空格必须落在被取用的那一段（尾目录名）：先前样例把空格放在中间段、断言只看
+    // `^src-`，把「空格转 _」整段删掉也照样绿。
+    const id = deriveAgentId("/repo/my project");
+    assert.match(id, /^my_project-[0-9a-f]{8}$/u);
   });
 
   it("同一 cwd 幂等（多次调用同键）", () => {
@@ -101,18 +103,18 @@ describe("buildFeedbackText（失败摘要 → 记忆正文）", () => {
       },
       MESSAGES.zh,
     );
-    assert.match(
+    assert.equal(
       text,
-      /^\[quality-gate 反馈\] 门禁失败 pnpm check（根 \/w\/proj）：line1 line2 spaced tab$/u,
+      `[quality-gate 反馈] 门禁失败 pnpm check（根 /w/proj）：line1 line2 spaced tab\n${MESSAGES.zh.memoryEvidenceNotice}`,
     );
   });
 
-  it("空失败文本 → 前缀 + 空正文", () => {
+  it("空失败文本 → 空串（不投递空记录）", () => {
     const text = buildFeedbackText(
       { command: ["cargo", "check"], root: "/x", failure: "   " },
       MESSAGES.zh,
     );
-    assert.match(text, /：$/u);
+    assert.equal(text, "");
   });
 
   it("失败文本多换行压缩为单空格", () => {
@@ -120,10 +122,13 @@ describe("buildFeedbackText（失败摘要 → 记忆正文）", () => {
       { command: ["tsc"], root: "/x", failure: "a\n\n\nb\n" },
       MESSAGES.zh,
     );
-    assert.equal(text, "[quality-gate 反馈] 门禁失败 tsc（根 /x）：a b");
+    assert.equal(
+      text,
+      `[quality-gate 反馈] 门禁失败 tsc（根 /x）：a b\n${MESSAGES.zh.memoryEvidenceNotice}`,
+    );
   });
 
-  it("运行时越过类型的非字符串失败文本 → 折叠成空正文，不抛 TypeError", () => {
+  it("运行时越过类型的非字符串失败文本 → 空串，不抛 TypeError", () => {
     // 类型面上 failure 是 string，但这条载荷由门禁执行结果拼出来（spawn 失败、上游透传
     // undefined 都到得了这里）。抛异常的后果是整条记忆不写且日志只说"skipped"，看不出成因。
     const bad = {
@@ -132,23 +137,36 @@ describe("buildFeedbackText（失败摘要 → 记忆正文）", () => {
       failure: undefined,
     } as unknown as GateFeedbackInput;
     const text = buildFeedbackText(bad, MESSAGES.zh);
-    assert.equal(text, "[quality-gate 反馈] 门禁失败 tsc（根 /x）：");
+    assert.equal(text, "");
   });
 
-  it("命令与根里的换行同样折叠：整条正文始终是一行", () => {
+  it("运行时越过类型的非数组命令 → 折叠成空命令，不抛 join TypeError", () => {
+    const bad = {
+      command: undefined,
+      root: "/x",
+      failure: "e",
+    } as unknown as GateFeedbackInput;
+    const text = buildFeedbackText(bad, MESSAGES.zh);
+    assert.equal(
+      text,
+      `[quality-gate 反馈] 门禁失败 （根 /x）：e\n${MESSAGES.zh.memoryEvidenceNotice}`,
+    );
+  });
+
+  it("命令与根里的换行同样折叠：模板正文始终是一行", () => {
     const text = buildFeedbackText(
       { command: ["pnpm", "--filter", "a\nb"], root: "/w/\nproj", failure: "f" },
       MESSAGES.zh,
     );
-    assert.doesNotMatch(text, /\n/u, "任一处插值带换行都会把这条记忆拆成多段");
-    assert.equal(text, "[quality-gate 反馈] 门禁失败 pnpm --filter a b（根 /w/ proj）：f");
+    const rendered = "[quality-gate 反馈] 门禁失败 pnpm --filter a b（根 /w/ proj）：f";
+    assert.equal(text, `${rendered}\n${MESSAGES.zh.memoryEvidenceNotice}`);
   });
 
   it("记忆正文语言取自字典：en 表渲染同一事实（后续会话召回的就是这条）", () => {
     const input = { command: ["pnpm", "check"], root: "/w/proj", failure: "TS2345: type error" };
     assert.equal(
       buildFeedbackText(input, MESSAGES.en),
-      "[quality-gate feedback] gate failure pnpm check (root /w/proj): TS2345: type error",
+      `[quality-gate feedback] gate failure pnpm check (root /w/proj): TS2345: type error\n${MESSAGES.en.memoryEvidenceNotice}`,
     );
     assert.doesNotMatch(
       buildFeedbackText(input, MESSAGES.en),
@@ -183,6 +201,24 @@ describe("resolveGatewayUrl（网关基址：设置优先，env 兜底，默认�
   it("尾部斜杠剥离（避免拼出 //v2/… 的 404）", () => {
     vi.stubEnv("TDAI_GATEWAY_URL", undefined);
     assert.equal(resolveGatewayUrl("http://127.0.0.1:8420///"), "http://127.0.0.1:8420");
+  });
+
+  it("带 query / fragment 的串 → 空串（返回值是基址，拼 /v2/… 会落到 query 之后）", () => {
+    vi.stubEnv("TDAI_GATEWAY_URL", undefined);
+    // 原样透传的后果：`https://gw/api?x=1` + `/v2/conversation/add`
+    // = `https://gw/api?x=1/v2/conversation/add`，请求打到一个不存在的 query 上。
+    // 那看起来像网关 404，实际是配置把基址写成了完整请求地址。
+    assert.equal(resolveGatewayUrl("https://gw.example/api?x=1"), "");
+    assert.equal(resolveGatewayUrl("https://gw.example/api#frag"), "");
+    assert.equal(resolveGatewayUrl("http://127.0.0.1:8420/?a=b"), "");
+  });
+
+  it("带 userinfo 的串 → 空串（基址不是存密钥的地方，且它会进降级日志）", () => {
+    vi.stubEnv("TDAI_GATEWAY_URL", undefined);
+    // host 的降级 reason 会插值这个返回值：原样透传等于把 settings.yaml 里的密码
+    // 打进日志与用户可见的提示。凭据只能走 memoryGatewayKeyRef（引用名）。
+    assert.equal(resolveGatewayUrl("http://user:pass@gw.internal:8420"), "");
+    assert.equal(resolveGatewayUrl("https://token@gateway.example.com"), "");
   });
 
   it("剥斜杠后才解析不开的半截串 → 空串（不把配置手滑当成协议不安全）", () => {
@@ -220,45 +256,49 @@ describe("resolveServiceId（x-tdai-service-id：调用期读 env，默认协议
 
 describe("pushGateFeedback（L0 沉淀请求契约）", () => {
   let calls: { url: string; init: Record<string, unknown> }[];
-  let originalFetch: typeof globalThis.fetch;
   /** 投递目标由调用方（host：设置 + ctx.credentials + x-tdai-service-id）解析后传入：
    *  本模块既不拼默认地址，也不读 env——服务名走 target 而不是自己再算一遍。 */
-  const BASE = "http://gateway.test:8420";
+  const BASE = "https://gateway.test:8420";
   const target = { url: BASE, key: "tok-abc", serviceId: "dsh-test" };
 
   beforeEach(() => {
     calls = [];
-    originalFetch = globalThis.fetch;
     // 故意与 target.serviceId 取不同的值：投递模块若偷偷读 env，那条契约用例会当场红。
     vi.stubEnv("TDAI_SERVICE_ID", "env-should-not-be-used");
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = async (
-      url: string,
-      init: Record<string, unknown>,
-    ) => {
+    // stubGlobal 而不是手工保存/恢复 globalThis.fetch：后者在赋值之后抛错时会把伪件
+    // 泄漏给后续用例，也与本文件 vi.stubEnv 的回收风格不一致。
+    vi.stubGlobal("fetch", async (url: string, init: Record<string, unknown>) => {
       calls.push({ url, init });
       return {
         ok: true,
         status: 200,
         arrayBuffer: async () => new ArrayBuffer(0),
       };
-    };
+    });
   });
   afterEach(() => {
     vi.unstubAllEnvs();
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = originalFetch;
+    vi.unstubAllGlobals();
   });
 
   it("请求契约：POST {url}/v2/conversation/add + Bearer key + body 结构 + 5s 超时 signal", async () => {
-    await pushGateFeedback(
-      {
-        cwd: "/w/proj",
-        command: ["pnpm", "check"],
-        root: "/w/proj",
-        failure: "TS2345: type error",
-      },
-      target,
-      MESSAGES.zh,
-    );
+    // 超时契约要钉到数值：只断言 signal 是 AbortSignal 实例时，把 5s 改成 1s 也照样绿。
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await pushGateFeedback(
+        {
+          cwd: "/w/proj",
+          command: ["pnpm", "check"],
+          root: "/w/proj",
+          failure: "TS2345: type error",
+        },
+        target,
+        MESSAGES.zh,
+      );
+      assert.equal(timeoutSpy.mock.calls[0]?.[0], 5000, "反馈投递超时固定 5s");
+    } finally {
+      timeoutSpy.mockRestore();
+    }
     assert.equal(calls.length, 1);
     const [firstCall] = calls;
     assert.ok(firstCall, "应有一次请求记录");
@@ -292,14 +332,15 @@ describe("pushGateFeedback（L0 沉淀请求契约）", () => {
 
   it("网关非 2xx → 抛错（带状态码），且先消费掉响应体再抛", async () => {
     let drained = false;
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = async () => ({
+    vi.stubGlobal("fetch", async () => ({
       ok: false,
       status: 502,
+      headers: { get: () => null },
       arrayBuffer: async () => {
         drained = true;
         return new ArrayBuffer(0);
       },
-    });
+    }));
     await assert.rejects(
       pushGateFeedback(
         { cwd: "/x", command: ["tsc"], root: "/x", failure: "e" },
@@ -314,11 +355,12 @@ describe("pushGateFeedback（L0 沉淀请求契约）", () => {
   });
 
   it("非 2xx 且响应体有正文 → 错误信息带上截断后的正文（401 与 400 的修法不同）", async () => {
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = async () => ({
+    vi.stubGlobal("fetch", async () => ({
       ok: false,
       status: 401,
+      headers: { get: () => "text/plain" },
       arrayBuffer: async () => new TextEncoder().encode("  invalid token  ").buffer,
-    });
+    }));
     await assert.rejects(
       pushGateFeedback(
         { cwd: "/x", command: ["tsc"], root: "/x", failure: "e" },
@@ -330,13 +372,14 @@ describe("pushGateFeedback（L0 沉淀请求契约）", () => {
   });
 
   it("非 2xx 且响应体读不出来 → 仍只带状态码，不因此改变抛错形态", async () => {
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = async () => ({
+    vi.stubGlobal("fetch", async () => ({
       ok: false,
       status: 503,
+      headers: { get: () => null },
       arrayBuffer: async () => {
         throw new Error("body stream reset");
       },
-    });
+    }));
     await assert.rejects(
       pushGateFeedback(
         { cwd: "/x", command: ["tsc"], root: "/x", failure: "e" },
@@ -372,6 +415,73 @@ describe("pushGateFeedback（L0 沉淀请求契约）", () => {
     );
   });
 
+  it("明文 http 指向非回环 → 发请求之前拒投（凭据不上网）", async () => {
+    const callsBefore = calls.length;
+    await assert.rejects(
+      pushGateFeedback(
+        { cwd: "/w", command: ["tsc"], root: "/w", failure: "e" },
+        { url: "http://gateway.test:8420", key: "k", serviceId: "default" },
+        MESSAGES.zh,
+      ),
+      /投递目标不安全/u,
+    );
+    assert.equal(calls.length, callsBefore, "不安全的目标必须在 fetch 之前被拦下");
+  });
+
+  it("非法 serviceId → 回落 default，而不是发出畸形请求头", async () => {
+    await pushGateFeedback(
+      { cwd: "/w", command: ["tsc"], root: "/w", failure: "e" },
+      { url: BASE, key: "k", serviceId: "bad service\nid" },
+      MESSAGES.zh,
+    );
+    const [firstCall] = calls;
+    const headers = firstCall?.init["headers"] as Record<string, string>;
+    assert.equal(headers["x-tdai-service-id"], "default");
+  });
+
+  it("无法解析的基址 → 发请求之前拒投", async () => {
+    await assert.rejects(
+      pushGateFeedback(
+        { cwd: "/w", command: ["tsc"], root: "/w", failure: "e" },
+        { url: "not a url", key: "k", serviceId: "default" },
+        MESSAGES.zh,
+      ),
+      /投递目标不完整/u,
+    );
+  });
+
+  it("非 http(s) 协议、带 query/fragment 的基址 → 发请求之前拒投", async () => {
+    const callsBefore = calls.length;
+    const urls = [
+      "ftp://gateway.test:21",
+      "https://gateway.test/api?x=1",
+      "https://gateway.test/api#frag",
+    ];
+    await Promise.all(
+      urls.map((url) =>
+        assert.rejects(
+          pushGateFeedback(
+            { cwd: "/w", command: ["tsc"], root: "/w", failure: "e" },
+            { url, key: "k", serviceId: "default" },
+            MESSAGES.zh,
+          ),
+          /投递目标不完整/u,
+        ),
+      ),
+    );
+    assert.equal(calls.length, callsBefore, "基址不合法时不许发请求");
+  });
+
+  it("失败正文为空 → 不投递（空记录只会成为召回噪音）", async () => {
+    const callsBefore = calls.length;
+    await pushGateFeedback(
+      { cwd: "/w", command: ["tsc"], root: "/w", failure: "   " },
+      target,
+      MESSAGES.zh,
+    );
+    assert.equal(calls.length, callsBefore, "空正文不发请求");
+  });
+
   it("尾部斜杠归一：target.url 带 / 时不拼出 //v2/…", async () => {
     await pushGateFeedback(
       { cwd: "/w", command: ["tsc"], root: "/w", failure: "e" },
@@ -383,10 +493,7 @@ describe("pushGateFeedback（L0 沉淀请求契约）", () => {
   });
 
   it("响应体读取失败不影响「已送达」结论（body 消费只是连接复用）", async () => {
-    (globalThis as unknown as Record<string, unknown>)["fetch"] = async (
-      url: string,
-      init: Record<string, unknown>,
-    ) => {
+    vi.stubGlobal("fetch", async (url: string, init: Record<string, unknown>) => {
       calls.push({ url, init });
       return {
         ok: true,
@@ -395,7 +502,7 @@ describe("pushGateFeedback（L0 沉淀请求契约）", () => {
           throw new Error("body stream reset");
         },
       };
-    };
+    });
     await pushGateFeedback(
       {
         cwd: "/w/proj",

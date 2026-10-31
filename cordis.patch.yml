@@ -8,13 +8,15 @@
 #     之后二次检查 inbox：有排队项就再开一轮。此处刻意不写行号——那是另一个包的源码位置，
 #     随宿主升级漂移，而它恰恰是本插件唯一的机制前提）；
 #     探测只提项目自己声明过的命令，拿不到脚本清单时宁可不给门禁（防假失败注入）；
-#   - 防跑飞：每回合每根至多 2 次注入、总预算封顶、超时按「未执行」注入不静默通过；
+#   - 防跑飞：每会话至多 N 次注入（默认 2，按会话跨回合累计、所有根共用一份，
+#     门禁干净通过后重置）；总预算封顶；超时按「未执行」注入不静默通过；
 #     inbox 有待处理时不抢话。
 # 设置卡：enabled / 注入配额 / 门禁预算 / 记忆反馈（开关 + 网关地址 + 密钥凭据引用，
 # 记忆反馈默认关闭且地址默认为空 = 不启用；密钥走 dsh 凭据通道，不落设置）。
 #
 # 组合包层：本文件由 package.json 的 dsh.bundle.patch
-# 指向，随 `dsh plugin --profile web add/remove ./plugins/quality-gate` 维护。
+# 指向，随 `dsh plugin --profile web add/remove @jayyuen66/dsh-quality-gate` 维护。
+# 本地开发形态可用 `add .`；`./plugins/quality-gate` 不是本仓路径。
 # 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
 # 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
 - insert:

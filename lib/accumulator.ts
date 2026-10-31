@@ -4,6 +4,8 @@
 // post-edit 只记账（O(1)），Stop 时按项目根分组批量执行。
 // dsh 侧对应：tool/result 事件记账，agent/turn-stopping 时 drain 批处理。
 
+import path from "node:path";
+
 /**
  * 需要过门禁的扩展名（代码与配置；md/txt/图片等免检）。
  *
@@ -51,19 +53,22 @@ export class EditAccumulator {
     if (name === undefined || !EDIT_TOOLS.has(name)) {
       return;
     }
-    if (typeof filePath !== "string" || filePath.length === 0) {
+    if (typeof filePath !== "string" || filePath.trim().length === 0) {
       return;
     }
-    if (!GATED_EXT.test(filePath)) {
+    // 先 trim 再判扩展名：`$` 只匹配串末，带尾随空格/换行的路径会被判成免检扩展名而静默丢弃。
+    // 归一化同时把 `a/../b.ts`、`a//b.ts` 收成同一键，避免重复项白占容量、把真正要门禁的文件挤进淘汰。
+    const normalized = path.normalize(filePath.trim());
+    if (!GATED_EXT.test(normalized)) {
       return;
     }
     // 重复编辑要把顺序刷到最近：`Set.add` 对已存在元素不改变顺序，否则"整回合被反复编辑、
     // 也最可能触发门禁失败"的那个文件会因为最早插入而最先被淘汰（淘汰即漏检该根）。
-    this.files.delete(filePath);
+    this.files.delete(normalized);
     if (this.files.size >= this.maxFiles) {
       this.evictOldest();
     }
-    this.files.add(filePath);
+    this.files.add(normalized);
   }
 
   /**

@@ -8,7 +8,7 @@
 //
 // 用法（各包 test/build-client.test.ts 的用例里断言）：
 //   assert.deepEqual(await clientFreshnessProblems(import.meta.url), []);
-//   // helper 自动定位 ../client.js 与 ../build-client.mjs
+//   // helper 从用例文件向上定位包根（含 build-client.mjs 的那一层），再读 ../client.js
 //
 // 为什么交回「问题清单」而不是自己登记用例：登记是收集期动作，只能发生在用例文件的
 // describe/用例里 —— vitest(require-hook) 既不收模块根上的裸调用，也不收 describe
@@ -20,27 +20,64 @@
 // 逐字节相等成立；若未来构建引入非确定性，改为规范哈希比较并在
 // build-client.mjs 里输出 canonical 形态。
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+/** 包名：manifest 解析失败或缺失时回退到目录名（报错文本仍能指出是哪个包）。 */
+function packageNameOf(pkgDir: string): string {
+  try {
+    const manifest = JSON.parse(readFileSync(path.resolve(pkgDir, "package.json"), "utf8")) as {
+      name?: unknown;
+    };
+    return typeof manifest.name === "string" && manifest.name !== ""
+      ? manifest.name
+      : path.basename(pkgDir);
+  } catch {
+    return path.basename(pkgDir);
+  }
+}
 
 /** 指纹门禁：磁盘 client.js 与最新构建逐字节一致时返回空数组，否则返回说明。 */
 export async function clientFreshnessProblems(testFileUrl: string): Promise<string[]> {
   const testDir = path.dirname(fileURLToPath(testFileUrl));
-  const pkgDir = path.resolve(testDir, "..");
-  const pkgName =
-    /"name":\s*"(?<name>[^"]+)"/u.exec(readFileSync(path.resolve(pkgDir, "package.json"), "utf8"))
-      ?.groups?.["name"] ?? "unknown";
+  // 向上找真正的包根（含 build-client.mjs 的那一层）。固定取测试文件的上一层时，
+  // 用例一旦放进 test/ 子目录就会读到错误的 package.json / client.js（甚至上层另一包）。
+  let pkgDir = testDir;
+  while (!existsSync(path.resolve(pkgDir, "build-client.mjs"))) {
+    const parent = path.dirname(pkgDir);
+    if (parent === pkgDir) {
+      return [`[unknown] 无法从 ${testDir} 向上定位到含 build-client.mjs 的包目录`];
+    }
+    pkgDir = parent;
+  }
+  const pkgName = packageNameOf(pkgDir);
 
-  // import() 只收 URL 或说明符，不收裸文件系统路径：Windows 上 `C:\…\build-client.mjs`
-  // 会被当成协议 `c:` 解析而抛 ERR_UNSUPPORTED_ESM_URL_SCHEME；POSIX 的 `/…` 只是恰好能过。
-  const { buildClient } = (await import(
-    pathToFileURL(path.resolve(pkgDir, "build-client.mjs")).href
-  )) as {
-    buildClient: () => Promise<string>;
-  };
-  const expected = await buildClient();
-  const onDisk = readFileSync(path.resolve(pkgDir, "client.js"), "utf8");
+  let expected: string;
+  try {
+    // import() 只收 URL 或说明符，不收裸文件系统路径：Windows 上 `C:\…\build-client.mjs`
+    // 会被当成协议 `c:` 解析而抛 ERR_UNSUPPORTED_ESM_URL_SCHEME；POSIX 的 `/…` 只是恰好能过。
+    const { buildClient } = (await import(
+      pathToFileURL(path.resolve(pkgDir, "build-client.mjs")).href
+    )) as {
+      buildClient?: () => Promise<string>;
+    };
+    if (typeof buildClient !== "function") {
+      return [`[${pkgName}] build-client.mjs 未导出可调用的 buildClient()，指纹门禁无法执行`];
+    }
+    expected = await buildClient();
+  } catch (error) {
+    // 加载或构建抛错时按「不可判定」收口：让门禁以问题清单的形式红在这一个用例里，
+    // 而不是把原始栈丢给调用方（那时报错位置与被测产物无关）。
+    return [`[${pkgName}] 无法执行 ${pkgDir} 的内存构建：${String(error)}`];
+  }
+
+  const clientPath = path.resolve(pkgDir, "client.js");
+  if (!existsSync(clientPath)) {
+    // 产物缺失正是最需要给出可操作指引的一档，不要让它变成裸 ENOENT。
+    return [`[${pkgName}] client.js 缺失：请在包目录 ${pkgDir} 运行 node build-client.mjs`];
+  }
+  const onDisk = readFileSync(clientPath, "utf8");
   return onDisk === expected
     ? []
     : [

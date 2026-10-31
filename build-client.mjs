@@ -10,7 +10,6 @@
 // peerDependencies，发布物体检必须按「宿主提供」而不是「manifest 声明」来判它们合法。
 // 运行：node build-client.mjs（或 pnpm run build:client）。buildClient() 供测试导入。
 import path from "node:path";
-import { rolldown } from "rolldown";
 import {
   buildClientBundle,
   REACT_RUNTIME_MODULES,
@@ -21,8 +20,10 @@ export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifac
 export { REACT_RUNTIME_MODULES } from "@jayyuen66/dsh-plugin-shared/lib/build-client";
 
 const root = import.meta.dirname;
-/** 客户端入口源码（相对包根）。入口名、单 chunk 校验与产物头三处同源。 */
-const ENTRY = path.join("src", "client-entry.ts");
+/** 客户端入口源码（相对包根）。入口名、单 chunk 校验与产物头三处同源。
+ *  用 POSIX 分隔符而不是 path.join：这一串会进产物首行，Windows 上 path.join 会写出
+ *  `src\client-entry.ts`，同一份源码在不同平台生成不同字节。 */
+const ENTRY = "src/client-entry.ts";
 
 // 外置清单 = 既有 react 家族 + zod（宿主 `PLATFORM_MODULES` 里本卡值导入的第三方运行时）。
 // 不复用 shared 的默认清单、也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
@@ -31,6 +32,9 @@ const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
 
 /** 生成 client.js 的完整文本（含 ModuleLoader 外壳）。 */
 export async function buildClient() {
+  // rolldown 是原生构建依赖：放到构建路径里再加载，让只 import 本文件转导出/单 chunk
+  // 校验的消费方（pack-check.mjs、test/build-client.test.ts）不必装它。
+  const { rolldown } = await import("rolldown");
   return buildClientBundle({
     root,
     rolldown,

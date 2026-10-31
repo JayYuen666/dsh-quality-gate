@@ -26,12 +26,9 @@
 // 引入非确定性，改为规范哈希比较并在 build-host.mjs 里输出 canonical 形态。
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
-/** build-host.mjs 的导出返回形状：单文件正文，或「落盘绝对路径 → 正文」的产物清单。 */
-type BuiltArtifacts = string | Map<string, string>;
 
 /** 指纹门禁的两份产物 + 包名与包根（消息里标身份与修复命令，两侧同源）。 */
 export interface HostFreshnessEvidence {
@@ -56,15 +53,18 @@ const DEFAULT_ARTIFACT = "host.js";
 const ABSENT = "[产物缺失：运行 node build-host.mjs]";
 
 /**
- * 读一份文本产物；不存在时交回缺失占位。
+ * 读一份文本产物；不存在或不可读（含路径为目录的 EISDIR）时交回缺失占位。
  * @param file - 绝对路径
  * @returns 正文，或 ABSENT
  */
 function readText(file: string): string {
-  if (existsSync(file)) {
+  try {
     return readFileSync(file, "utf8");
+  } catch {
+    // 先 existsSync 再读存在 TOCTOU 窗口，且目录也能通过存在性判断后抛 EISDIR；
+    // 统一收口成缺失占位，让门禁红在比对里而不是红在文件系统的栈里。
+    return ABSENT;
   }
-  return ABSENT;
 }
 
 /**
@@ -77,38 +77,52 @@ function digestOf(text: string): string {
 }
 
 /**
- * 取包名：正则从 package.json 抠，不为此把整张依赖表拉进类型面（同 client 侧夹具的取法）。
+ * 取包名：解析 package.json 的顶层 name；读不到或形状不对时回退目录名。
  * @param pkgDir - 包根绝对路径
- * @returns package.json 的 name，抠不到时为 unknown
+ * @returns 包名（报错身份标定用）
  */
 function packageNameOf(pkgDir: string): string {
-  return (
-    /"name":\s*"(?<pkgName>[^"]+)"/u.exec(readText(path.resolve(pkgDir, "package.json")))?.groups?.[
-      "pkgName"
-    ] ?? "unknown"
-  );
+  try {
+    const manifest = JSON.parse(readFileSync(path.resolve(pkgDir, "package.json"), "utf8")) as {
+      name?: unknown;
+    };
+    return typeof manifest.name === "string" && manifest.name !== ""
+      ? manifest.name
+      : path.basename(pkgDir);
+  } catch {
+    // 正则抠第一个 "name" 会命中子对象里的同名键；解析失败时用目录名，至少不会是 [unknown]。
+    return path.basename(pkgDir);
+  }
 }
 
 /**
  * 多产物形态：把清单折成按路径排序的「相对路径 + 正文摘要」文本，两侧共用同一排序。
+ * @param pkgName - 包名（报错身份标定）
  * @param pkgDir - 包根绝对路径（相对化是为了清单不绑定装机位置）
  * @param files - 构建函数交回的「落盘绝对路径 → 正文」
  * @param fromDisk - true 时逐个读盘算摘要（缺文件即摘要不同，行里已点名是哪个产物）
  * @returns 可直接与另一侧逐字节相等的清单文本
  */
-function manifestOf(pkgDir: string, files: Map<string, string>, fromDisk: boolean): string {
+function manifestOf(
+  pkgName: string,
+  pkgDir: string,
+  files: ReadonlyMap<unknown, unknown>,
+  fromDisk: boolean,
+): string {
   const rows: string[] = [];
-  for (const [file, code] of [...files.entries()].toSorted(([left], [right]) =>
-    left.localeCompare(right),
-  )) {
+  const entries = Array.from(files.entries(), ([file, code]): [string, string] => [
+    String(file),
+    typeof code === "string" ? code : String(code),
+  ]);
+  for (const [file, code] of entries.toSorted(([left], [right]) => left.localeCompare(right))) {
     const identity = fromDisk ? digestOf(readText(file)) : digestOf(code);
     rows.push(`${path.relative(pkgDir, file)}\t${identity}`);
   }
   // 零条目时两侧都折成 "\n"，逐字节相等 —— 空清单会被读成"新鲜"。构建函数交回空 Map
   // （入口配错、打包器没产出 chunk）恰恰是产物坏了的形态，必须当场红而不是放过。
   if (rows.length === 0) {
-    throw new Error(
-      `[${pkgDir}] 构建函数交回了空产物清单：两侧都为空会逐字节相等而假绿，门禁无从比对。`,
+    throw new TypeError(
+      `[${pkgName}] 构建函数交回了空产物清单：两侧都为空会逐字节相等而假绿，门禁无从比对。`,
     );
   }
   return `${rows.join("\n")}\n`;
@@ -134,20 +148,30 @@ export async function hostFreshnessEvidence(
   // ERR_UNSUPPORTED_ESM_URL_SCHEME，故一律经 pathToFileURL。
   const mod = (await import(
     pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href
-  )) as unknown as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
-  const build = mod[builder];
+  )) as unknown as Record<string, unknown>;
+  // Object.hasOwn：动态导入的对象在 mock/代理下可能带原型成员，直接下标会取到
+  // toString 之类的可调用值，绕过下面「没有可调用导出」的守卫。
+  const build = Object.hasOwn(mod, builder) ? mod[builder] : undefined;
   if (typeof build !== "function") {
     throw new TypeError(
       `[${pkgName}] build-host.mjs 没有可调用导出 ${builder}：门禁的 builder 选项必须指它真实导出的名字。`,
     );
   }
-  const built = await build();
+  // 动态导入面收窄成 any：调用前把签名投影回来，返回值仍要在运行期校验形状。
+  const built: unknown = await (build as () => Promise<unknown>)();
   if (typeof built === "string") {
     // builder 交回空串、磁盘产物又恰好是空文件时两边逐字节相等——那不是"新鲜"，是没产出。
     if (built === "") {
       throw new Error(`[${pkgName}] 构建函数交回了空串产物：空产物与空文件相等，门禁无从比对。`);
     }
     return { pkgName, pkgDir, onDisk: readText(path.resolve(pkgDir, artifact)), built };
+  }
+  // 类型面把这里写成 Map，但构建脚本是动态导入，运行期形状不受 TS 约束：
+  // undefined / 数组 / 普通对象都会被下面的 entries()/toSorted 当成清单用，产出无意义结论。
+  if (!(built instanceof Map)) {
+    throw new TypeError(
+      `[${pkgName}] 构建函数 ${builder} 的返回值既不是字符串也不是 Map：门禁无法把 ${typeof built} 当作产物比对。`,
+    );
   }
   // 多产物分支：builder 自己决定落哪些文件和路径，`artifact` 在这里没有意义。
   // 传了它就是配置错误（常见于从单文件形态切过来忘删），静默忽略会让调用方以为在比
@@ -164,7 +188,7 @@ export async function hostFreshnessEvidence(
   return {
     pkgName,
     pkgDir,
-    onDisk: manifestOf(pkgDir, built, true),
-    built: manifestOf(pkgDir, built, false),
+    onDisk: manifestOf(pkgName, pkgDir, built, true),
+    built: manifestOf(pkgName, pkgDir, built, false),
   };
 }

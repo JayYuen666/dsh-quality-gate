@@ -14,6 +14,9 @@ import { LOG_TEMPLATES } from "./log-templates.ts";
 /** 本包标签前缀，如 `[quality-gate]`。 */
 const PKG_PREFIX = "[quality-gate]";
 
+/** 「包标签」形态：只认小写短横线命名空间，避免测试自己的 `[DEBUG]`、`[vite]` 被算成别家日志。 */
+const PKG_TAG = /^\[[a-z][a-z0-9-]*\]/u;
+
 /** 插件会用到的四个 console 级别（联合类型取属性，避免以字符串索引 Console）。 */
 export type LogLevel = "info" | "warn" | "error" | "log";
 const LEVELS: readonly LogLevel[] = ["info", "warn", "error", "log"];
@@ -33,11 +36,17 @@ function spyLevel(level: LogLevel): void {
   originals.set(level, console[level]);
   console[level] = (...args: unknown[]) => {
     const [first, ...rest] = args;
-    records.push({ level, text: String(first).replaceAll(/\s+/gu, " "), extra: rest });
+    // 归一化后 trim：多行模板字面量常以换行/缩进开头，不 trim 会让 startsWith 判定静默失效。
+    records.push({ level, text: String(first).replaceAll(/\s+/gu, " ").trim(), extra: rest });
   };
 }
 
 function install(): void {
+  // 已接管则直接返回：重复 install 会把上一轮的 spy 当成原始方法存进 originals，
+  // 之后 uninstall 恢复的是 spy 自己，console 被永久劫持。
+  if (originals.size > 0) {
+    return;
+  }
   for (const level of LEVELS) {
     spyLevel(level);
   }
@@ -51,9 +60,10 @@ function uninstall(): void {
   originals.clear();
 }
 
-/** 片段下限：`includes("")` 对任意日志恒真，一条空片段就能让下面的"未认领"断言整体失效。
- *  这里只拦空/近空片段；片段选得特不特异由 log-templates.ts 的维护约定把守，不按长度判。 */
-const MIN_TEMPLATE_LENGTH = 4;
+/** 片段下限：`includes("")` 对任意日志恒真，短而通用的片段又会让含相同字符序列的新日志
+ *  被误判成"已认领"（断言退化为恒绿）。12 是当前清单里最短那条（"injected at turn"）之下
+ *  的一档：低于它的片段在这里直接红出，不由人工约定兜底。 */
+const MIN_TEMPLATE_LENGTH = 12;
 
 function assertTemplatesUsable(): void {
   const bad = LOG_TEMPLATES.filter(
@@ -70,6 +80,14 @@ function containsTemplate(text: string): boolean {
   return LOG_TEMPLATES.some((fragment) => text.includes(fragment));
 }
 
+/** 失败时把整条调用（含堆栈所在的其余实参）写进断言消息：只报前 120 字符会漏掉失败原因。 */
+function describeRecord(record: LogRecord): string {
+  const extra = record.extra
+    .map((arg) => (arg instanceof Error ? `${arg.name}: ${arg.message}` : String(arg)))
+    .join(" ");
+  return `${record.level}: ${record.text}${extra === "" ? "" : ` | ${extra}`}`;
+}
+
 assertTemplatesUsable();
 
 beforeEach(() => {
@@ -80,13 +98,13 @@ beforeEach(() => {
 afterEach(() => {
   uninstall();
   const ours = records.filter((record) => record.text.startsWith(PKG_PREFIX));
+  // 只认「包标签」形态：测试自己的 `[DEBUG]`、`[vite]` 一类方括号提示与装配范围无关。
   const strangers = records
-    .filter((record) => record.text.startsWith("["))
-    .filter((record) => !record.text.startsWith(PKG_PREFIX))
-    .map((record) => record.text.slice(0, 120));
+    .filter((record) => PKG_TAG.test(record.text) && !record.text.startsWith(PKG_PREFIX))
+    .map((record) => describeRecord(record));
   const unclaimed = ours
     .filter((record) => !containsTemplate(record.text))
-    .map((record) => record.text.slice(0, 120));
+    .map((record) => describeRecord(record));
 
   assert.deepEqual(strangers, [], "本包测试里出现了别家插件的日志：装配范围错了");
   assert.deepEqual(

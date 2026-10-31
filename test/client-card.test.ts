@@ -66,8 +66,12 @@ function localeText(
   return fillTemplate(dict[key] ?? key, params);
 }
 
-/** 中日韩统一表意文字区段：判"这段文本里还有中文"。 */
-const CJK = /[\u4E00-\u9FFF]/u;
+/** 中日韩文字（含扩展 A / 兼容区）+ CJK 标点 + 全角符号：判"这段文本里还有中文"。
+ *  只覆盖 U+4E00–U+9FFF 会放行中文标点（：、。「」）、全角符号（！？）与扩展区生僻字。 */
+const CJK = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF01-\uFF60\uFFE0-\uFFE6]/u;
+
+/** locale 字典 effect 的登记 label：与 src/client-entry.ts 的那个第二参必须一致。 */
+const LOCALE_EFFECT_LABEL = "quality-gate-card: locale dictionaries";
 
 /** 网关地址样例：同一字面量在断言的输入与期望里各出现一次，会被重复串规则盯上。 */
 const GATEWAY_URL = "http://127.0.0.1:8420";
@@ -98,19 +102,26 @@ function placeholders(template: string): Set<string> {
 /** 两语键清单（`zh` / `en` 的 string 面投影见上面两处常量）。 */
 const keys = Object.keys(UI_MESSAGES.zh);
 
-/** 剥掉注释后的源码（整行注释 + 行尾注释；注释按约定保持中文，不参与断言）。 */
+/**
+ * 可能是注释或字面量的片段：块注释、行注释、三种引号的字面量（含转义）。
+ *
+ * 一次扫完全文，字符串整体被收进 token，于是本仓的
+ * `placeholder: "http://127.0.0.1:8420"` 里的双斜杠不会被当成注释起点——按行
+ * `indexOf("//")` 的做法会把同一行后半段一起切掉，断言从此看不见那半行里的中文字面量。
+ */
+const COMMENT_TOKEN =
+  /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/gu;
+
+/**
+ * 剥掉注释后的源码（注释按约定保持中文，不参与断言）。
+ *
+ * 必须按字面量感知来剥：行内块注释里的中文也要被剥掉（旧写法只认行首块注释开符号，
+ * 那会把行内块注释里的中文误判成字面量而假红），字符串里的双斜杠要留在原地（否则假绿）。
+ */
 function codeOnly(source: string): string {
-  return source
-    .split("\n")
-    .map((line) => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) {
-        return "";
-      }
-      const commentStart = line.indexOf("//");
-      return commentStart === -1 ? line : line.slice(0, commentStart);
-    })
-    .join("\n");
+  return source.replaceAll(COMMENT_TOKEN, (token) =>
+    token.startsWith("//") || token.startsWith("/*") ? "" : token,
+  );
 }
 
 describe("卡片双语字典（UI_MESSAGES）", () => {
@@ -137,18 +148,30 @@ describe("卡片双语字典（UI_MESSAGES）", () => {
     }
   });
 
-  it("同一渲染路径换 translator 即换语言（保存条三态 + 失败整行）", () => {
-    assert.equal(tZh("statusDirty"), "有未保存的修改，点「保存」生效");
-    assert.equal(tEn("statusDirty"), "Unsaved changes — press Save to apply");
+  it("同一渲染路径换 translator 即换语言（状态条与失败整行）", () => {
+    assert.equal(tZh("statusClean"), "无未保存的修改");
+    assert.equal(tEn("statusClean"), "No unsaved changes");
     assert.equal(tZh("saveFailed", { message: "boom" }), "保存失败：boom");
     assert.equal(tEn("saveFailed", { message: "boom" }), "Save failed: boom");
     assert.equal(tZh("outOfRange"), "超出允许范围，未保存");
     assert.doesNotMatch(tEn("outOfRange"), CJK);
   });
 
-  it("卡片源码的非注释行不再有中文字面量（文案全在字典里）", () => {
+  it("client-entry.ts 的非注释行没有中文字面量（本仓卡片侧只有这一份源码，字典在 ui-messages.ts）", () => {
     const src = fileURLToPath(new URL("../src/client-entry.ts", import.meta.url));
     assert.doesNotMatch(codeOnly(readFileSync(src, "utf8")), CJK);
+  });
+
+  it("剥离器自身：字符串里的双斜杠不是注释起点（否则同行后段被切掉，断言就看不见它）", () => {
+    // 本仓 client-entry.ts 就有 placeholder: "http://127.0.0.1:8420"：按行 indexOf 找双斜杠
+    // 会从那里截断，同一行后面的内容（包括真正该拦的中文字面量）整段消失。
+    const source = 'const a = "http://127.0.0.1:8420"; const b = "中文";\n';
+    assert.match(codeOnly(source), /"中文"/u);
+  });
+
+  it("剥离器自身：行尾注释与行内块注释都剥掉（注释里的中文不算违例）", () => {
+    const source = "const a = 1; // 中文注释\nconst b = 2 /* 中文块注释 */ + 3;\n";
+    assert.doesNotMatch(codeOnly(source), CJK);
   });
 });
 
@@ -195,6 +218,16 @@ describe("卡片值面的 zod 区间", () => {
     assert.equal(
       projectCardValues({ memoryGatewayUrl: "ftp://example.com" }).memoryGatewayUrl,
       undefined,
+    );
+    assert.equal(
+      projectCardValues({ memoryGatewayUrl: "https://user:pass@example.com" }).memoryGatewayUrl,
+      undefined,
+      "带 userinfo 的地址不当作已配置",
+    );
+    assert.equal(
+      projectCardValues({ memoryGatewayUrl: "http://192.168.1.10:8420" }).memoryGatewayUrl,
+      undefined,
+      "远端明文 http 不当作已配置",
     );
   });
 
@@ -367,9 +400,8 @@ describe("卡片 apply 的官方 locale 接线", () => {
       "只取本条目那张共享表单（裸条目 id），且只取一次",
     );
     assert.deepEqual(trace.slots, ["plugins.bundle.config"]);
-    assert.equal(trace.effects.size, 2, "样式 effect + locale 字典 effect 各一个");
-    // 跑 locale 那个 effect：两语字典一次性进注册表，返回的清理函数回收这一份注册。
-    const localeEffect = trace.effects.get("quality-gate-card: locale dictionaries");
+    // 只按 label 断言本包关心的 effect 在位，不锁 effect 总数：新增样式/清理 effect 属合法演进。
+    const localeEffect = trace.effects.get(LOCALE_EFFECT_LABEL);
     assert.ok(localeEffect !== undefined, "locale 字典 effect 已登记");
     const teardown = localeEffect();
     assert.deepEqual(
@@ -377,8 +409,8 @@ describe("卡片 apply 的官方 locale 接线", () => {
       [["quality-gate", ["zh", "en"]]],
       "两语字典按本包命名空间一次性注册进官方 locale，且只注册一次",
     );
-    assert.equal(trace.registrations[0]?.dicts.zh.cardTitle, UI_MESSAGES.zh.cardTitle);
-    assert.equal(trace.registrations[0]?.dicts.en.cardTitle, UI_MESSAGES.en.cardTitle);
+    assert.equal(trace.registrations[0]?.dicts.zh.statusClean, UI_MESSAGES.zh.statusClean);
+    assert.equal(trace.registrations[0]?.dicts.en.statusClean, UI_MESSAGES.en.statusClean);
     assert.equal(typeof teardown, "function", "官方类型化 register 交回一个 disposer");
     if (typeof teardown === "function") {
       teardown();
@@ -387,6 +419,8 @@ describe("卡片 apply 的官方 locale 接线", () => {
     assert.deepEqual(trace.localeBindNs, ["quality-gate"], "bind 只调一次（稳定身份）");
     assert.ok(trace.desc !== null && trace.payload !== null, "slots.register 已调用");
     assert.equal(trace.desc.name, "plugins.bundle.config");
+    // 登记位收到的第二参就是卡片本体：传 undefined 或错位参数时，槽位里没有可渲染的组件。
+    assert.equal(typeof trace.view, "function", "卡片组件必须交给 slots.register");
     // 槽位 key 与条目 id 是**两个**标识：key = profile 里那条 bundle 的包名（宿主按包名
     // 派发 plugins.bundle.config，证据链见 test/profile-bundle.ts），裸条目 id 只喂
     // configForms.get()（上面那条断言）。两侧同读真源、不抄常量，改错任何一边都炸。
@@ -435,11 +469,11 @@ describe("卡片 apply 的官方 locale 接线", () => {
   it("一次注册里的 zh / en 两份字典指向本包那两份对象（切语言 = 官方 locale 换 translator）", () => {
     const { ctx, trace } = makeHost(tZh);
     apply(ctx);
-    const disposeDictionaries = trace.effects.get("quality-gate-card: locale dictionaries")?.();
+    const disposeDictionaries = trace.effects.get(LOCALE_EFFECT_LABEL)?.();
     assert.ok(typeof disposeDictionaries === "function");
     disposeDictionaries();
     assert.equal(trace.registrations[0]?.dicts.zh, UI_MESSAGES.zh);
     assert.equal(trace.registrations[0]?.dicts.en, UI_MESSAGES.en);
-    assert.equal((trace.payload as { t: Translate }).t("cardTitle"), UI_MESSAGES.zh.cardTitle);
+    assert.equal((trace.payload as { t: Translate }).t("statusClean"), UI_MESSAGES.zh.statusClean);
   });
 });

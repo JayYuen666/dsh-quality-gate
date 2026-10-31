@@ -37,9 +37,21 @@ export function buildFeedbackText(
   { command, root, failure }: GateFeedbackInput,
   messages: QualityGateMessages,
 ): string {
-  return renderTemplate(messages.memoryFeedback, {
-    command: oneLine(command.join(" ")),
-    root: oneLine(root),
-    failure: oneLine(failure),
+  // command 来自配置/上游透传，运行期不保证是数组；join 抛错会冒到投递 catch，
+  // 变成「门禁失败却一条记忆都没写」。
+  const args = Array.isArray(command) ? command : [];
+  const failureText = oneLine(failure);
+  const rootText = oneLine(root);
+  // 没有证据正文时不必入库：只剩模板套壳的记录会成为后续会话 auto-recall 的噪音。
+  if (failureText === "") {
+    return "";
+  }
+  const rendered = renderTemplate(messages.memoryFeedback, {
+    command: oneLine(args.join(" ")),
+    root: rootText,
+    failure: failureText,
   });
+  // 失败正文来自被检查仓库，可能含「忽略上述指令」之类的文本；入库后会被 auto-recall
+  // 注入别的会话，因此明确标注它是证据而不是指令。
+  return `${rendered}\n${messages.memoryEvidenceNotice}`;
 }

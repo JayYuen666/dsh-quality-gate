@@ -10,8 +10,6 @@
 // 漏字段就是测试红（而不是"两份各自漂移"）。
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import plugin from "../host.ts";
 import type { ConfigShape } from "../host.ts";
 
@@ -36,7 +34,10 @@ export interface DescribeRow {
 
 /** 导出 Config schema 的 dict（字段名与元数据都从宿主实际读的那份来）。 */
 export function configDict(): Record<string, SchemaNode> {
-  return (plugin.Config as unknown as SchemaNode).dict ?? {};
+  const { dict } = plugin.Config as unknown as SchemaNode;
+  // 不能 `?? {}`：拿不到 dict 时所有字段断言会对着空集空转（"零字段"与"读不到"同形）。
+  assert.ok(dict !== undefined, "导出 Config schema 不是带 dict 的 object 节点：字段面读不到");
+  return dict;
 }
 
 /**
@@ -50,8 +51,18 @@ export function configDict(): Record<string, SchemaNode> {
  * 测试随宿主口径走，不另维护一份清单。
  */
 export function refsOf(value: Record<string, unknown>): Record<string, unknown> {
+  const dict = configDict();
+  // 键集先对齐再做投影：多给的键会被 Object.entries 静默丢弃，少给的键会以 undefined
+  // 交给 apply / 包成 get() 恒 undefined 的引用——两种都是静默失败，测试却照样绿。
+  const missing = Object.keys(dict).filter((key) => !Object.hasOwn(value, key));
+  const extra = Object.keys(value).filter((key) => !Object.hasOwn(dict, key));
+  assert.deepEqual(
+    { missing, extra },
+    { missing: [], extra: [] },
+    "refsOf：传入的 value 与 Config schema 的字段集不一致",
+  );
   return Object.fromEntries(
-    Object.entries(configDict()).map(([key, field]) =>
+    Object.entries(dict).map(([key, field]) =>
       field.meta?.["volatile"] === true ? [key, { get: () => value[key] }] : [key, value[key]],
     ),
   );
@@ -68,10 +79,11 @@ export function applyGate(ctx: unknown, value: Record<string, unknown>): void {
 /** 逐字段 schema 默认 —— 等价于 0.1.6 交给 `settings.register(ns, schema, { base })`
  *  的那份底座，0.1.7 把它搬到了 schema 的 `.default()` 上（少一层「底座」）。 */
 export function schemaDefaults(): Record<string, unknown> {
-  // 每个字段都必须声明 .default()：漏写时 meta["default"] 是 undefined，而"显式默认
-  // undefined"与"根本没声明"在这里无法区分——把它当部署值交给 apply，探测会静默不执行。
+  // 每个字段都必须声明 .default()：按**值**判缺（`"default" in meta` 会把
+  // `.default(undefined)` 也算成已声明，随后把 undefined 当部署值交给 apply）。
+  // 本 schema 的字段都是 boolean/natural/string，undefined 不是有效默认值。
   const missing = Object.entries(configDict())
-    .filter(([, field]) => !("default" in (field.meta ?? {})))
+    .filter(([, field]) => field.meta?.["default"] === undefined)
     .map(([key]) => key);
   assert.deepEqual(missing, [], "Config schema 里有字段没写 .default()：新增字段忘了默认值");
   return Object.fromEntries(
@@ -101,12 +113,7 @@ export function volatileFormOf(node: SchemaNode): string[] | null {
   return kept.length === 0 ? null : kept;
 }
 
-/** cordis.patch.yml 里的裸条目 id —— 0.1.7 的 settings 命名空间就是它。
- *  读文件而不是抄常量：卡片与命名空间两处都按它对齐，写死会让测试与包体漂移。 */
-export function patchEntryId(): string {
-  const yml = readFileSync(fileURLToPath(new URL("../cordis.patch.yml", import.meta.url)), "utf8");
-  const match = /^\s*-\s+id:\s*(?<id>\S+)\s*$/mu.exec(yml);
-  const id = match?.groups?.["id"];
-  assert.ok(typeof id === "string" && id.length > 0, "cordis.patch.yml 里没有裸 `- id:` 条目");
-  return id;
-}
+/** cordis.patch.yml 里本 bundle 的裸条目 id —— 0.1.7 的 settings 命名空间就是它。
+ *  实现只有一份（profile-bundle.ts：按 `name:` 绑到本包条目，认引号与行尾注释，
+ *  多条 insert 时不会取到别人的 id）；这里只再导出，不再维护第二份解析。 */
+export { patchEntryId } from "./profile-bundle.ts";

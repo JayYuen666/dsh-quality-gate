@@ -3,6 +3,32 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。最新版本在最上。
 
+## 0.1.5
+
+一轮跨面审查修复：凭据 URL 判据重建、设置卡改逐字段校验、门禁探测与反馈投递收口；
+注入配额语义改为按会话跨回合累计。
+
+### Fixed
+
+- **凭据 URL 判据重建**（新增 `lib/credential-url.ts`，`lib/gateway-target.ts` 改为转导出）：IPv4-mapped 回环地址按末 32 位数值判（`::ffff:7fa:0` 不再误判回环）；`resolveGatewayUrl` 对带 userinfo/query/hash 的基址回空串（fail-closed）。
+- **设置卡逐字段校验**（`src/client-entry.ts`）：`projectCardValues` 改逐字段解析，坏 URL 不再清空整卡；网关地址经 `isCredentialSafeUrl` refine，保存前拦 `invalidGatewayUrl`；凭据引用名按 REF_PATTERN 复判 `invalidKeyRef`；数字字段弃用宿主 zod 缺失的 `.validate`，改 `inBounds` 边界自判（宿主冻结 zod 4.4.3 下不再崩）。
+- **台账读口**（`lib/edit-ledger-reader.ts`）：publish/effect 收进 try，失败先撤读口、再释放投影、最后报原始错；重复 dispose 幂等。
+- **台账游标与卸载**（`host.ts`）：游标只推进到台账实际覆盖末端（`EDIT_LEDGER_MAX` 截断不再永久跳号）；异步读窗后复查卸载旗，dispose 后不再新建 flight。
+- **门禁探测**（`lib/gate-detect.ts`）：workspace 根缺 check 脚本不再降级发 tsc（solution-style 恒绿）；同 root 去重；清单加 `.ruff.toml`。
+- **网关反馈**（`lib/gateway-feedback.ts`）：基址做 http(s)/query/userinfo 校验并复用凭据判据；非法 serviceId 回落 default；空正文不投递；错误正文按 content-type 才入日志。
+- **反馈内容**（`lib/feedback-content.ts`）：command 非数组容错、空 failure 不入库、正文追加 prompt-injection 隔离标注；`renderTemplate` 占位符放宽到 `{[^{}]+}`。
+- **散修**：`lib/accumulator.ts` 路径 trim+normalize 归一；`lib/edit-ledger.ts` `strictObject`→`object`、failEntry 幂等、空 callId 不标失败；`pack-check.mjs` 改用官方 `builtinModules`、模板插值排除、产物缺席/无入口显形、win32 走 ComSpec；`build-host.mjs` 加空产物守卫。
+
+### Changed
+
+- **注入配额语义**：由「每回合每根」改为「每会话跨回合累计、干净通过重置」（`host.ts`、`cordis.patch.yml` 与卡片中英文案同步）。
+- **发布链加固**（`.github/workflows/publish.yml`）：分支守卫比完整 ref、token 形态校验、tarball 内 name/version 与预检逐字比对、查 registry 重复版本、直接发布那枚 tarball、发布后可见性轮询；CI 侧 actionlint 按 glob 逐文件豁免、codeql 对 fork PR 只对 analyze 步容错。
+- **构建与元数据**：package.json 删 `prepack`、typecheck 四 program 串联；coverage 分母加 `src/ui-messages.ts`；oxlint `syncWrites` 改按文件 `syncIoScopes`；author 改对象形；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；catalog 的 shared 抬到 0.2.2；devDependencies 新增 `@deepseek-ai/dsh-bash-local` / `@deepseek-ai/dsh-subprocess-local` 与 fast-check 4.10.2。
+
+### Added
+
+- **测试三层**：`test/e2e/real-tsc.e2e.test.ts`（真 tsc 进程）、`test/platform/guards.platform.test.ts`、`test/property/gate-invariants.property.test.ts`（fast-check）、`test/client-zod-surface.test.ts`（禁 `.validate` 的门禁）。
+
 ## 0.1.4
 
 这一版收窄回合门禁的作用域：子包自己的 workspace 门禁不再被外层伞工作区顶掉，改单仓的回合不再跑整棵树。
@@ -36,6 +62,8 @@
 
 ### Changed
 
+- **宿主开发线抬到 `0.2.2-alpha.2`**：devDependencies 与 catalog/overrides 同值；`engines.dsh` 与
+  `@deepseek-ai/dsh*` peer 写支持窗口 `^0.2.1-rc.3`。
 - **`ruff` 门禁的可发条件**（见 Fixed 第一条）是**判定规则**的变化：只有 `pyproject.toml` 的 Python 工程从此不再自动获得 ruff 门禁。两份 README 的命令表同步。
 - **宿主线抬到 `0.2.1-rc.3`**：`engines.dsh`、peer/dev 依赖、overrides 与 README 徽标/正文同值。
 - **构建编排统一进 shared 的 `lib/build-*`**：三个构建脚本只剩薄配置层，产物仍落 `dist/`；CI/CodeQL/Scorecard/Dependabot 与 Windows 矩阵补齐。

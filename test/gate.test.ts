@@ -81,12 +81,13 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
 
   it.each([
     ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
     ["负数", -1],
     ["0", 0],
     ["小数", 2.5],
   ])("非法 maxFiles（%s）回退默认值：记账照常、不淘汰", (_label, bad) => {
-    // 归一化之前这四种入参各自出问题：NaN 让 `size >= NaN` 恒假（永不淘汰、Set 无限增长），
-    // 负数每次 note 都淘汰一项，0 让容量实际变成 1。合法值为正整数，其余按"没给"处理。
+    // 归一化之前这几种入参各自出问题：NaN / Infinity 让 `size >= maxFiles` 恒假（永不淘汰、
+    // Set 无限增长），负数每次 note 都淘汰一项，0 让容量实际变成 1。合法值为正整数，其余按"没给"处理。
     const acc2 = new EditAccumulator({ maxFiles: bad });
     for (let i = 0; i < 10; i += 1) {
       acc2.note("edit", `/w/${String(i)}.ts`);
@@ -137,6 +138,14 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(detectGate(roots), [{ root: "/w/py", command: ["ruff", "check", "."] }]);
   });
 
+  it("同一 root 重复出现只产出一门（去重责任在本函数，不假定调用方已归一）", () => {
+    const roots: ProjectRoot[] = [
+      { root: "/w/dup", files: [PKG_JSON, TSCONFIG] },
+      { root: "/w/dup", files: [PKG_JSON, TSCONFIG] },
+    ];
+    assert.deepEqual(detectGate(roots), [{ root: "/w/dup", command: ["tsc", "--noEmit"] }]);
+  });
+
   it("只有 ruff.toml（无 pyproject）→ 同样拿到 ruff 门禁（host MANIFESTS 已登记该根标记）", () => {
     const roots: ProjectRoot[] = [{ root: "/w/py2", files: ["ruff.toml", "a.py"] }];
     assert.deepEqual(detectGate(roots), [{ root: "/w/py2", command: ["ruff", "check", "."] }]);
@@ -161,6 +170,16 @@ describe("gate-detect：项目门禁命令自动探测", () => {
   it("TypeScript 项目（package.json + tsconfig.json，无 workspace）→ tsc --noEmit", () => {
     const roots: ProjectRoot[] = [{ root: "/w/ts", files: [PKG_JSON, TSCONFIG, "index.ts"] }];
     assert.deepEqual(detectGate(roots), [{ root: "/w/ts", command: ["tsc", "--noEmit"] }]);
+  });
+
+  it("workspace 根未声明 check 脚本时不降级到 tsc（solution-style tsconfig 会恒绿）", () => {
+    // workspace 根的 tsconfig 多为 files: [] + references：`tsc --noEmit` 不构建被引用的
+    // 子工程，直接退 0。对这种根发 tsc 等于给一条恒绿门禁，还会让 rootForFile 把子包
+    // 自己的门禁顶掉——所以「没有任何声明」就按没有门禁处理。
+    const roots: ProjectRoot[] = [
+      { root: "/w/ws-empty", files: [PKG_JSON, WORKSPACE_MANIFEST, TSCONFIG] },
+    ];
+    assert.deepEqual(detectGate(roots), []);
   });
 
   it("多项目根各得各的门禁（每根一条，互不影响）", () => {
@@ -189,6 +208,26 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(detectGate(roots)[0]?.command, ["pnpm", "check"]);
   });
 
+  it("优先级边界：rust > python，python > tsc", () => {
+    // 只测 workspace 与 rust 并存时，else-if 链调换（rust > python、python > tsc）不会被发现。
+    const rustOverPython = detectGate([
+      {
+        root: "/w/rust-py",
+        files: [CARGO_MANIFEST, PYPROJECT, "a.py"],
+        ruffConfigured: true,
+      },
+    ]);
+    assert.deepEqual(rustOverPython[0]?.command, ["cargo", "check"]);
+    const pythonOverTsc = detectGate([
+      {
+        root: "/w/py-ts",
+        files: [PYPROJECT, PKG_JSON, TSCONFIG, "a.py"],
+        ruffConfigured: true,
+      },
+    ]);
+    assert.deepEqual(pythonOverTsc[0]?.command, ["ruff", "check", "."]);
+  });
+
   it("空输入安全", () => {
     assert.deepEqual(detectGate([]), []);
   });
@@ -201,6 +240,11 @@ describe("gate-detect：files 为根目录相对名", () => {
     // 绝对路径输入不触发（防御：探测只认相对名）
     const abs: ProjectRoot[] = [{ root: "/w", files: ["/w/package.json"] }];
     assert.deepEqual(detectGate(abs), []);
+    // 嵌套同名清单同样不被当成根清单：只认根目录级的精确名（包含式判断会在这里红）。
+    const nested: ProjectRoot[] = [
+      { root: "/w", files: ["src/package.json", "src/tsconfig.json"] },
+    ];
+    assert.deepEqual(detectGate(nested), []);
   });
 });
 
@@ -236,7 +280,7 @@ describe("gate-detect：假失败回归（门禁误报 HOME 的 npm init 空壳�
 // 「Command "check" not found」非零退出 —— 本包把门禁失败当真实质量缺陷去开新回合注入
 // 修复指令，于是「工程没问题的前提下被要求去修一个不存在的脚本」。
 describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
-  it("workspace 根 scripts 里没有 check → 不发 pnpm check，退到下一候选（tsc）", () => {
+  it("workspace 根 scripts 里没有 check → 一条门禁都不给（不降级到 tsc）", () => {
     const roots: ProjectRoot[] = [
       {
         root: "/w/nocheck",
@@ -244,13 +288,8 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
         scripts: ["build", "test"],
       },
     ];
-    assert.deepEqual(detectGate(roots), [{ root: "/w/nocheck", command: ["tsc", "--noEmit"] }]);
-  });
-
-  it("workspace 根无 check 脚本且不是 TS 工程 → 一条门禁都不给（宁缺毋滥）", () => {
-    const roots: ProjectRoot[] = [
-      { root: "/w/nocheck2", files: [PKG_JSON, WORKSPACE_MANIFEST], scripts: ["build"] },
-    ];
+    // 即使根上有 tsconfig 也不发 tsc：workspace 根的 tsconfig 多为 solution-style
+    // （files: [] + references），`tsc --noEmit` 一个子工程都不检查就退 0。
     assert.deepEqual(detectGate(roots), []);
   });
 
@@ -269,12 +308,30 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
       [],
     );
   });
+
+  it("近似名脚本（check:ci / typecheck / precheck）不等于 check → 不发门禁", () => {
+    // includes("check") / startsWith("check") 这类退化实现会把它们当成合法依据，
+    // 而 pnpm 会以 Command "check" not found 退出——正是本节要压住的假失败。
+    assert.deepEqual(
+      detectGate([
+        {
+          root: "/w/approx",
+          files: [PKG_JSON, WORKSPACE_MANIFEST],
+          scripts: ["check:ci", "typecheck", "precheck"],
+        },
+      ]),
+      [],
+    );
+  });
 });
 
 describe("accumulator：.sh 不记账（四种门禁命令都无法校验 shell 脚本）", () => {
-  it(".sh 文件不计入门禁面（不会把根拖到无关的 package.json 上）", () => {
+  it("兄弟扩展名与 edit 路径同样不计入门禁面", () => {
     const acc = new EditAccumulator();
     acc.note("write", "/home/dev/.dsh/run-all-tests.sh");
+    acc.note("edit", "/home/dev/.dsh/run.sh");
+    acc.note("write", "/home/dev/.dsh/run.bash");
+    acc.note("write", "/home/dev/.dsh/run.zsh");
     acc.note("edit", EDITED_TS_FILE);
     assert.deepEqual(acc.drain(), [EDITED_TS_FILE]);
   });

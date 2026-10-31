@@ -62,7 +62,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 22.12`。** 产物用到 `AbortSignal.any` 这类较新的运行面。
-- **要求宿主 `dsh` 在 `0.2.1-rc.3` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.3`），它**单独决定**兼容性；预发布版本参与范围比较，`0.3.0` 及以后要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求宿主 `dsh` 在 `0.2.1-rc.3` / `0.2.2-alpha.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.3`），它**单独决定**兼容性；预发布版本参与范围比较，`0.3.0` 及以后要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须已在同一 registry 上**，否则整组 404。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行期无网络动作，从不走 `npx` 的自动下载。
 - **`zod` 也是真实的 `dependencies`**：编辑台账投影状态与设置卡的值面/草稿面用它校验形状；版本走伞根 catalog。client 产物按宿主 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
@@ -105,10 +105,10 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 | 命令 | 什么时候发 |
 | --- | --- |
-| `pnpm check` | 根同时有 `pnpm-workspace.yaml` 与 `package.json`，且根 scripts 声明了非空 `check`。没声明就退回下一候选 |
+| `pnpm check` | 根同时有 `pnpm-workspace.yaml` 与 `package.json`，且根 scripts 声明了非空 `check`。workspace 根没声明 `check` 时一条门禁都不发——它不会降级到 `tsc`（见下） |
 | `cargo check` | 根有 `Cargo.toml` |
 | `ruff check .` | 根有 `ruff.toml`，或 `pyproject.toml` 里有 `[tool.ruff]` 一族段。只有 `pyproject.toml` 不算——那是 Python 元数据文件，不是「用 ruff」的声明 |
-| `tsc --noEmit` | 根同时有 `package.json` 与 `tsconfig.json`；缺 `tsconfig.json` 不算 TS 项目 |
+| `tsc --noEmit` | **非 workspace** 根同时有 `package.json` 与 `tsconfig.json`；缺 `tsconfig.json` 不算 TS 项目。workspace 根的 tsconfig 多为 solution-style（`files: []` + `references`），`tsc --noEmit` 一个子工程都不检查就退 0，因此不在此列 |
 
 - `tsc` 在命令里只是逻辑名：入口在运行期解析——工程自己装的 `typescript` 优先，其次随包那份，最后 PATH 上的 `tsc`（由「工具不可用」出口报成未执行）；绝不走 `npx` 的自动下载。
 - 根探测：从编辑文件向上最多 `maxRootDepth`（默认 10）层找最近清单根；子包**自己就是** workspace 根且能产出 `pnpm check` 时就地执行（改一个包不得把整棵伞工作区拖进来）；否则 monorepo 子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只在该根**产得出门禁**时升级，再否则保留子包自己的根（外层没有 `check` 脚本的 workspace 不得吃掉子包的 `tsc` / `ruff` 门禁）。
@@ -149,9 +149,9 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 | --- | --- |
 | 默认零外发 | `memoryFeedback` 关 + 地址空是双保险，任一为空都不推送、也不去查凭据 |
 | 出域内容 | 开启后只把命令、项目根与全文报错（单行化、不截断）发往**你自己配的**网关 |
-| 地址与凭据安全 | 凭据只发 `https` 或回环地址（`localhost`、`127.0.0.0/8`、IPv6 回环）；明文 `http` 非回环按未配置拒绝并说明理由。地址解析不出合法 `http(s)` URL 同样按未配置 |
+| 地址与凭据安全 | 凭据只发 `https` 或回环地址（`127.0.0.0/8`、IPv6 回环、`localhost`）；其中 `localhost` 依赖本机 hosts/DNS，属有意的 fail-open——hosts 被指向远端时凭据会发往远端。明文 `http` 非回环按未配置拒绝并说明理由。地址解析不出合法 `http(s)` URL 同样按未配置；带 userinfo 的地址一律拒绝 |
 | 密钥 | 值由宿主凭据服务持有（`$DSH_HOME` 下的凭据文件），设置里只存引用名；引用名不合 POSIX 变量名语法即视为未配置 |
-| 失败处理 | 推送失败只 warn 且每次装载只说一次，绝不阻断收口 |
+| 失败处理 | 推送失败只 warn、绝不阻断收口：配置缺失/地址不安全的降级每次装载只说一次；HTTP 非 2xx、超时与投递异常则每次失败各记一条（它们不该被去重掩盖） |
 | 读盘 | 清单存在性、根 `package.json` 的 scripts、`pyproject.toml` 的段头、截断落盘文件的头部；不写任何文件、不遥测 |
 | 内存 | 会话级账本（编辑记账/注入配额/事件游标）都在进程内存，插件卸载即清 |
 
@@ -159,7 +159,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 - **白名单只有四条命令，不能经设置扩展。** 用别的检查器（`go test`、`mypy`、`eslint`…）的根得不到门禁。
 - **只记成功编辑**，且只认 `edit` / `write` / `str_replace_editor` 的写入（`view` 只读不算）。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计——没有一条门禁命令能校验它们，`.sh` 只会把根解析到别处跑出假失败。
-- **out-of-process 子代理（ACP / claude-code / codex）不发 dsh 事件**，天然不在门禁面内；in-process 子代理跳过，其编辑由父会话下一回合统一核验。
+- **out-of-process 子代理（ACP / claude-code / codex）不发 dsh 事件**，天然不在门禁面内；in-process 子代理的回合也跳过门禁，且其编辑落在各自会话的台账，不进入父会话的编辑台账——当前不保证被父会话核验（可能漏检）。
 - **不抢话**：inbox 已有待处理消息、回合信号已取消或插件已卸载时不注入。plan mode 不豁免——规划回合改了代码同样收口。
 - **证据被截断且没有落盘文件时，首个错误可能已随截断丢弃**；文案如实说明证据不完整，不假装完整。
 - **沙箱策略解析失败时一门都不执行**（按未执行注入），绝不回落部署级策略——那会让门禁写在沙箱外被拒、产出假的失败指令。
@@ -168,12 +168,12 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 | 问题 | 回答 |
 | --- | --- |
-| pnpm 工程为什么没跑 `pnpm check`？ | 根 `package.json` 没声明非空 `check` 脚本。刻意取舍：假失败比漏检查更贵 |
+| pnpm 工程为什么没跑 `pnpm check`？ | 根必须同时有 `pnpm-workspace.yaml` 与 `package.json`，且根 scripts 声明了非空 `check` 脚本；缺 `pnpm-workspace.yaml` 时按下一候选判（非 workspace 根可能落到 `tsc` / `ruff` / `cargo`），而 workspace 根没声明 `check` 时一条门禁都不发（solution-style tsconfig 会让 `tsc` 恒绿）。刻意取舍：假失败比漏检查更贵 |
 | 门禁说「未能执行」，是代码错了吗？ | 不是。沙箱策略拒绝、runner 起不来、超时、取消、预算不足，以及 stderr **点名门禁命令自身**（工具没装）的 exit 126/127 都属此类。注入文案明确要求**不要为此修改代码**，并以 `gate-not-run` 单独上报总线。若 126/127 来自你自己的 `check` 脚本内部，那是代码失败，按代码失败上报 |
 | 会不会无限修下去？ | 配额耗尽后注入一次用户可见的放行说明并停止自动修复，直到某次全部干净通过才重新计数 |
 | 临时停掉？ | 设置卡关 `enabled`，或 `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate` |
 | `tsc` 用哪个版本？ | 工程自己装的那份优先，其次随包安装的 `typescript`，都不在才回落 PATH——从不经 `npx` 下载 |
-| 子代理改的代码呢？ | in-process 子代理由父会话下一回合统一核验；out-of-process 子代理不发 dsh 事件，天然不在门禁面内 |
+| 子代理改的代码呢？ | in-process 子代理的回合同样跳过门禁，其编辑落在各自会话的台账、不进入父会话台账——当前不保证被父会话核验（可能漏检）；out-of-process 子代理不发 dsh 事件，天然不在门禁面内 |
 
 ## <img src="https://api.iconify.design/lucide/wrench.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 开发
 
@@ -182,7 +182,7 @@ pnpm install
 pnpm run check   # typecheck（三个 tsconfig）→ lint → client 构建 → host 构建 → 测试（含覆盖率）→ tarball 体检 → 格式
 ```
 
-- 覆盖率只统计 `host.ts` 与 `lib/**`，四项阈值 100%。`src/` 不是"没有用例执行"：`test/client-card.test.ts` 无头跑过卡片接线与两语字典（`ui-messages.ts` 被完整执行），但 `client-entry.ts` 的大头是渲染面，要 DOM 基座才能测，本包刻意不引 `react-dom` 与 `jsdom`——渲染测试是另一套基座。把 `src/` 整体计进分母会让阈值变成常红，所以阈值钉在被完整验证的那一面。
+- 覆盖率统计 `host.ts`、`lib/**` 与 `src/ui-messages.ts`，四项阈值 100%。字典是纯数据、`test/client-card.test.ts` 无头就能跑满，计进分母才能让阈值守住它；`client-entry.ts` 不计——它的大头是渲染面，要 DOM 基座才能测，本包刻意不引 `react-dom` 与 `jsdom`，整体计进来会让阈值变成常红。
 - `test/publish-manifest.test.ts` 钉发布形态：入口可解析、`@deepseek-ai/*` 不进 `dependencies`、产物内容无日期与本机路径，注释与文档面同受其扫描。`test/dist-size.test.ts` 守两个产物的体积预算；`check:pack` 对 `pnpm pack` 的真 tarball 做体检。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可

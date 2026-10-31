@@ -35,6 +35,9 @@ vi.mock(import("../lib/gateway-feedback.ts"), async (importOriginal) => {
   };
 });
 
+/** 在飞的门禁 promise：收尾 hook 统一等它们收敛再拆临时根（迟到的 gate 会撞上已删目录）。 */
+const inFlightGates: Promise<unknown>[] = [];
+
 /** 超过会话预算的额外会话数（配合 s-first 共 > 50 → 触发淘汰）。 */
 const SESSION_COUNT = 52;
 
@@ -53,6 +56,8 @@ const WORKSPACE_PACKAGES_YAML = "packages:\n  - packages/*\n";
 const SANDBOX_MODE_WORKSPACE_WRITE = "workspace-write";
 /** lesson 总线里"检查没跑成"那一类的 category 期望值。 */
 const BUS_CATEGORY_NOT_RUN = "gate-not-run";
+/** 「总线按 not-run 上报」这条断言消息（多处复用，避免重复字面量）。 */
+const BUS_NOT_RUN_MESSAGE = "总线按 not-run 上报";
 /** ruff 门禁的命令文本期望值（多个 Python 根用例共用）。 */
 const RUFF_CHECK_CMD = "ruff check .";
 
@@ -167,7 +172,7 @@ interface MockCtx {
       [Symbol.dispose]: () => void;
     }>;
   };
-  on: (event: string, handler: (payload: unknown) => void) => void;
+  on: (event: string, handler: (payload: unknown) => unknown) => void;
   effect: (fn: () => (() => void) | undefined) => void;
   shell: {
     resolve: (spec: Spec) => Spec;
@@ -256,7 +261,13 @@ function makeCtx(): MockCtx {
         // 载荷必是宿主交出的事件对象（类型面已投影为非空），故首段不加 `?.`；
         // `agent` 是可缺字段，那一段守卫保留。
         firedSession = (payload as { agent?: { session?: unknown } }).agent?.session;
-        handler(payload);
+        // 生产侧监听器是 async：把它交回的 promise 登记下来，收尾 hook 统一等收敛。
+        // 不等就在 afterEach 里删掉临时根，晚到的 gate 会对着已删目录跑完并继续走
+        // followup / report / console —— 既是 flaky 源，也会串到下一条用例。
+        const running: unknown = handler(payload);
+        if (running instanceof Promise) {
+          inFlightGates.push(running);
+        }
       };
     },
     effect(fn) {
@@ -297,6 +308,13 @@ function makeProject(name: string): string {
   return root;
 }
 
+/** 工作区里子包的相对目录名（上溯用例共用的布局）。 */
+const PACKAGES_DIR = "packages";
+/** 子包目录名（其 package.json 的 name 与目录同名）。 */
+const SUB_PACKAGE = "foo";
+/** 外层 workspace 根的 package.json：刻意不声明 check 脚本（不产门禁的那一档）。 */
+const WORKSPACE_PKG_NO_CHECK = JSON.stringify({ name: "ws" });
+
 /** 只有 ruff.toml 的 Python 根：这类根拿不到就等于门禁面整片漏掉（MANIFESTS 登记 ruff.toml 的用例）。 */
 function makeRuffProject(name: string): string {
   const root = path.join(
@@ -335,16 +353,13 @@ const pushEdit = (log: unknown[], file: string): void => {
   log.push(editEvent(file));
 };
 
-/** 当前生效的 ctx（makeAgent 造的 followup 要知道该往哪个 ctx 记）。 */
-let active: MockCtx | undefined;
-
 function applyWith(ctx: MockCtx): void {
-  active = ctx;
   applyGate(ctx, ctx.value);
 }
 
 /** 根会话 agent mock：header 由宿主保证存在（本包按必读取用）。 */
 function makeAgent(
+  owner: MockCtx,
   sessionId: string,
   log: unknown[],
   header: Record<string, unknown> = {},
@@ -366,10 +381,11 @@ function makeAgent(
     },
     status: "running",
     inbox: { nextTurn: [], nextStep: [] },
+    // followup 必须绑定**自己这个 ctx**：读模块级"当前 ctx"时，上一条用例残留在飞的
+    // gate 一旦晚到，就会把注入推进下一条用例的 followupCalls —— 而本文件大量用
+    // assert.equal(followupCalls.length, …) 做否证断言，那种串台直接造成随机假红/假绿。
     followup(message: unknown) {
-      (active as unknown as MockCtx).followupCalls.push(
-        message as { id: string; content: { text: string }[] },
-      );
+      owner.followupCalls.push(message as { id: string; content: { text: string }[] });
     },
   };
 }
@@ -391,7 +407,7 @@ function stopEdits(
   turn = 1,
 ): ReturnType<typeof makeAgent> {
   const log = files.map((file) => editEvent(file));
-  const agent = makeAgent(sessionId, log, header);
+  const agent = makeAgent(ctx, sessionId, log, header);
   stop(ctx, agent, turn);
   return agent;
 }
@@ -480,7 +496,15 @@ describe("quality-gate 门禁完整性", () => {
   // 全文件共用的收尾（临时项目根清理 + 网关推送计数清零）：本文件所有用例都在这个
   // describe 里，故 hook 放在它的第一行——生命周期与放在模块顶层逐位一致
   // （afterEach 对每条用例生效），但满足了「hook 必须在 describe 内」的结构判据。
-  afterEach(() => {
+  afterEach(async () => {
+    // 先等在飞门禁收敛，再拆临时根：本文件大量用例用固定 sleep 等异步门禁，慢机/CI 上
+    // 迟到的 gate 会在 rmSync 之后才跑（workdir 已不存在），并继续走 followup / report /
+    // console —— 日志落到已 restore 的真实 console，注入还可能串到下一条用例。
+    // 上限 5s：正常门禁是毫秒级收敛；超出只说明有用例故意留了长任务，不能把整个套件挂住。
+    if (inFlightGates.length > 0) {
+      const running = inFlightGates.splice(0);
+      await Promise.race([Promise.allSettled(running), sleep(5000)]);
+    }
     while (scratch.length > 0) {
       rmSync(scratch.pop()!, { recursive: true, force: true });
     }
@@ -539,6 +563,43 @@ describe("quality-gate 门禁完整性", () => {
       assert.equal(ctx.followupCalls.length, 2);
     });
 
+    it("迟到的门禁注入仍落在自己的 ctx：两个 ctx 先后上装时不许串台", async () => {
+      // 钉住的性质：followup 的目标 ctx 在 makeAgent 那一刻就定死，不在调用时读"当前 ctx"。
+      // 反例（旧实现读模块级 active）：A 的门禁还在飞 → 换装 B（active=B）→ A 的 gate 晚到，
+      // 注入落进 B。而本文件大量用 assert.equal(followupCalls.length, 0/1/2) 做否证断言，
+      // 那种串台既可能假绿也可能假红。
+      const ctxA = makeCtx();
+      const rootA = makeProject("late-a");
+      const read = Promise.withResolvers<undefined>();
+      ctxA.shell.execute = async () => ({
+        result: async () => {
+          await read.promise;
+          return ctxA.result;
+        },
+      });
+      applyWith(ctxA);
+      stopEdits(ctxA, "s-late-a", [fileIn(rootA)]);
+      // 收尾 hook 要等得到它：在飞门禁必须被登记，否则 afterEach 删临时根时它还在跑。
+      await vi.waitFor(
+        () => {
+          assert.ok(inFlightGates.length > 0, "在飞门禁没有被登记，收尾 hook 就等不到它");
+        },
+        { timeout: 1000, interval: 10 },
+      );
+      // A 的门禁卡在 shell 上：此时换装另一个 ctx，模拟下一条用例的 ctx 已经生效。
+      const ctxB = makeCtx();
+      applyWith(ctxB);
+      read.resolve(undefined);
+      await vi.waitFor(
+        () => {
+          assert.equal(ctxA.followupCalls.length, 1);
+        },
+        { timeout: 1000, interval: 10 },
+      );
+      assert.equal(ctxB.followupCalls.length, 0, "A 的迟到注入不得落进 B 的 followupCalls");
+      assert.equal(ctxB.specs.length, 0, "B 也不该为 A 的根跑门禁");
+    });
+
     it("同一文件被两会话编辑：各会话都过一遍门禁（账不共享即不吞）", async () => {
       const ctx = makeCtx();
       const shared = makeProject("shared");
@@ -590,8 +651,8 @@ describe("quality-gate 门禁完整性", () => {
       // 真实会话语义：每会话一条持续追加的事件日志（游标按 seq 增量读）
       const logA: unknown[] = [];
       const logB: unknown[] = [];
-      const agentA = makeAgent("s-a", logA);
-      const agentB = makeAgent("s-b", logB);
+      const agentA = makeAgent(ctx, "s-a", logA);
+      const agentB = makeAgent(ctx, "s-b", logB);
       // A 用满配额（maxInjectsPerTurn=2）
       pushEdit(logA, fileIn(rootA));
       stop(ctx, agentA, 1);
@@ -664,7 +725,7 @@ describe("quality-gate 门禁完整性", () => {
       assert.match(text, /沙箱策略无法解析/u);
       assert.ok(!text.includes("请修复上述问题"), "不得产出假的「修这些错」指令");
       assert.equal(vi.mocked(pushGateFeedback).mock.calls.length, 0, "不得污染记忆环");
-      assert.equal(ctx.reports.at(0)?.category, BUS_CATEGORY_NOT_RUN, "总线按 not-run 上报");
+      assert.equal(ctx.reports.at(0)?.category, BUS_CATEGORY_NOT_RUN, BUS_NOT_RUN_MESSAGE);
     });
   });
 
@@ -704,6 +765,9 @@ describe("quality-gate 门禁完整性", () => {
       stopEdits(ctx, "s-run", [fileIn(root)]);
       await sleep(20);
       assert.match(injectedText(ctx), /runner 启动失败/u);
+      // 「未执行」路径不得污染记忆与 lesson-loop：这是审计里单独点名的一类回归。
+      assert.equal(vi.mocked(pushGateFeedback).mock.calls.length, 0, "runner 失败不写记忆");
+      assert.equal(ctx.reports.at(0)?.category, BUS_CATEGORY_NOT_RUN, BUS_NOT_RUN_MESSAGE);
     });
 
     it("exit 0 + enforcement=partial → 仍算通过，但打 warn（边界不完整要可观测）", async () => {
@@ -750,6 +814,8 @@ describe("quality-gate 门禁完整性", () => {
         log.lines.some((line) => line.includes("gate did not run")),
         "抛错要落 error 日志",
       );
+      assert.equal(vi.mocked(pushGateFeedback).mock.calls.length, 0, "沙箱不可用不写记忆");
+      assert.equal(ctx.reports.at(0)?.category, BUS_CATEGORY_NOT_RUN, BUS_NOT_RUN_MESSAGE);
     });
 
     it("run 抛普通错（准备期失败：workdir 不存在/spawn 失败）→ 未执行说明", async () => {
@@ -889,7 +955,9 @@ describe("quality-gate 门禁完整性", () => {
       guardCalls.length = 0;
       const log = capture();
       try {
-        applyGate(item.ctx, {});
+        // 用真实 schema 默认而不是空对象：refsOf 会先做键集对齐，空对象在守卫之前就会抛。
+        // 这些行验的是「服务面不齐 → 不碰 ctx」，配置值取什么不影响判据。
+        applyGate(item.ctx, schemaDefaults());
       } finally {
         log.restore();
       }
@@ -1007,7 +1075,7 @@ describe("quality-gate 门禁完整性", () => {
       const root = makeProject("rejects");
       applyWith(ctx);
       const log: unknown[] = [editEvent(fileIn(root))];
-      const agent = makeAgent("s-rej", log, { cwd: root });
+      const agent = makeAgent(ctx, "s-rej", log, { cwd: root });
       const working = ctx.sessionQuery;
       ctx.sessionQuery = {
         observeSession: async (): Promise<never> => {
@@ -1133,7 +1201,7 @@ describe("quality-gate 门禁完整性", () => {
       const root = makeProject("badarr");
       applyWith(ctx);
       const log: unknown[] = [editEvent(fileIn(root))];
-      const agent = makeAgent("s-badarr", log, { cwd: root });
+      const agent = makeAgent(ctx, "s-badarr", log, { cwd: root });
       const session = agent.session as unknown as { snapshotEvents: (from?: number) => unknown };
       session.snapshotEvents = () => ({ not: "an array" });
       stop(ctx, agent, 1);
@@ -1152,6 +1220,7 @@ describe("quality-gate 门禁完整性", () => {
     it("插件卸载收口：abort 在飞门禁 + await 收敛 + 迟到结果就地丢弃（不注入不落总线）", async () => {
       const ctx = makeCtx();
       const root = makeProject("dispose");
+      const secondRoot = makeProject("dispose-second");
       // 受控门禁：结果释放前一直在飞（deferred，Promise.withResolvers 免 new Promise）
       const gate = Promise.withResolvers<unknown>();
       ctx.shell.execute = async () => ({
@@ -1163,7 +1232,8 @@ describe("quality-gate 门禁完整性", () => {
         },
       });
       applyWith(ctx);
-      stopEdits(ctx, "s-disp", [fileIn(root)]);
+      // 两个根：卸载发生在第一门在飞时，第二门不得起飞（批次在每门前复判卸载信号）。
+      stopEdits(ctx, "s-disp", [fileIn(root), fileIn(secondRoot)]);
       await sleep(5);
       assert.equal(ctx.specs.length, 1, "门禁已起飞");
       // 卸载：disposer 交回 Promise——cordis 卸载会 await 它（installed fiber.d.ts:36-38
@@ -1185,6 +1255,7 @@ describe("quality-gate 门禁完整性", () => {
       await unload;
       assert.equal(await settledWithin(unload), true, "门禁收敛后卸载完成");
       assert.equal(ctx.followupCalls.length, 0, "卸载后不得再向会话注入");
+      assert.equal(ctx.specs.length, 1, "卸载后第二门不得起飞（每门前复判卸载信号）");
       assert.equal(
         ctx.reports.length,
         0,
@@ -1224,9 +1295,9 @@ describe("quality-gate 门禁完整性", () => {
       const ctx = makeCtx();
       const root = makeProject("dispose-new");
       applyWith(ctx);
-      for (const cleanup of ctx.effects) {
-        cleanup();
-      }
+      // 像 cordis 卸载那样把所有 disposer 的返回值都等掉：只看同步段会漏掉
+      // 「旗标在 await 之后才置位」这类回归。
+      await Promise.all(ctx.effects.map(async (cleanup) => cleanup()));
       stopEdits(ctx, "s-disp-new", [fileIn(root)]);
       await sleep(20);
       assert.equal(ctx.specs.length, 0, "卸载后的收口不再起步");
@@ -1246,7 +1317,7 @@ describe("quality-gate 门禁完整性", () => {
         },
       });
       applyWith(ctx);
-      const agent = makeAgent("s-batch", [editEvent(fileIn(root))]);
+      const agent = makeAgent(ctx, "s-batch", [editEvent(fileIn(root))]);
       // 门禁在飞期间把 inbox 换成抛错 getter：结果处理时 preInjectCheck 读它炸——
       // 旧实现这一层没有 catch，rejection 直奔 unhandledRejection。
       const log = capture();
@@ -1279,7 +1350,7 @@ describe("quality-gate 门禁完整性", () => {
       const log = capture();
       applyWith(ctx);
       try {
-        const cancelAgent = makeAgent("s-cancel", [editEvent(fileIn(root))]);
+        const cancelAgent = makeAgent(ctx, "s-cancel", [editEvent(fileIn(root))]);
         stop(ctx, cancelAgent, 1, ctrl.signal);
         await sleep(30);
       } finally {
@@ -1384,25 +1455,37 @@ describe("quality-gate 门禁完整性", () => {
       applyWith(ctx);
       const root = makeProject("budget");
       const first = [editEvent(fileIn(root))];
-      stop(ctx, makeAgent("s-first", first), 1);
+      stop(ctx, makeAgent(ctx, "s-first", first), 1);
       await sleep(5);
       const others: unknown[] = [editEvent(fileIn(root))];
       for (let idx = 0; idx < SESSION_COUNT; idx += 1) {
-        stop(ctx, makeAgent(`s-other-${idx}`, others), 1);
+        stop(ctx, makeAgent(ctx, `s-other-${idx}`, others), 1);
       }
       await sleep(300);
+      // 先等全部会话的门禁落定再取基线：还挂在路上的迟到门禁会让下面的增量断言假绿。
+      await vi.waitFor(
+        () => {
+          assert.equal(ctx.specs.length, 1 + SESSION_COUNT);
+        },
+        { timeout: 5000 },
+      );
       const before = ctx.specs.length;
       // s-first 的游标已被淘汰 → 再收口时从 forkCut 重放，本会话历史编辑被重新检查
-      stop(ctx, makeAgent("s-first", first), 2);
-      await sleep(20);
-      assert.ok(ctx.specs.length > before, "被淘汰会话重放自己的历史（不漏门禁）");
+      stop(ctx, makeAgent(ctx, "s-first", first), 2);
+      await vi.waitFor(
+        () => {
+          assert.equal(ctx.specs.length, before + 1);
+        },
+        { timeout: 2000 },
+      );
+      assert.equal(ctx.specs.at(-1)?.workdir, root, "重放的门禁落在被淘汰会话自己的项目根");
     });
 
     it("inbox 忙时的配额剪枝：该会话从未失败过 → 无条目可剪，直接返回", async () => {
       const ctx = makeCtx();
       const root = makeProject("prune-idle");
       applyWith(ctx);
-      const agent = makeAgent("s-never-failed", [editEvent(fileIn(root))]);
+      const agent = makeAgent(ctx, "s-never-failed", [editEvent(fileIn(root))]);
       (agent as unknown as { inbox: { nextTurn: unknown[] } }).inbox = {
         nextTurn: [{ id: "queued" }],
       };
@@ -1459,7 +1542,7 @@ describe("quality-gate 门禁完整性", () => {
       const ctx = makeCtx();
       const root = makeProject("emptyinbox");
       applyWith(ctx);
-      const agent = makeAgent("s-empty-inbox", [editEvent(fileIn(root))]);
+      const agent = makeAgent(ctx, "s-empty-inbox", [editEvent(fileIn(root))]);
       (agent as unknown as { inbox: Record<string, unknown> }).inbox = {};
       stop(ctx, agent, 1);
       await sleep(20);
@@ -1513,6 +1596,8 @@ describe("quality-gate 门禁完整性", () => {
       }
       assert.match(injectedText(ctx), /命令不可执行/u);
       assert.ok(log.lines.some((line) => line.includes("gate tool unavailable")));
+      assert.equal(vi.mocked(pushGateFeedback).mock.calls.length, 0, "工具不可执行不写记忆");
+      assert.equal(ctx.reports.at(0)?.category, BUS_CATEGORY_NOT_RUN, BUS_NOT_RUN_MESSAGE);
     });
 
     it("exit 127 但 stderr 点名的是脚本内的命令 → 代码失败，不是工具缺失", async () => {
@@ -1535,7 +1620,7 @@ describe("quality-gate 门禁完整性", () => {
       assert.ok(!text.includes("命令不存在"), "不得报成门禁工具缺失");
     });
 
-    it("workspace 根 package.json 的 scripts 非对象 → 没有脚本信息 → 不发 pnpm check", async () => {
+    it("workspace 根 package.json 的 scripts 非对象 → 没有脚本信息 → 一条门禁都不发", async () => {
       const ctx = makeCtx();
       const root = path.join(
         tmpdir(),
@@ -1549,10 +1634,10 @@ describe("quality-gate 门禁完整性", () => {
       applyWith(ctx);
       stopEdits(ctx, "s-scripts", [fileIn(root)]);
       await sleep(20);
-      assert.match(
-        String(ctx.specs.at(0)?.command),
-        /bin[\\/]tsc'? --noEmit$/u,
-        "scripts 不是对象 = 拿不到清单 → 保守不发 pnpm check",
+      assert.equal(
+        ctx.specs.length,
+        0,
+        "scripts 不是对象 = 拿不到清单；workspace 根也没有 tsc 兜底",
       );
     });
 
@@ -1593,7 +1678,7 @@ describe("quality-gate 门禁完整性", () => {
         tmpdir(),
         `qg-wsroot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       );
-      const sub = path.join(ws, "packages", "admin");
+      const sub = path.join(ws, PACKAGES_DIR, "admin");
       mkdirSync(sub, { recursive: true });
       writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
       writeFileSync(path.join(ws, PKG_JSON), '{"name":"ws","scripts":{"check":"tsc"}}');
@@ -1639,11 +1724,11 @@ describe("quality-gate 门禁完整性", () => {
       const ws = makeProject("wsnogate");
       // 外层去掉能产出门禁的两样：只留 workspace 清单 + 无 scripts 的 package.json
       rmSync(path.join(ws, TSCONFIG));
-      writeFileSync(path.join(ws, PKG_JSON), '{"name":"ws"}');
+      writeFileSync(path.join(ws, PKG_JSON), WORKSPACE_PKG_NO_CHECK);
       writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
-      const sub = path.join(ws, "packages", "foo");
+      const sub = path.join(ws, PACKAGES_DIR, SUB_PACKAGE);
       mkdirSync(sub, { recursive: true });
-      writeFileSync(path.join(sub, PKG_JSON), '{"name":"foo"}');
+      writeFileSync(path.join(sub, PKG_JSON), JSON.stringify({ name: SUB_PACKAGE }));
       writeFileSync(path.join(sub, TSCONFIG), MINIMAL_TSCONFIG_JSON);
       applyWith(ctx);
       // 同目录两个文件：同一内层根只判一次盘，且只登记一条门禁
@@ -1654,15 +1739,34 @@ describe("quality-gate 门禁完整性", () => {
       assert.match(String(ctx.specs.at(0)?.command), /bin[\\/]tsc'? --noEmit$/u);
     });
 
+    it("workspace 根只有 tsconfig、没有 check 脚本 → 不降级成 tsc，子包门禁照常保留", async () => {
+      // solution-style 的 tsconfig（files: [] + references）在 `tsc --noEmit` 下不检查任何
+      // 子工程、直接退 0；把它当外层门禁会让整棵 workspace 恒绿，还会顶掉子包自己的门禁。
+      const ctx = makeCtx();
+      const ws = makeProject("wstsconfig");
+      writeFileSync(path.join(ws, PKG_JSON), WORKSPACE_PKG_NO_CHECK);
+      writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
+      const sub = path.join(ws, PACKAGES_DIR, SUB_PACKAGE);
+      mkdirSync(sub, { recursive: true });
+      writeFileSync(path.join(sub, PKG_JSON), JSON.stringify({ name: SUB_PACKAGE }));
+      writeFileSync(path.join(sub, TSCONFIG), MINIMAL_TSCONFIG_JSON);
+      applyWith(ctx);
+      stopEdits(ctx, "s-wstsconfig", [fileIn(sub)]);
+      await sleep(20);
+      assert.equal(ctx.specs.length, 1, "外层不发恒绿门禁，子包门禁只出现一次");
+      assert.equal(ctx.specs.at(0)?.workdir, sub, "门禁落在子包自己的根");
+      assert.match(String(ctx.specs.at(0)?.command), /bin[\\/]tsc'? --noEmit$/u);
+    });
+
     it("内外层都产不出门禁 → 一条门禁都不给（信息缺失不替项目猜）", async () => {
       const ctx = makeCtx();
       const ws = makeProject("wsnone");
       rmSync(path.join(ws, TSCONFIG));
-      writeFileSync(path.join(ws, PKG_JSON), '{"name":"ws"}');
+      writeFileSync(path.join(ws, PKG_JSON), WORKSPACE_PKG_NO_CHECK);
       writeFileSync(path.join(ws, WORKSPACE_MANIFEST), WORKSPACE_PACKAGES_YAML);
-      const sub = path.join(ws, "packages", "foo");
+      const sub = path.join(ws, PACKAGES_DIR, SUB_PACKAGE);
       mkdirSync(sub, { recursive: true });
-      writeFileSync(path.join(sub, PKG_JSON), '{"name":"foo"}');
+      writeFileSync(path.join(sub, PKG_JSON), JSON.stringify({ name: SUB_PACKAGE }));
       applyWith(ctx);
       stopEdits(ctx, "s-wsnone", [fileIn(sub)]);
       await sleep(20);
@@ -1679,7 +1783,7 @@ describe("quality-gate 门禁完整性", () => {
         { type: "tool/call", data: { name: "grep", arguments: "not-json" } },
         editEvent(fileIn(root)),
       ];
-      stop(ctx, makeAgent("s-nonedit", log), 1);
+      stop(ctx, makeAgent(ctx, "s-nonedit", log), 1);
       await sleep(20);
       assert.equal(ctx.specs.length, 1, "只有真编辑事件触发门禁");
       assert.equal(ctx.specs.at(0)?.workdir, root);

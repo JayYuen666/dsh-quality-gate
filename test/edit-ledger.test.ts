@@ -40,6 +40,37 @@ function fold(events: readonly SessionEvent[]): EditLedgerState {
 }
 
 describe("编辑台账投影", () => {
+  it("空 callId 的失败结果不误标最近一条无 callId 编辑", () => {
+    const state = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }), resultEvent(2, "", true)]);
+    assert.deepEqual(
+      state.edits.map((entry) => entry.failed),
+      [false],
+      "空 callId 不是关联键",
+    );
+  });
+
+  it("同一失败结果重复投递 → 状态引用不变（命中项已失败时原样返回）", () => {
+    const first = fold([
+      callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
+      resultEvent(2, "c1", true),
+    ]);
+    const again = editLedgerProjection.apply(first, resultEvent(2, "c1", true));
+    assert.equal(again, first, "无变化必须回同一引用");
+  });
+
+  it("stateSchema 能校验真实折叠产物，并剥离未知字段（旧版本残留不拖垮整份台账）", () => {
+    const folded = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1")]);
+    assert.equal(editLedgerProjection.stateSchema.safeParse(folded).success, true);
+    const withExtra = {
+      edits: [{ seq: 1, callId: "c1", name: "edit", path: "/w/a.ts", failed: false, legacy: "x" }],
+    };
+    const parsed = editLedgerProjection.stateSchema.safeParse(withExtra);
+    if (!parsed.success) {
+      assert.fail("含未知字段的持久行必须能恢复（内层 schema 会剥离未知字段）");
+    }
+    assert.equal(parsed.data.edits[0]?.name, "edit");
+  });
+
   it("写类编辑成行；read-view、非编辑工具与坏参数都不入账", () => {
     const state = fold([
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
@@ -108,6 +139,34 @@ describe("编辑台账投影", () => {
     assert.equal(state.edits.length, EDIT_LEDGER_MAX, "台账有界");
     assert.equal(state.edits[0]?.seq, 2, "丢掉的是最旧的两条");
     assert.equal(state.edits.at(-1)?.seq, EDIT_LEDGER_MAX + 1, "最新一条仍在");
+  });
+
+  it("投影不原地修改传入的 state（回放不得污染历史快照）", () => {
+    const empty = editLedgerProjection.init();
+    const before = empty.edits;
+    const after = editLedgerProjection.apply(
+      empty,
+      callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
+    );
+    assert.equal(before.length, 0, "原 state.edits 必须仍为空");
+    assert.equal(after.edits.length, 1);
+    assert.notEqual(after.edits, before, "新状态必须用新数组，而不是往旧数组里 push");
+  });
+
+  it("callId 重复时失败结果只否定最近那一条（从尾部找，语义显式固定）", () => {
+    // 真实日志里 callId 可能被重试/代理重放复用；本投影按「最近一条同 callId」标记失败。
+    const state = fold([
+      callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
+      callEvent(2, "edit", { file_path: "/w/b.ts" }, "c1"),
+      resultEvent(3, "c1", true),
+    ]);
+    assert.deepEqual(
+      state.edits.map((entry) => [entry.path, entry.failed]),
+      [
+        ["/w/a.ts", false],
+        ["/w/b.ts", true],
+      ],
+    );
   });
 
   it("键与版本号是发布契约的一部分", () => {

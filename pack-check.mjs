@@ -20,6 +20,7 @@
 // 这也是它同时能查"产物过期"的原因：过期产物在 pack 时就被 rebuild 掉了。
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { REACT_RUNTIME_MODULES } from "./build-client.mjs";
@@ -86,10 +87,28 @@ function note(message) {
  * @returns {Record<string, unknown>}
  */
 function asRecord(raw) {
-  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
-    return raw;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
   }
-  return {};
+  /** @type {Record<string, unknown>} */
+  const record = {};
+  for (const [key, value] of Object.entries(raw)) {
+    record[key] = value;
+  }
+  return record;
+}
+
+/**
+ * 取清单字段。
+ *
+ * `noPropertyAccessFromIndexSignature` 下 `manifest.exports` 这一类点访问点不进去，
+ * 而 `dot-notation` 又不认字面量下标——用变量下标是两侧都放行的写法。
+ * @param {Record<string, unknown>} record
+ * @param {string} key
+ * @returns {unknown}
+ */
+function fieldOf(record, key) {
+  return record[key];
 }
 
 /**
@@ -113,36 +132,18 @@ function exportTargets(value) {
   return [];
 }
 
-/** 说明符的包名段：`@scope/pkg/sub` → `@scope/pkg`，`pkg/sub` → `pkg`。 */
+/** 说明符的包名段：`@scope/pkg/sub` → `@scope/pkg`，`pkg/sub` → `pkg`。
+ * @param {string} specifier
+ * @returns {string} */
 function packageNameOf(specifier) {
   const segments = specifier.split("/");
-  return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : segments[0];
+  return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : (segments[0] ?? "");
 }
 
-/** Node 内建模块名（无 `node:` 前缀的写法同样不是包依赖）。 */
-const BUILTIN_MODULES = new Set([
-  "assert",
-  "buffer",
-  "child_process",
-  "crypto",
-  "events",
-  "fs",
-  "http",
-  "https",
-  "module",
-  "net",
-  "os",
-  "path",
-  "process",
-  "stream",
-  "string_decoder",
-  "timers",
-  "tty",
-  "url",
-  "util",
-  "worker_threads",
-  "zlib",
-]);
+/** Node 内建模块名（无 `node:` 前缀的写法同样不是包依赖）。
+ *  直接用官方 `builtinModules`：手写名单会漏掉 perf_hooks/tls/v8 这类条目，把正确引用
+ *  报成「未声明的三方包」；部分条目带 `node:` 前缀，统一剥掉后再比。 */
+const BUILTIN_MODULES = new Set(builtinModules.map((name) => name.replace(/^node:/u, "")));
 
 /**
  * 产物文本里引用的裸说明符（node: 内建、无前缀内建、相对路径、`#` 子路径导入除外）。
@@ -156,10 +157,16 @@ const BUILTIN_MODULES = new Set([
 function bareSpecifiers(text) {
   const out = [];
   const pattern =
-    /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)(?<quote>["'`])(?<spec>[^"'`\n]+)\k<quote>/gu;
+    /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\.\s*resolve\s*\(\s*|\brequire\s*\(\s*)(?<quote>["'`])(?<spec>[^"'`\n]+)\k<quote>/gu;
   for (const match of text.matchAll(pattern)) {
-    const specifier = match.groups?.spec ?? "";
-    if (specifier === "" || specifier.startsWith(".") || specifier.startsWith("#")) {
+    const { spec: specifier = "" } = match.groups ?? {};
+    // 模板字面量里的 `${...}` 是插值而不是说明符：整段收下会产生误报。
+    if (
+      specifier === "" ||
+      specifier.startsWith(".") ||
+      specifier.startsWith("#") ||
+      specifier.includes("${")
+    ) {
       continue;
     }
     if (specifier.startsWith("node:") || BUILTIN_MODULES.has(packageNameOf(specifier))) {
@@ -179,11 +186,16 @@ function bareSpecifiers(text) {
 function checkSurface(shipped, manifest) {
   // `"exports": "./host.js"`（字符串简写）与 `"exports": ["./a.js", "./b.js"]` 都是合法形态，
   // 只按对象展开会把它们当成空集合，于是 `入口 0 项` 静默通过。
+  const exportsField = fieldOf(manifest, "exports");
+  const mainField = fieldOf(manifest, "main");
   const exportsValue =
-    typeof manifest.exports === "string" || Array.isArray(manifest.exports)
-      ? exportTargets(manifest.exports)
-      : Object.values(asRecord(manifest.exports)).flatMap((value) => exportTargets(value));
-  const targets = [...(typeof manifest.main === "string" ? [manifest.main] : []), ...exportsValue];
+    typeof exportsField === "string" || Array.isArray(exportsField)
+      ? exportTargets(exportsField)
+      : Object.values(asRecord(exportsField)).flatMap((value) => exportTargets(value));
+  const targets = [...(typeof mainField === "string" ? [mainField] : []), ...exportsValue];
+  if (targets.length === 0) {
+    note("manifest 没有可解析的入口（main/exports 缺失或全是通配映射）");
+  }
   for (const target of targets) {
     const relative = target.replace(/^\.\//u, "");
     if (relative !== "package.json" && !shipped.has(`package/${relative}`)) {
@@ -209,8 +221,15 @@ function checkSurface(shipped, manifest) {
  * @returns {Set<string>} 装载期可解析的包名（dependencies ∪ peerDependencies ∪ 宿主 client 模块表）
  */
 function checkDependencies(manifest) {
-  const dependencies = asRecord(manifest.dependencies);
-  const peers = asRecord(manifest.peerDependencies);
+  const dependencies = asRecord(fieldOf(manifest, "dependencies"));
+  const peers = asRecord(fieldOf(manifest, "peerDependencies"));
+  // 宿主族按 peer 的 scope 派生，不写死 @deepseek-ai/：宿主换 scope 或新增同族依赖时，
+  // 这条判据仍按 manifest 自己的声明面生效。
+  const peerScopes = new Set(
+    Object.keys(peers)
+      .filter((name) => name.startsWith("@"))
+      .map((name) => packageNameOf(name)),
+  );
   // tarball 里的 manifest 必须是**已解析**的版本范围：`catalog:` / `workspace:` 是包管理器的
   // 私有协议，pnpm publish 会改写、npm publish 不会（实测 npm pack 把 `catalog:` 原样写进
   // 发布物），消费者装到就是 `EUNSUPPORTEDPROTOCOL`。分发路径不止一条，所以在这里判而不
@@ -224,7 +243,7 @@ function checkDependencies(manifest) {
     }
   }
   for (const name of Object.keys(dependencies)) {
-    if (name.startsWith("@deepseek-ai/")) {
+    if ([...peerScopes].some((scope) => name.startsWith(`${scope}/`))) {
       note(`${name} 落进 dependencies，会在宿主进程旁物化第二份宿主类型面`);
     }
   }
@@ -248,6 +267,9 @@ function checkArtifacts(tgz, shipped, provides) {
   let checked = 0;
   for (const name of CODE_ARTIFACTS) {
     if (!shipped.has(`package/${name}`)) {
+      // 两件产物都缺席时整段检查会 0 件通过：入口改名/漏发必须在门禁里显形，
+      // 否则依赖声明与敏感内容检查同时失效。
+      note(`产物 ${name} 不在发布物里，依赖声明与内容检查对它失效`);
       continue;
     }
     checked += 1;
@@ -288,16 +310,26 @@ function inspect(tgz) {
 
 const workDir = await mkdtemp(path.join(tmpdir(), "quality-gate-pack-"));
 try {
+  /** @type {["ignore", "ignore", "pipe"]} */
+  const packStdio = ["ignore", "ignore", "pipe"];
+  /** @type {import("node:child_process").ExecFileSyncOptions} */
   const packOptions = {
     cwd: import.meta.dirname,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: packStdio,
     maxBuffer,
     timeout: 300_000,
   };
   if (process.platform === "win32") {
-    // pnpm 是 .cmd 垫片，execFileSync 不按 PATHEXT 解析（CI 实测 ENOENT）。走单条命令串
-    // 交给 shell，避免 shell+args 的 DEP0190 弃用警告污染门禁输出；workDir 来自 mkdtemp。
-    execFileSync(`pnpm pack --pack-destination "${workDir}"`, { ...packOptions, shell: true });
+    // pnpm 是 .cmd 垫片，execFileSync 不按 PATHEXT 解析（CI 实测 ENOENT）。显式调 ComSpec
+    // 并把整条命令作为单个参数交给 /c：不经过 shell:true 的字符串拼接路径，也避开 DEP0190。
+    // workDir 来自 mkdtemp（只含安全字符），不存在 cmd 元字符注入面。
+    const { ComSpec } = process.env;
+    const comspec = ComSpec ?? "cmd.exe";
+    execFileSync(
+      comspec,
+      ["/d", "/s", "/c", `pnpm pack --pack-destination "${workDir}"`],
+      packOptions,
+    );
   } else {
     execFileSync("pnpm", ["pack", "--pack-destination", workDir], packOptions);
   }
@@ -308,6 +340,14 @@ try {
   } else {
     inspect(path.join(workDir, tarballName));
   }
+} catch (error) {
+  // pack / tar / JSON.parse 任一步抛错时也走汇总面：原始栈之外还要给出 stderr，
+  // 否则 CI 里只剩一句 Command failed。
+  const stderr =
+    typeof error === "object" && error !== null && "stderr" in error ? String(error.stderr) : "";
+  note(
+    `发布物体检执行失败：${error instanceof Error ? error.message : String(error)}${stderr === "" ? "" : `\n${stderr}`}`,
+  );
 } finally {
   await rm(workDir, { recursive: true, force: true });
 }

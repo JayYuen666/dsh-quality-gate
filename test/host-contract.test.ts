@@ -2,8 +2,8 @@
 // 从「对外行为契约」验证 turn-stopping 门禁批处理的顺序依赖语义：
 //   1. 多根归并出多个门禁时，第一个失败注入成功后停止（mustStop 短路），
 //      不继续跑剩余门禁（一次只注入一个失败）；
-//   2. 门禁总预算耗尽（remaining < 最小可用预算）时跳过剩余门禁并 warn，
-//      不制造必超时的假失败注入；
+//   2. 门禁总预算耗尽（remaining < 最小可用预算）时跳过剩余门禁，并把"未能执行"说明
+//      注入给模型（console.info 计数，不 warn、不制造假失败注入）；
 //   3. 所有门禁通过 → 会话配额重置（下一轮重新计数）；
 //   4. lesson bus 的 report 异步落库（返回 rejected Promise）时失败同样进日志——
 //      旧代码只有同步 catch，异步失败既不留日志又给进程留一枚未处理拒绝。
@@ -64,7 +64,6 @@ interface MockCtx {
   handlers: Record<string, (payload: unknown) => void>;
   followupCalls: unknown[];
   shellCommands: unknown[];
-  effects: (() => void)[];
   /** shell.execute 每次调用的耗时（ms），模拟门禁执行时间。 */
   gateDelayMs: number;
   gateExitCode: number;
@@ -125,7 +124,6 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
     handlers: {},
     followupCalls: [],
     shellCommands: [],
-    effects: [],
     gateDelayMs: 0,
     gateExitCode: 0,
     credentials: {
@@ -160,10 +158,9 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
       };
     },
     effect(fn) {
-      const cleanup = fn();
-      if (typeof cleanup === "function") {
-        ctx.effects.push(cleanup);
-      }
+      // 立即执行工厂（apply 的页面策略与 locale 注册都在 effect 里发生），清理回调本文件
+      // 不使用：卸载收口由其他套件覆盖。
+      fn();
     },
     shell: {
       resolve(spec) {
@@ -306,7 +303,8 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
   it("总预算耗尽 → 跳过剩余门禁并**注入未执行说明**（不再只 warn = 静默通过）", async () => {
     const scratch: string[] = [];
     // 预算 6s：第一个门禁 sleep 1.5s 后剩余 4.5s < MIN_USEFUL_GATE_MS(5s) → 第二个被跳过
-    const ctx = makeCtx({ gateBudgetMs: 6000 });
+    // memoryFeedback 显式关掉：本用例断言「零 warn」，别让记忆反馈路径的告警混进这条判据。
+    const ctx = makeCtx({ gateBudgetMs: 6000, memoryFeedback: false });
     ctx.gateDelayMs = 1500;
     // 门禁都通过（验证注入不是因为代码失败，而是"没跑成"）
     ctx.gateExitCode = 0;
@@ -357,31 +355,61 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
     }
   });
 
-  it("全部门禁通过 → 会话配额重置（下一轮同 turn 重新计数）", async () => {
+  it("配额按会话累计、干净通过后重置（用满时只补一次放行说明）", async () => {
     const scratch: string[] = [];
-    const ctx = makeCtx();
-    // 通过
-    ctx.gateExitCode = 0;
+    const ctx = makeCtx({ maxInjectsPerTurn: 1 });
     const projectA = makeProject("a", scratch);
+    /** 第 index 条注入的正文（content 数组拼回整段文本）。 */
+    const injectText = (index: number): string =>
+      (ctx.followupCalls[index] as { content: { text: string }[] }).content
+        .map((chunk) => chunk.text)
+        .join("");
     try {
       applyGate(ctx, ctx.value);
-      const events = [editEvent(path.join(projectA, "a.ts"))];
-      // 第 1 轮：通过 → 无注入
+      const events = [editEvent(path.join(projectA, "a1.ts"))];
+      // 回合 1：失败 → 注入一次修复指令，配额用满（maxInjectsPerTurn = 1）
+      ctx.gateExitCode = 1;
       ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(ctx, events), turn: 1 });
       await sleep(50);
-      assert.equal(ctx.followupCalls.length, 0, "通过不注入");
-      // 第 2 轮：模拟真实累积事件流（同一会话，游标从上次位置继续读）。
-      // snapshotEvents(from) 必须基于同一累积数组，否则新数组会让游标越界 → 无编辑。
+      assert.equal(ctx.followupCalls.length, 1, "第一次失败应注入修复指令");
+      assert.match(injectText(0), /请修复上述问题/u);
+      // 回合 2：再失败 → 配额已满，只补一次"放行说明"，不再注入修复指令
       events.push(editEvent(path.join(projectA, "a2.ts")));
-      ctx.gateExitCode = 1;
       ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(ctx, events), turn: 2 });
       await sleep(50);
-      assert.equal(ctx.followupCalls.length, 1, "干净回合后配额应重置，能注入修复");
+      assert.equal(ctx.followupCalls.length, 2, "配额耗尽只补一条放行说明");
+      assert.match(injectText(1), /停止自动修复并放行/u);
+      // 回合 3：干净通过 → 配额与 gaveUp 一起重置
+      ctx.gateExitCode = 0;
+      events.push(editEvent(path.join(projectA, "a3.ts")));
+      ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(ctx, events), turn: 3 });
+      await sleep(50);
+      // 回合 4：失败 → 重置后仍可注入修复指令（删掉重置逻辑这条就红）
+      ctx.gateExitCode = 1;
+      events.push(editEvent(path.join(projectA, "a4.ts")));
+      ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(ctx, events), turn: 4 });
+      await sleep(50);
+      assert.equal(ctx.followupCalls.length, 3, "干净通过后配额重置，下一次失败可再注入");
+      assert.match(injectText(2), /请修复上述问题/u, "重置后走的是修复指令，不是放行说明");
     } finally {
       for (const root of scratch) {
         rmSync(root, { recursive: true, force: true });
       }
     }
+  });
+
+  it("页面策略：configure({ auto: false }) 且 owner 显式传本插件 fiber", () => {
+    const ctx = makeCtx();
+    const calls: { presentation: unknown; owner: unknown }[] = [];
+    ctx.settings.configure = (presentation, owner) => {
+      calls.push({ presentation, owner });
+      return () => {
+        void 0;
+      };
+    };
+    applyGate(ctx, ctx.value);
+    // 缺省的 owner 是 settings 服务自己的 fiber：传错等于给别人的页面定策略。
+    assert.deepEqual(calls, [{ presentation: { auto: false }, owner: ctx.fiber }]);
   });
 
   it("followup 抛错 → 回滚配额计数并继续剩余门禁（注入未发生则不短路）", async () => {
@@ -416,6 +444,19 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
       assert.ok(
         errors.some((errorText) => errorText.includes("followup failed")),
         "followup 失败应记录 error",
+      );
+      // 配额回滚的判别断言：上面两次注入都没真正发生（followup 抛错），计数应回到 0；
+      // 再跑一个失败回合，若计数没回滚就撞上 maxInjectsPerTurn 而不再注入修复指令。
+      const beforeRetry = ctx.followupCalls.length;
+      events.push(editEvent(path.join(projectA, "a2.ts")));
+      ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(ctx, events), turn: 2 });
+      await sleep(50);
+      assert.equal(ctx.followupCalls.length, beforeRetry + 1, "配额回滚后下一次失败仍可注入");
+      const retried = ctx.followupCalls.at(-1) as { content: { text: string }[] };
+      assert.match(
+        retried.content.map((chunk) => chunk.text).join(""),
+        /请修复上述问题/u,
+        "计数回滚后走的是修复指令；没回滚时这里只会是一条放行说明",
       );
     } finally {
       for (const root of scratch) {

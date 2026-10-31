@@ -4,9 +4,11 @@
 #
 # 这一行与 oxfmt.config.ts 的 `endOfLine: "lf"` 是同一个约定的两半，必须同时改：
 # 只改一侧，git 认为文件是 LF、格式化器要求另一种，fmt:check 的红就与内容无关了。
+# 改完用 `git ls-files --eol` 现量：除下面两条 cmd 例外外，工作树不应再有 `w/crlf`。
 * text=auto eol=lf
+# 注意：gitattributes 是后者覆盖前者，以下例外必须紧跟在上面这行之后，不能上移。
 # 例外：cmd.exe 解析无 CRLF 的批处理（尤其含 goto 与多行 if 块）行为不可靠，
-# 这类文件进来就必须保持 CRLF。
+# 这类文件进来就必须保持 CRLF。PowerShell（5.1/pwsh 6+）对 LF 兼容，不在此列；
+# 若将来加入带 `#!/usr/bin/env pwsh` shebang 的 .ps1，CRLF 会破坏 Linux 上的 shebang。
 *.bat text eol=crlf
 *.cmd text eol=crlf
-*.ps1 text eol=crlf

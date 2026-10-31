@@ -48,6 +48,71 @@ function readJson(file: string): Record<string, unknown> {
   return parsed;
 }
 
+/** 本包 package.json 的 name（槽位 key 的真源；缺 name 直接抛，不许兜成空串）。 */
+function ownPackageName(): string {
+  const own = readJson(path.join(PKG_DIR, "package.json"))["name"];
+  // assert.ok 带的是类型谓词收窄，assert.equal 不是：用后者就得再写一个永不可达的三元兜底，
+  // 那条死分支会把"根本没有 name"和"name 是空串"混成同一种失败。
+  assert.ok(typeof own === "string" && own !== "", "本包 package.json 没有可用的 name");
+  return own;
+}
+
+/** 本包所在的 npm scope（形如 `@scope/`）；无 scope 的包名交回空串。 */
+function ownPackageScope(name: string): string {
+  const slash = name.indexOf("/");
+  return name.startsWith("@") && slash > 1 ? name.slice(0, slash + 1) : "";
+}
+
+/** 去掉一个 YAML 标量的引号与行尾注释（只覆盖本文件用到的裸标量/单双引号形态）。 */
+function yamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  const first = trimmed.slice(0, 1);
+  const quote = first === '"' || first === "'" ? first : "";
+  if (quote !== "") {
+    const close = trimmed.indexOf(quote, 1);
+    return close === -1 ? "" : trimmed.slice(1, close);
+  }
+  return trimmed.replace(/\s+#.*$/u, "").trim();
+}
+
+interface InsertedEntry {
+  readonly id: string;
+  readonly name: string;
+}
+
+/**
+ * cordis.patch.yml 里 `insert:` 列表的条目（本仓 patch 只有这一支形态：每条一个 id + 一个 name）。
+ *
+ * 按 YAML 缩进切块而不是"全文第一条 - id:"：本文件可以有多个 insert 条目（本族其它包
+ * 复制式分发时就是这样），取第一条会把别人的 id 当成本包的，而"两个标识不同值"那道针
+ * 在两者恰好相等时反而永远绿。
+ */
+/** 一条 `- id: …` 行；值可能带引号或行尾注释。 */
+const ID_LINE = /^\s*-\s+id:\s*(?<value>.*)$/u;
+
+/** 一条 `name: …` 行（与本包 id 同一缩进层）。 */
+const NAME_LINE = /^\s*name:\s*(?<value>.*)$/u;
+
+function insertedEntries(yml: string): InsertedEntry[] {
+  assert.match(yml, /^\s*(?:-\s+)?insert:\s*$/mu, "cordis.patch.yml 里没有 insert: 列表");
+  const entries: InsertedEntry[] = [];
+  let pendingId: string | undefined;
+  for (const line of yml.split("\n")) {
+    const id = ID_LINE.exec(line);
+    const name = NAME_LINE.exec(line);
+    if (id !== null) {
+      pendingId = yamlScalar(id.groups?.["value"] ?? "");
+    } else if (name !== null && pendingId !== undefined) {
+      entries.push({ id: pendingId, name: yamlScalar(name.groups?.["value"] ?? "") });
+      pendingId = undefined;
+    }
+  }
+  if (pendingId !== undefined) {
+    entries.push({ id: pendingId, name: "" });
+  }
+  return entries;
+}
+
 /** profile 清单路径：`~/.dsh/profiles/web/package.json`（DSH_PROFILE_PACKAGE_JSON 可改指）。 */
 function profileManifestPath(): string {
   const override = process.env["DSH_PROFILE_PACKAGE_JSON"] ?? "";
@@ -79,10 +144,22 @@ function profileBundleListOrNull(): string[] | null {
   assert.ok(Array.isArray(listed), `${file} 的 dsh.profile.bundles 不是数组`);
   const items: unknown[] = listed;
   const bundles = items.filter((item): item is string => typeof item === "string");
+  // 非字符串条目（`[{ "name": "..." }]`、数字）不能静默滤掉：滤掉之后本包命中不了
+  // 自己的 scope，整道机器侧针会以「没装 profile」的身份跳过，坏清单照样通过。
+  assert.equal(
+    bundles.length,
+    items.length,
+    `${file} 的 dsh.profile.bundles 里有非字符串条目：清单形状已坏，不许静默过滤`,
+  );
   // 同名 profile 未必属于本工作面：`--from-default-profile web` 也会造一个只装官方基座的
-  // web profile。清单里一个 @jayyuen66 包都没有时按「没装 profile」处理——机器侧针只钉
-  // 在真装着本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
-  if (!bundles.some((name) => name.startsWith("@jayyuen66/"))) {
+  // web profile。清单里一个本族包都没有时按「没装 profile」处理——机器侧针只钉在真装着
+  // 本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
+  // scope 从本包自己的包名推出来，不写 `@jayyuen66/` 字面量：本文件是复制式分发的，
+  // 抄一份常量就意味着改 scope 之后这道针仍对着旧 scope 判，而它是"本族有没有装"的唯一判据。
+  const scope = ownPackageScope(ownPackageName());
+  const belongsToFamily =
+    scope === "" ? bundles.length > 0 : bundles.some((item) => item.startsWith(scope));
+  if (!belongsToFamily) {
     return null;
   }
   return bundles;
@@ -95,11 +172,7 @@ function profileBundleListOrNull(): string[] | null {
  * profile 只存在在这台开发机上，装了才加一道机器侧针（清单里确有这一条）。
  */
 export function profileBundleName(): string {
-  const own = readJson(path.join(PKG_DIR, "package.json"))["name"];
-  // assert.ok 带的是类型谓词收窄，assert.equal 不是：用后者就得再写一个永不可达的三元兜底，
-  // 那条死分支会把"根本没有 name"和"name 是空串"混成同一种失败。
-  assert.ok(typeof own === "string" && own !== "", "本包 package.json 没有可用的 name");
-  const name = own;
+  const name = ownPackageName();
   const listed = profileBundleListOrNull();
   if (listed !== null) {
     assert.ok(
@@ -113,62 +186,84 @@ export function profileBundleName(): string {
 /**
  * cordis.patch.yml 里的裸条目 id —— 0.1.7 的隐式 settings 命名空间与
  * `configForms.get(entryId)` 的入参都取它，与 bundle 包名是两回事。
+ *
+ * 必须绑到**本 bundle 的那一条**（按 `name:` 对包名），不能取"全文第一条 `- id:`"：
+ * 一个 patch 文件可以有多个 insert 条目（本族其它包复制式分发时就是这样），取第一条会把
+ * 别人的 id 当成本包的；而"两个标识不同值"那道针在恰好拿到别人 id 时反而可能永远绿。
+ * 引号与行尾注释由 yamlScalar 收口（裸写、单引号、双引号三种形态都认）。
  */
 export function patchEntryId(): string {
   const yml = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
-  const line = yml.split("\n").find((item) => /^\s*-\s+id:\s*\S+\s*$/u.test(item)) ?? "";
-  const id = line.replace(/^\s*-\s+id:\s*/u, "").trim();
-  assert.notEqual(id, "", "cordis.patch.yml 里没有裸 `- id:` 条目");
-  return id;
+  const bundle = ownPackageName();
+  const own = insertedEntries(yml).filter((entry) => entry.name === bundle);
+  assert.equal(
+    own.length,
+    1,
+    `cordis.patch.yml 的 insert 条目里 name 为 ${bundle} 的必须恰好一条（实得 ${String(own.length)} 条）`,
+  );
+  const [entry] = own;
+  assert.ok(entry !== undefined, "取不到本 bundle 的 insert 条目");
+  assert.notEqual(entry.id, "", `cordis.patch.yml 里 ${bundle} 那条没有裸 id`);
+  return entry.id;
 }
 
 /** 产物里 `const <name> = "<字面量>"` 的值；取不到即抛（漂移针不许静默放过）。 */
 function constLiteral(text: string, name: string): string {
-  const pattern = new RegExp(`const ${name} = "(?<value>[^"]*)"`, "u");
+  // 标识符可能以 `$` 开头，空白与引号风格也可能随构建器变化：先转义再匹配，
+  // 否则 `$` 会被当成行尾锚点、其他元字符会变成正则注入。
+  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  const pattern = new RegExp(`const\\s+${escaped}\\s*=\\s*["'](?<value>[^"']*)["']`, "u");
   const value = pattern.exec(text)?.groups?.["value"] ?? "";
   assert.notEqual(value, "", `产物里找不到 const ${name} = "…" 的字面量声明`);
   return value;
 }
 
+/** 槽位注册点之后取 `key:` 的窗口长度（字符）。产物里别处也有 `key:`（React list key），
+ *  只能就近找；窗口取足以覆盖 desc 对象、又不至于跨到下一个注册对象的长度。 */
+const SLOT_KEY_WINDOW_CHARS = 500;
+
+/** bundle 包名的形状（`@scope/name` 或裸包名）：读出来的值必须像包名，否则钉到的是别的属性。 */
+const BUNDLE_NAME_SHAPE = /^(?:@[\w.-]+\/)?[\w.-]+$/u;
+
 /** 取产物里 `plugins.bundle.config` 那次 register 的 key（字面量或常量标识符都解析）。 */
 function registeredSlotKey(text: string): string {
-  const marker = text.indexOf('name: "plugins.bundle.config"');
-  assert.notEqual(marker, -1, "产物里没有 plugins.bundle.config 的注册");
+  // 属性名与值之间的空白、单双引号都认：只认 `name: "…"` 会在压缩/换引号后整条读不到。
+  const marker = /name:\s*["']plugins\.bundle\.config["']/u.exec(text);
+  assert.ok(marker !== null, "产物里没有 plugins.bundle.config 的注册");
   // 只看注册点之后的一小段：产物里别处也有 `key:`（React list key），不能全局抓。
-  const nearby = text.slice(marker, marker + 500);
+  const nearby = text.slice(marker.index, marker.index + SLOT_KEY_WINDOW_CHARS);
   const groups =
-    /key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][\w$]*))/u.exec(nearby)?.groups ?? {};
+    /key:\s*(?:(?<quote>["'])(?<literal>[^"']*)\k<quote>|(?<ident>[A-Za-z_$][\w$]*))/u.exec(nearby)
+      ?.groups ?? {};
   const literal = groups["literal"] ?? "";
   if (literal !== "") {
+    assert.match(literal, BUNDLE_NAME_SHAPE, `slot 注册的 key 不像包名：${literal}`);
     return literal;
   }
   const ident = groups["ident"] ?? "";
   assert.notEqual(ident, "", "产物里读不到 slot 注册 desc 的 key（既不是字面量也不是标识符）");
-  return constLiteral(text, ident);
+  const resolved = constLiteral(text, ident);
+  assert.match(resolved, BUNDLE_NAME_SHAPE, `slot 注册的 key 不像包名：${resolved}`);
+  return resolved;
 }
 
-/** 取产物里 `ctx.configForms.get(<入参>)` 实际用到的条目 id（同样兼容字面量/常量）。 */
-function configFormsEntryId(text: string): string {
-  // 锚到 `ctx.configForms.get(` 而不是任意 `configForms.get(`，并要求全产物恰好一处：
-  // 出现第二处（新增 helper、宿主侧代码被内联）时，不锚定就会比到无关的入参上。
-  // 命中处之后按"从该点起的一次匹配"取实参，不看整份产物，避免跨到别处的括号。
-  const matches = [...text.matchAll(/ctx\.configForms\.get\(/gu)];
-  assert.equal(
-    matches.length,
-    1,
-    "产物里 ctx.configForms.get(…) 必须恰好一处：出现多处时无从判断比的是哪一个",
-  );
-  const [hit] = matches;
-  assert.ok(hit !== undefined, "产物里没有 ctx.configForms.get(…) 调用");
-  // 命中本身已经吃到 `(`，其后到第一个 `)` 就是实参面（产物里这一处是简单标识符或字面量）。
-  const after = text.slice(hit.index + hit[0].length);
-  const arg = /^(?<arg>[^)]*)\)/u.exec(after)?.groups?.["arg"] ?? "";
-  assert.notEqual(arg, "", "产物里 ctx.configForms.get(…) 的入参读不出来");
-  const inline = /^"(?<value>[^"]*)"$/u.exec(arg)?.groups?.["value"] ?? "";
-  if (inline !== "") {
+/** 取产物里每一处 `configForms.get(<入参>)` 的条目 id（字面量/常量都解析）。
+ *  不要求调用点恰好一处：共享包 helper 被一起打包时会出现多处，逐处比对才能既防漂移
+ *  又不因调用点数量假红。 */
+function configFormsEntryIds(text: string): string[] {
+  const matches = [...text.matchAll(/configForms\.get\(/gu)];
+  assert.notEqual(matches.length, 0, "产物里没有 configForms.get(…) 调用");
+  return matches.map((hit) => {
+    // 命中本身已经吃到 `(`，其后到第一个 `)` 就是实参面（产物里这一处是简单标识符或字面量）。
+    const after = text.slice(hit.index + hit[0].length);
+    const arg = (/^(?<arg>[^)]*)\)/u.exec(after)?.groups?.["arg"] ?? "").trim();
+    assert.notEqual(arg, "", "产物里 configForms.get(…) 的入参读不出来");
+    const inline = /^["'](?<value>[^"']*)["']$/u.exec(arg)?.groups?.["value"] ?? "";
+    if (inline === "") {
+      return constLiteral(text, arg);
+    }
     return inline;
-  }
-  return constLiteral(text, arg);
+  });
 }
 
 /**
@@ -206,11 +301,13 @@ export async function bundleSlotPinProblems(): Promise<string[]> {
       `plugins.bundle.config 的 key 必须是 bundle 包名 ${bundle}（宿主按包名派发），写成裸条目 id ${entryId} 就是永不出卡`,
     );
   }
-  const configFormsArg = configFormsEntryId(out);
-  if (configFormsArg !== entryId) {
-    problems.push(
-      `configForms.get() 的入参必须仍是裸条目 id ${entryId}（0.1.7 里它就是 settings 命名空间），不得顺手换成 bundle 包名`,
-    );
+  const configFormsArgs = configFormsEntryIds(out);
+  for (const arg of configFormsArgs) {
+    if (arg !== entryId) {
+      problems.push(
+        `configForms.get() 的入参 ${arg} 必须仍是裸条目 id ${entryId}（0.1.7 里它就是 settings 命名空间），不得顺手换成 bundle 包名`,
+      );
+    }
   }
   return problems;
 }

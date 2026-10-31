@@ -1,17 +1,6 @@
 {
   "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.base.json",
-  "compilerOptions": {
-    "paths": {
-      "schemastery": ["./node_modules/schemastery/lib/index.d.ts"]
-    }
-  },
-  "include": [
-    "host.ts",
-    "lib/**/*.ts",
-    "test/**/*.ts",
-    "vitest.config.ts",
-    "oxfmt.config.ts",
-    "oxlint.config.ts"
-  ],
+  "//": "根目录的 .ts 一律收进来（host.ts 与几份工具配置），按 glob 而不是逐个列名字：新增根级 .ts 时不会静默漏检。客户端测试的归属按文件名划分——test/client-*.test.ts 归 tsconfig.client.json 那份程序（DOM lib、types 空），这里的 exclude 用同一模式把它们留在 host 程序外，与 tsconfig.client.json 的注释成对。noEmit 在基线里已开（config/tsconfig.base.json），这里不重复。",
+  "include": ["*.ts", "lib/**/*.ts", "test/**/*.ts"],
   "exclude": ["test/client-*.test.ts"]
 }

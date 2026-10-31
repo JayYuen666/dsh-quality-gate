@@ -103,19 +103,112 @@ function templateStep(text: string, from: number, levels: ScanLevel[]): Step {
   return { next: from + 1, closed: false };
 }
 
-/** 代码段里推进一格：括号压栈/弹栈，字符串、注释、模板整体跳过。 */
-function codeStep(text: string, from: number, levels: ScanLevel[]): Step {
+/** 斜杠前面出现这些实义字符时，它开的是正则字面量而不是除号。 */
+const REGEX_PRECEDERS = new Set([
+  "(",
+  ",",
+  "=",
+  ":",
+  "[",
+  "{",
+  ";",
+  "!",
+  "&",
+  "|",
+  "?",
+  "+",
+  "-",
+  "*",
+  "%",
+  "<",
+  ">",
+  "~",
+  "^",
+]);
+
+/** 从 from 往前找第一个非空白字符（跳过换行与缩进）；找不到时回 undefined。 */
+function previousSignificant(text: string, from: number): string | undefined {
+  return /(?<char>\S)(?=\s*$)/u.exec(text.slice(0, from))?.groups?.["char"];
+}
+
+/**
+ * 该位置的斜杠是否开正则字面量（而不是除号）。
+ *
+ * 不识别正则的代价不是"读慢一点"：正则里带引号会把 skipString 骗去吞掉后文字面量，
+ * 带右花括号会让对象块提前收尾——两种都让后续 key: Schema.* 静默少读，而少读字段正是本门禁的假绿形态。
+ * 判据只能看前一个实义字符：标识符/数字/右括号之后是除号，运算符或开符号之后才可能是正则。
+ */
+function isRegexStart(text: string, from: number): boolean {
+  const previous = previousSignificant(text, from);
+  return previous !== undefined && REGEX_PRECEDERS.has(previous);
+}
+
+/** 从正则字面量的开斜杠起跳到收尾斜杠与 flags 之后；未闭合即抛（不猜）。 */
+function skipRegexLiteral(text: string, from: number): number {
+  let i = from + 1;
+  let inClass = false;
+  while (i < text.length && text[i] !== "\n") {
+    const char = text[i] ?? "";
+    if (char === "\\") {
+      i += 2;
+    } else if (char === "[") {
+      inClass = true;
+      i += 1;
+    } else if (char === "]") {
+      inClass = false;
+      i += 1;
+    } else if (char === "/" && !inClass) {
+      i += 1;
+      while (i < text.length && /[a-z]/iu.test(text[i] ?? "")) {
+        i += 1;
+      }
+      return i;
+    } else {
+      i += 1;
+    }
+  }
+  throw new Error(`源码里从下标 ${from} 起的正则字面量没有闭合的斜杠`);
+}
+
+/**
+ * 字符串、注释与正则字面量（模板字面量另由 codeStep 压栈）：命中时返回其后下标。
+ *
+ * 单独成函数是为了让 codeStep 的分支数留在复杂度门限内——它本来就是一个字符一个分支。
+ */
+function stepOpaque(text: string, from: number): number | undefined {
   const char = text[from] ?? "";
   const next = text[from + 1] ?? "";
   if (char === '"' || char === "'") {
-    return { next: skipString(text, from), closed: false };
+    return skipString(text, from);
+  }
+  if (char === "/" && (next === "/" || next === "*")) {
+    return skipTrivia(text, from);
+  }
+  return char === "/" && isRegexStart(text, from) ? skipRegexLiteral(text, from) : undefined;
+}
+
+/** 弹出与 char 配对的层级；不配对即抛（宁炸也不交半截括号计数）。 */
+function closeLevel(from: number, char: string, levels: ScanLevel[]): Step {
+  const top = levels.at(-1);
+  if (top === undefined || top.closer !== char) {
+    throw new Error(
+      `括号不配对：${top?.opener ?? "?"} 对应的是 ${top?.closer ?? "?"}，实得 ${char}（下标 ${from}）`,
+    );
+  }
+  levels.pop();
+  return { next: from + 1, closed: true };
+}
+
+/** 代码段里推进一格：括号压栈/弹栈，字符串、注释、模板、正则整体跳过。 */
+function codeStep(text: string, from: number, levels: ScanLevel[]): Step {
+  const char = text[from] ?? "";
+  const opaqueEnd = stepOpaque(text, from);
+  if (opaqueEnd !== undefined) {
+    return { next: opaqueEnd, closed: false };
   }
   if (char === "`") {
     levels.push({ opener: "`", closer: "`", template: true });
     return { next: from + 1, closed: false };
-  }
-  if (char === "/" && (next === "/" || next === "*")) {
-    return { next: skipTrivia(text, from), closed: false };
   }
   const nested = CLOSERS[char];
   if (nested !== undefined) {
@@ -125,14 +218,7 @@ function codeStep(text: string, from: number, levels: ScanLevel[]): Step {
   if (char !== ")" && char !== "}" && char !== "]") {
     return { next: from + 1, closed: false };
   }
-  const top = levels.at(-1);
-  if (top === undefined || top.closer !== char) {
-    throw new Error(
-      `括号不配对：${top?.opener ?? "?"} 对应的是 ${top?.closer ?? "?"}，实得 ${char}（下标 ${from}）`,
-    );
-  }
-  levels.pop();
-  return { next: from + 1, closed: true };
+  return closeLevel(from, char, levels);
 }
 
 /**
@@ -195,13 +281,12 @@ function schemaObjectSites(hostTs: string): number[] {
   return sites;
 }
 
-/** 在候选站点里挑出设置 schema：认 `export const Config =`，否则只在候选唯一时采纳。 */
+/** 在候选站点里挑出设置 schema：只认 `export const Config =`（唯一候选也必须是它）。
+ *  只按「候选唯一」采纳时，任何一处无关的 `xxx = Schema.object(...)` 都会被当成设置面，
+ *  读出来的字段全集是别的对象的键——门禁会以错误的字段面判定覆盖（假绿或误报）。 */
 function pickSchemaSite(hostTs: string, sites: number[]): number | undefined {
   const named = sites.filter((site) => /export\s+const\s+Config\s*$/u.test(hostTs.slice(0, site)));
-  if (named.length === 1) {
-    return named[0];
-  }
-  return sites.length === 1 ? sites[0] : undefined;
+  return named.length === 1 ? named[0] : undefined;
 }
 
 /** 顶层键位读取结果：`index` 是冒号之后的下标，`field` 只在值紧跟 `Schema.` 时给出。 */
@@ -242,43 +327,72 @@ function fieldKeyAt(body: string, from: number, depth: number, expectKey: boolea
  * （`foo:\n  Schema.xxx`）照样读到，行内注释、嵌套子对象、字符串里的 `key:` 都不会误读。
  * 不再要求「字段与 Schema. 同一行」，也不再依赖缩进宽度。
  */
+/** 对象体扫描状态：当前下标、括号深度、下一个位置是否可能是键。 */
+interface BodyScan {
+  i: number;
+  depth: number;
+  expectKey: boolean;
+}
+
+/** 不是字段、也不是不透明片段时，按定界符推进一格。 */
+function advanceDelimiter(char: string, scan: BodyScan): void {
+  if (char === ",") {
+    scan.i += 1;
+    scan.expectKey = scan.depth === 0;
+  } else if (CLOSERS[char] !== undefined) {
+    scan.depth += 1;
+    scan.i += 1;
+    scan.expectKey = false;
+  } else if (char === ")" || char === "}" || char === "]") {
+    scan.depth -= 1;
+    scan.i += 1;
+    scan.expectKey = false;
+  } else {
+    scan.i += 1;
+    scan.expectKey = false;
+  }
+}
+
+/**
+ * 对象体里推进一格：跳过空白/注释，字面量与正则整体跳过（正则里的 [ { } 会改动 depth，
+ * 深度一旦错位，其后的 key: Schema.* 全部被当成"嵌套值里的键"静默丢掉——假绿），
+ * 顶层键位命中就收字段名，其余按定界符推进。
+ *
+ * @param body - 对象字面量体（开括号之后到配对收尾括号之前的源码）
+ * @param scan - 扫描状态，原地推进
+ * @param fields - 已收到的字段名，命中时追加
+ * @returns 是否还能继续扫（扫到尾部即 false）
+ */
+function bodyStep(body: string, scan: BodyScan, fields: string[]): boolean {
+  scan.i = skipTrivia(body, scan.i);
+  if (scan.i >= body.length) {
+    return false;
+  }
+  const char = body[scan.i] ?? "";
+  const opaqueEnd = skipLiteralAt(body, scan.i) ?? stepOpaque(body, scan.i);
+  if (opaqueEnd !== undefined) {
+    scan.i = opaqueEnd;
+    scan.expectKey = false;
+    return true;
+  }
+  const hit = fieldKeyAt(body, scan.i, scan.depth, scan.expectKey);
+  if (hit === null) {
+    advanceDelimiter(char, scan);
+    return true;
+  }
+  if (hit.field !== undefined) {
+    fields.push(hit.field);
+  }
+  scan.i = hit.index;
+  scan.expectKey = false;
+  return true;
+}
+
 function schemaFieldsInBody(body: string): string[] {
   const fields: string[] = [];
-  let i = 0;
-  let depth = 0;
-  let expectKey = true;
-  while (i < body.length) {
-    i = skipTrivia(body, i);
-    if (i >= body.length) {
-      break;
-    }
-    const char = body[i] ?? "";
-    const literalEnd = skipLiteralAt(body, i);
-    const hit = literalEnd === undefined ? fieldKeyAt(body, i, depth, expectKey) : null;
-    if (literalEnd !== undefined) {
-      i = literalEnd;
-      expectKey = false;
-    } else if (char === ",") {
-      i += 1;
-      expectKey = depth === 0;
-    } else if (CLOSERS[char] !== undefined) {
-      depth += 1;
-      i += 1;
-      expectKey = false;
-    } else if (char === ")" || char === "}" || char === "]") {
-      depth -= 1;
-      i += 1;
-      expectKey = false;
-    } else if (hit === null) {
-      i += 1;
-      expectKey = false;
-    } else {
-      if (hit.field !== undefined) {
-        fields.push(hit.field);
-      }
-      i = hit.index;
-      expectKey = false;
-    }
+  const scan: BodyScan = { i: 0, depth: 0, expectKey: true };
+  while (bodyStep(body, scan, fields)) {
+    // 全部推进都在 bodyStep 里完成，循环只负责"扫到尾部即停"。
   }
   return fields;
 }
@@ -321,17 +435,51 @@ function group(match: RegExpExecArray, index: number): string {
   return match[index] ?? "";
 }
 
+/** 把注释替换成等长空白（行注释与块注释都算，块注释的起止符在本说明里省略），
+ *  字符串/模板/正则原样保留。`boundFieldsIn` 的匹配面里有 `field: 'x'` 这种带引号的形态，
+ *  所以不能把字面量一起清掉；但注释必须清：被注释掉的旧绑定（`// props.set('x', v)`）
+ *  不能算"卡片已暴露该字段"。 */
+function codeWithoutComments(src: string): string {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const char = src[i] ?? "";
+    if (char === '"' || char === "'") {
+      const end = skipString(src, i);
+      out += src.slice(i, end);
+      i = end;
+    } else if (char === "`") {
+      const end = skipTemplate(src, i);
+      out += src.slice(i, end);
+      i = end;
+    } else if (char === "/" && (src[i + 1] === "/" || src[i + 1] === "*")) {
+      const end = skipTrivia(src, i);
+      out += " ".repeat(end - i);
+      i = end;
+    } else if (char === "/" && isRegexStart(src, i)) {
+      const end = skipRegexLiteral(src, i);
+      out += src.slice(i, end);
+      i = end;
+    } else {
+      out += char;
+      i += 1;
+    }
+  }
+  return out;
+}
+
 /** 扫描一个 client 源文件，收集作为「设置写入第一参」出现的字段名字面量。 */
 function boundFieldsIn(src: string): Set<string> {
+  const code = codeWithoutComments(src);
   const out = new Set<string>();
   // 输入行组件的 field prop：field: 'x'
-  for (const match of src.matchAll(/\bfield\s*:\s*["'](?<name>[A-Za-z_$][\w$]*)["']/gu)) {
+  for (const match of code.matchAll(/\bfield\s*:\s*["'](?<name>[A-Za-z_$][\w$]*)["']/gu)) {
     out.add(group(match, 1));
   }
   // 各种写入惯用法：props.set('x' / set('x' / unset('x' / fireAndForget('x' / writeSet('x'
   //   刻意不要求限定 receiver——各包惯用法不同（props.set / fireAndForget / writer.set），
   //   收得太紧会假阴性。字段名是否算"绑定"由 schemaCoverageProblems 与 host 字段名交集判定。
-  for (const match of src.matchAll(
+  for (const match of code.matchAll(
     /\b(?:set|unset|fireAndForget|writeSet|commit)\s*\(\s*["'](?<name>[A-Za-z_$][\w$]*)["']/gu,
   )) {
     out.add(group(match, 1));
@@ -451,11 +599,42 @@ export function schemaCoverageProblems(
     return problems;
   }
 
-  const parsed = hostSchemaFields(hostTs);
+  // hostSchemaFields 对畸形源码是抛错而不是回问题清单（解析器契约：宁炸也不交半截字段）。
+  // 但本函数对外承诺的是"交回问题清单"：不接住的话失败形态变成一张堆栈，调用方
+  // assert.deepEqual(schemaCoverageProblems(...), []) 收到的就不是可读原因了。保持 fail-closed：
+  // 转成一条点名 host.ts 的问题并立即返回（字段面不可信，后面的绑定/豁免检查没有意义）。
+  let parsed: ReturnType<typeof hostSchemaFields>;
+  try {
+    parsed = hostSchemaFields(hostTs);
+  } catch (error) {
+    problems.push(
+      `[${pkgName}] host.ts 的设置字段面解析失败：${error instanceof Error ? error.message : String(error)}`,
+    );
+    return problems;
+  }
   problems.push(...parsed.problems);
   const hostFields = parsed.fields;
   const bound = clientBoundFields(pkgDir, problems);
-  const exemptions = new Map((opts.allowUnbound ?? []).map((item) => [item.field, item.reason]));
+  const exemptionItems = opts.allowUnbound ?? [];
+  const duplicateExempt = exemptionItems
+    .map((item) => item.field)
+    .filter((field, index, all) => all.indexOf(field) !== index);
+  if (duplicateExempt.length > 0) {
+    // Map 会让后一条静默覆盖前一条：重复声明意味着至少一条 reason 不会被读到。
+    problems.push(
+      `[${pkgName}] allowUnbound 重复声明了字段（后者覆盖前者）：${duplicateExempt.join(", ")}`,
+    );
+  }
+  const unknownExempt = exemptionItems
+    .map((item) => item.field)
+    .filter((field) => !hostFields.includes(field));
+  if (unknownExempt.length > 0) {
+    // 不在 host schema 里的豁免既不命中 missing 也不命中 stale，等于一张挂名豁免。
+    problems.push(
+      `[${pkgName}] allowUnbound 含 host schema 里不存在的字段（拼写错误或 host 已删除）：${unknownExempt.join(", ")}`,
+    );
+  }
+  const exemptions = new Map(exemptionItems.map((item) => [item.field, item.reason]));
 
   if (hostFields.length === 0) {
     problems.push(

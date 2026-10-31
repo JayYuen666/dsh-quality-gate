@@ -10,9 +10,8 @@
 
 import { deriveProjectKey } from "@jayyuen66/dsh-plugin-shared/lib/project-key";
 
-/** 基址末尾斜杠与 IPv4 单段。 */
+/** 基址末尾斜杠。 */
 const TRAILING_SLASHES = /\/+$/u;
-const IPV4_OCTET = /^\d{1,3}$/u;
 
 /** env 值 trim 后非空则用之，否则回到 fallback（保留原 `||` 语义，
  *  又以显式比较规避 prefer-nullish-coalescing 与 strict-boolean-expressions）。 */
@@ -31,6 +30,14 @@ function envOr(key: string, fallback: string): string {
  * 解析不出合法 URL 时同样返回空串（按"未配置"处理）：`http://` 这类半截串裁掉斜杠后剩
  * `http:`，如果原样透给调用方，凭据安全判据会把它报成"明文 http 且非回环"——把配置写错
  * 误报成协议不安全，用户照提示改成 https 也修不好。
+ *
+ * 只接受"基址"：带 query/fragment 的串一律回空串。调用方把返回值当基址拼
+ * `/v2/conversation/add`，若原样保留 `?token=...` / `#frag`，拼出来的路径会落在 query
+ * 之后（实测 `https://gw/api?x=1` → `https://gw/api?x=1/v2/conversation/add`），请求打到
+ * 错误位置而不是报配置错——把配置手滑伪装成网关 404。
+ *
+ * 带 userinfo（`https://user:secret@gw`）同样回空串：基址不是存密钥的地方（密钥走凭据
+ * 引用名），而且这个返回值会被写进降级日志，原样透传等于把密码打进日志与错误提示。
  */
 export function resolveGatewayUrl(settingUrl: string): string {
   const configured = settingUrl.trim();
@@ -53,51 +60,19 @@ export function resolveGatewayUrl(settingUrl: string): string {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return "";
   }
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    return "";
+  }
   return normalized;
 }
 
-/** 是否为 IPv4 回环（127.0.0.0/8 整段，不只是 127.0.0.1）。 */
-function isIpv4Loopback(host: string): boolean {
-  const parts = host.split(".");
-  if (parts.length !== 4 || parts[0] !== "127") {
-    return false;
-  }
-  return parts.every((part) => IPV4_OCTET.test(part) && Number(part) <= 255);
-}
-
-/**
- * 凭据只允许发往 https 或回环地址：明文 http 到远端会把 Bearer 令牌暴露给同网段
- * （设置卡默认值就是本机 http，属有意用法）。返回 false 时调用方按"未配置"处理，
- * 不解析、不发送凭据。
- *
- * 回环按整段判定而不是三个字面量：IPv4 回环是 127.0.0.0/8，网关绑在 127.0.0.2 /
- * 127.0.1.1 时同样只在本机，判成"不安全"会让记忆反馈静默停掉、而用户从提示里看不出
- * 自己其实就在本机；IPv6 的 IPv4-mapped 写法（URL 把 `[::ffff:127.0.0.1]` 归一成
- * `[::ffff:7f00:1]`）同理。
- *
- * `localhost` 这一支是**有意保留的 fail-open**：它依赖 hosts/DNS 解析，hosts 被指向远端时
- * 本函数仍判安全。保留它是为了让设置卡的默认写法可用；要彻底关掉这个口子只能改成只认 IP
- * 字面量，那会让"本机网关"这条最常见用法需要用户自己去查 IP。
- */
-export function isCredentialSafeUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol === "https:") {
-    return true;
-  }
-  if (parsed.protocol !== "http:") {
-    return false;
-  }
-  const host = parsed.hostname.replaceAll(/^\[|\]$/gu, "");
-  // ::1 是 IPv6 回环；::ffff:7fxx:xxxx 的第三、四字节是 0x7f，即 127.0.0.0/8 的映射写法。
-  return (
-    host === "localhost" || isIpv4Loopback(host) || host === "::1" || host.startsWith("::ffff:7f")
-  );
-}
+/** 凭据可发往的地址判据住在 lib/credential-url.ts：设置卡也要用同一份。 */
+export { isCredentialSafeUrl } from "./credential-url.ts";
 
 /** `x-tdai-service-id` 的合法形状：网关侧按服务名路由，空白与控制字符会让请求头
  *  在 fetch 处直接抛 TypeError（undici 拒收含换行的头值），把一次投递变成一条异常。

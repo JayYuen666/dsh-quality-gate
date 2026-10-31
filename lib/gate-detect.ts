@@ -68,30 +68,38 @@ function pnpmCheckReady(scripts: readonly string[] | undefined): boolean {
  * 默认规则集去判一个从未声明用 ruff 的项目，产出与使用者意图无关的告警，再经同一个注入
  * 通道被当成真实缺陷。这正是本模块要压住的假失败，方向与 pnpmCheckReady 一致。
  *
- * 判据收在两处**声明**上：`ruff.toml`（ruff 专属文件名，在场即声明）与 pyproject 里真有
- * 的 `[tool.ruff]` 一族段（由 host 读盘后经 ruffConfigured 传入）。二者都缺＝没有信息，
+ * 判据收在两处**声明**上：`ruff.toml` / `.ruff.toml`（ruff 专属文件名，在场即声明；两者
+ * 同时存在时 ruff 以 ruff.toml 优先，但任一在场都足以说明这个工程用 ruff）与 pyproject 里
+ * 真有 `[tool.ruff]` 一族段（由 host 读盘后经 ruffConfigured 传入）。二者都缺＝没有信息，
  * 按保守口径不给门禁——代价只是这一轮少一次自动核验，用户可以自己跑。
  */
 function ruffGateReady(files: readonly string[], ruffConfigured: boolean | undefined): boolean {
-  return files.includes("ruff.toml") || ruffConfigured === true;
+  return files.includes("ruff.toml") || files.includes(".ruff.toml") || ruffConfigured === true;
 }
 
 /** 从 ProjectRoot（根目录相对名清单 + 已声明脚本 + ruff 配置事实）判定单根门禁。 */
 function gateForRoot(entry: ProjectRoot): Gate | undefined {
   const { root, files, scripts, ruffConfigured } = entry;
   const has = (name: string): boolean => files.includes(name);
+  const workspace = has("pnpm-workspace.yaml");
   // 优先级从高到低：workspace 全套 > Rust > Python > 裸 TS
   let gate: Gate | undefined;
-  if (has("pnpm-workspace.yaml") && has("package.json") && pnpmCheckReady(scripts)) {
+  if (workspace && has("package.json") && pnpmCheckReady(scripts)) {
     gate = { root, command: ["pnpm", "check"] as const };
   } else if (has("Cargo.toml")) {
     gate = { root, command: ["cargo", "check"] as const };
   } else if (ruffGateReady(files, ruffConfigured)) {
     gate = { root, command: ["ruff", "check", "."] as const };
-  } else if (has("package.json") && has("tsconfig.json")) {
+  } else if (!workspace && has("package.json") && has("tsconfig.json")) {
     // 必须有 tsconfig.json 才算 TS 项目。裸 package.json 不够——HOME 里 `npm init` 的空壳
     // 无 tsconfig，发给它 tsc 只会制造假失败。命令里的 `tsc` 是逻辑名：真正的入口在 host
     // 执行时解析（工程本地 typescript 优先，其次本包依赖的那份），不经 npx 下载。
+    //
+    // workspace 根不走这条降级：那里的 tsconfig 常是 solution-style（`files: []` +
+    // `references`），`tsc --noEmit` 不构建被引用的子工程，一个文件都不检查就退 0，
+    // 门禁名义存在而恒绿；host 的 rootForFile 又会因「外层能产出门禁」升级到这个根，
+    // 把子包自己的门禁一并顶掉。workspace 的行动门禁就是它自己声明的 check 脚本，
+    // 没声明时按 pnpmCheckReady 的同一取向不发门禁（宁可漏检，不造假通过）。
     gate = { root, command: ["tsc", "--noEmit"] as const };
   }
   return gate;
@@ -100,12 +108,18 @@ function gateForRoot(entry: ProjectRoot): Gate | undefined {
 /** 多根归并探测：每个根独立判定，无清单的根跳过（返回 undefined）。 */
 export function detectGate(roots: readonly ProjectRoot[]): Gate[] {
   const out: Gate[] = [];
+  // 同一 root 重复出现时会重复执行门禁并重复消耗预算/配额；这里按 root 原值归并，
+  // 不假定调用方已去重（本函数是导出的公共面）。
+  const seen = new Set<string>();
   for (const entry of roots) {
-    // 入参类型已约束形状（root: string、files: readonly string[]），不再逐项手搓守卫：
-    // 守卫的"不合规"分支在类型面上不可达，留着只会让覆盖率假性缺口长存。
-    const gate = gateForRoot(entry);
-    if (gate !== undefined) {
-      out.push(gate);
+    if (!seen.has(entry.root)) {
+      seen.add(entry.root);
+      // 入参类型已约束形状（root: string、files: readonly string[]），不再逐项手搓守卫：
+      // 守卫的"不合规"分支在类型面上不可达，留着只会让覆盖率假性缺口长存。
+      const gate = gateForRoot(entry);
+      if (gate !== undefined) {
+        out.push(gate);
+      }
     }
   }
   return out;

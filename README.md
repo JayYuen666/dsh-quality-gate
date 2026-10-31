@@ -62,7 +62,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`. The package is on the public npm registry, so installation needs no credentials.
 
 - **Requires Node.js `>= 22.12`.** The artifacts use newer runtime faces such as `AbortSignal.any`.
-- **Requires a host `dsh` on the `0.2.1-rc.3` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.3`), and it **decides alone**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit, risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`.The support window rolls: this package is verified against the three most recently released host versions at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
+- **Requires a host `dsh` on the `0.2.1-rc.3` / `0.2.2-alpha.2` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.3`), and it **decides alone**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit, risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against the three most recently released host versions at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **The runtime dependency `@jayyuen66/dsh-plugin-shared` must already be on the same registry**, otherwise the whole set 404s.
 - **`typescript` is a real `dependencies` entry**: the fallback entry for the `tsc` gate — the project's own install wins, then the copy shipped with this package; no network action at runtime, never an `npx` auto-download.
 - **`zod` is also a real `dependencies` entry**: the edit-ledger projection state and the settings card's value/draft faces use it for shape validation, versioned through the umbrella catalog. The client artifact keeps `require("zod")` externalized via the host's `PLATFORM_MODULES`.
@@ -103,10 +103,10 @@ The whitelist is locked at type level (the `GateCommand` union in `lib/gate-dete
 
 | Command | When it is issued |
 | --- | --- |
-| `pnpm check` | The root has both `pnpm-workspace.yaml` and `package.json`, and the root scripts declare a non-empty `check`. Otherwise it falls back to the next candidate |
+| `pnpm check` | The root has both `pnpm-workspace.yaml` and `package.json`, and the root scripts declare a non-empty `check`. A workspace root without `check` gets no gate at all — it does not fall back to `tsc` (see below) |
 | `cargo check` | The root has a `Cargo.toml` |
 | `ruff check .` | The root has a `ruff.toml`, or a `pyproject.toml` with a `[tool.ruff]` section. A bare `pyproject.toml` does not count — it is Python metadata, not a ruff opt-in |
-| `tsc --noEmit` | The root has both `package.json` and `tsconfig.json`; without `tsconfig.json` it is not a TS project |
+| `tsc --noEmit` | A **non-workspace** root with both `package.json` and `tsconfig.json`; without `tsconfig.json` it is not a TS project. A workspace root does not qualify: its tsconfig is usually solution-style (`files: []` + `references`), and `tsc --noEmit` checks no subproject and exits 0 |
 
 - `tsc` is only a logical name in the command: the entry is resolved at runtime — the project's own `typescript` first, then the copy shipped with this package, finally `tsc` on PATH (reported as not-run by the "tool unavailable" exit); never an `npx` auto-download.
 - Root detection: from each edited file, up to `maxRootDepth` (default 10) levels to the nearest manifest root; a package that is **itself** a workspace root yielding `pnpm check` keeps its own root (a change in one package must not fan out into the whole umbrella workspace), and otherwise a monorepo package is upgraded to the workspace root holding `pnpm-workspace.yaml` — but only when that root **yields a gate**; otherwise the package keeps its own root (an outer workspace without a `check` script must not swallow the package's `tsc`/`ruff` gate).
@@ -147,9 +147,9 @@ Settings persist in the host's settings file under the dsh data directory; the c
 | --- | --- |
 | Zero outbound by default | `memoryFeedback` off plus an empty URL are a double lock — with either empty nothing is pushed and the credential store is not even queried |
 | What leaves the machine | When enabled, only the command, the project root and the full error text (single-lined, untruncated) — sent to **your own** gateway |
-| URL and credential safety | Credentials go to `https` or loopback addresses only (`localhost`, `127.0.0.0/8`, IPv6 loopback); plain `http` to a non-loopback host is refused as unconfigured, with the reason stated. A base URL that does not parse as a legal `http(s)` URL counts as unconfigured too |
+| URL and credential safety | Credentials go to `https` or loopback addresses only (`127.0.0.0/8`, IPv6 loopback, `localhost`); `localhost` depends on the local hosts/DNS and is a deliberate fail-open — if hosts points elsewhere, credentials go there. Plain `http` to a non-loopback host is refused as unconfigured, with the reason stated. A base URL that does not parse as a legal `http(s)` URL counts as unconfigured too; URLs with userinfo are rejected |
 | The key | The value lives in the host credential service (a credentials file under `$DSH_HOME`); settings store only the ref name, and a ref name that is not a valid POSIX variable name counts as unconfigured |
-| Failure handling | Push failures only warn, at most once per load, and never block the turn |
+| Failure handling | Push failures only warn and never block the turn: configuration/unsafe-URL downgrades are reported once per load; HTTP non-2xx, timeouts and delivery errors are logged on every failure (deduplicating them would hide a persistent fault) |
 | Disk reads | Manifest presence, the root `package.json` scripts, `pyproject.toml` section headers, the head of a spilled truncated file; no file writes, no telemetry |
 | Memory | Session ledgers (edit accounting / injection quota / event cursors) live in process memory and are cleared when the plugin unloads |
 
@@ -157,7 +157,7 @@ Settings persist in the host's settings file under the dsh data directory; the c
 
 - **The whitelist has exactly four commands and cannot be extended via settings.** Roots checked by other tools (`go test`, `mypy`, `eslint`, …) get no gate.
 - **Only successful edits count**, and only writes through `edit` / `write` / `str_replace_editor` (`view` is read-only). Files outside the extension whitelist (md/txt/images/`.sh`) are not counted — none of the gate commands can validate them, and a `.sh` would only drag the root resolution somewhere else and produce a false failure.
-- **Out-of-process subagents (ACP / claude-code / codex) emit no dsh events**, so they are outside the gate by construction; in-process subagents are skipped and their edits are verified by the parent session's next turn.
+- **Out-of-process subagents (ACP / claude-code / codex) emit no dsh events**, so they are outside the gate by construction; in-process subagents are skipped too, and their edits land in their own session ledger rather than the parent's — there is currently no guarantee that the parent turn verifies them (they can be missed).
 - **Never talks over the user**: no injection when the inbox has pending items, the turn signal is aborted, or the plugin is unloading. Plan mode is not exempt — a planning turn that touched code is gated the same way.
 - **When evidence is truncated with no spill file, the first error may already be gone**; the text says the evidence is incomplete instead of pretending otherwise.
 - **When the sandbox policy cannot be resolved, no gate runs at all** (injected as not-run); it never falls back to the deployment-level policy — that would run the gate outside the sandbox, get it denied, and produce a false repair instruction.
@@ -166,12 +166,12 @@ Settings persist in the host's settings file under the dsh data directory; the c
 
 | Question | Answer |
 | --- | --- |
-| Why did my pnpm project not run `pnpm check`? | Its root `package.json` declares no non-empty `check` script — a deliberate trade: a false failure costs more than a missed check |
+| Why did my pnpm project not run `pnpm check`? | Its root must have both `pnpm-workspace.yaml` and `package.json`, with a non-empty `check` script in root scripts. Without `pnpm-workspace.yaml` the next candidate applies (a non-workspace root may reach `tsc`/`ruff`/`cargo`); a workspace root without `check` gets no gate at all (a solution-style tsconfig would make `tsc` permanently green). Deliberate trade: a false failure costs more than a missed check |
 | The gate said "could not run" — is my code broken? | No. Sandbox policy denial, a runner that will not start, a timeout, a cancellation, an exhausted budget, and exit 126/127 **whose stderr names the gate command itself** (tool not installed) all land here. The injected text explicitly says **do not change code because of it**, and it is reported separately as `gate-not-run`. A 126/127 raised *inside* your own `check` script is a code failure and is reported as such |
 | Can it loop forever? | Once the quota is spent it injects one user-visible release note, stops auto-repair, and only counts again after a fully clean pass |
 | Stop it temporarily? | Turn off `enabled` on the card, or run `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate` |
 | Which `tsc` is used? | The project's own install first, then the `typescript` shipped with this package, and PATH only as the last resort — never an `npx` download |
-| What about code edited by subagents? | In-process subagents are covered by the parent session's next turn; out-of-process ones emit no dsh events, so they are outside the gate by construction |
+| What about code edited by subagents? | In-process subagents are skipped as well, and their edits land in their own session ledger rather than the parent's — there is currently no guarantee that the parent turn verifies them (they can be missed); out-of-process subagents emit no dsh events, so they are outside the gate by construction |
 
 ## <img src="https://api.iconify.design/lucide/wrench.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Development
 
@@ -180,7 +180,7 @@ pnpm install
 pnpm run check   # typecheck (three tsconfigs) → lint → client build → host build → tests (with coverage) → tarball inspection → format
 ```
 
-- Coverage is measured over `host.ts` and `lib/**` only, with all four thresholds at 100%. `src/` is not untested: `test/client-card.test.ts` drives the card wiring and both locale dictionaries headlessly (`ui-messages.ts` is fully executed), but most of `client-entry.ts` is the render surface, which needs a DOM harness this package deliberately omits (`react-dom`/`jsdom` are not pulled in). Counting all of `src/` would turn the thresholds into a permanent red, so they are pinned to the surface that is fully verified.
+- Coverage is measured over `host.ts`, `lib/**` and `src/ui-messages.ts`, with all four thresholds at 100%. The dictionary is plain data driven headlessly by `test/client-card.test.ts`, so counting it keeps the threshold on the part that is fully verified; `client-entry.ts` is excluded because most of it is the render surface, which needs a DOM harness this package deliberately omits (`react-dom`/`jsdom` are not pulled in). Counting it would turn the thresholds into a permanent red.
 - `test/publish-manifest.test.ts` enforces the publishing shape: entry points resolve, no `@deepseek-ai/*` under `dependencies`, no dates or local paths in the artifacts, with comments and documents scanned the same way. `test/dist-size.test.ts` guards the byte budget of both artifacts; `check:pack` inspects a real `pnpm pack` tarball.
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License

@@ -10,6 +10,18 @@ import { schemaCoverageProblems } from "./schema-coverage.ts";
 
 /** 构建产物相对本用例文件的位置（多条产物钉测都读它）。 */
 const CLIENT_BUNDLE_REL = "../client.js";
+/** 卡片入口源码相对本用例文件的位置（契约面断言都读它）。 */
+const CLIENT_ENTRY_REL = "../src/client-entry.ts";
+
+/** 读取 client.js 产物正文；缺失时点名文件失败，而不是让各用例各自抛裸 ENOENT。 */
+function readBundle(): string {
+  const clientPath = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
+  assert.ok(
+    existsSync(clientPath),
+    `client.js 未产出：${clientPath}（先跑 node build-client.mjs）`,
+  );
+  return readFileSync(clientPath, "utf8");
+}
 
 // 三条跨包共用的门禁（产物新鲜度 / 卡片字段覆盖 / 槽位 key 漂移针）：helper 交回**问题清单**，
 // 断言写在本文件的用例体内。helper 自己调 it() 的旧写法等于把「声明用例」这段 setup 放到
@@ -47,34 +59,71 @@ describe("quality-gate 产物门禁（helper 交回问题清单，断言写在�
 });
 
 describe("quality-gate client 构建", () => {
+  it('zod 必须外部化：产物经 require("zod") 取宿主模块表那份，而不是内联第二份', () => {
+    const text = readBundle();
+    assert.match(text, /require\("zod"\)/u, "zod 应作为宿主模块被 require");
+    assert.doesNotMatch(
+      text,
+      /class ZodError/u,
+      "产物里出现 zod 内部实现（class ZodError）说明 zod 被内联，页面会有两份 zod 身份",
+    );
+  });
+
   it("client.js 已产出且含卡片文案", () => {
-    const clientPath = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
-    assert.ok(existsSync(clientPath));
-    const text = readFileSync(clientPath, "utf8");
+    const text = readBundle();
     assert.ok(text.includes("quality-gate"));
     assert.ok(text.includes("质量门禁"));
     // i18n：两份语言的字典都要打进产物（缺 en 就是切语言后卡片空字）。
-    assert.ok(text.includes("turn-end quality gate"), "en 字典必须随包产出");
+    assert.ok(text.includes("No unsaved changes"), "en 字典必须随包产出");
   });
 
   it("卡片 props 契约正确：读 useCard（框架把注入 hooks 转成 use* prop），不读会崩的 props.hooks", () => {
-    const clientPath = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
-    const text = readFileSync(clientPath, "utf8");
+    const text = readBundle();
     // 框架 InjectFace/PropsHooks（client-runner 1715-1723）：注入的 { hooks: { card } } 被映射为 props.useCard
-    assert.ok(text.includes("useCard"), "必须用 useCard 读快照");
-    assert.ok(!text.includes("props.hooks.card"), "不得读 props.hooks.card（浏览器崩溃根因）");
+    // 产物侧只钉能过压缩的形态：属性名与调用括号不随标识符改名消失。
+    assert.match(text, /\.useCard\(/u, "必须经 useCard prop 读快照");
+    // 负例必须在**源码**上判：产物里的局部标识符会被改名，按字面量 `props.hooks.card` 判是恒真断言
+    // （改写成 `const { card } = props.hooks` 也照样绿）。源码是契约面，注释行单独跳过。
+    const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
+    const code = readFileSync(src, "utf8")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n");
+    assert.match(code, /props\.useCard\(/u, "源码必须经 useCard prop 读快照");
+    assert.doesNotMatch(code, /props\.hooks/u, "源码不得直读 props.hooks（浏览器崩溃根因）");
   });
 
-  it("数字输入行随外部变更回同步（useEffect resync，不过期快照）", () => {
-    const clientPath = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
-    const text = readFileSync(clientPath, "utf8");
-    assert.ok(text.includes("useEffect"), "NumberInputRow 必须 useEffect 回同步外部值");
+  it("数字输入用 shared 的 NumberField（外部值回同步由该组件实现，渲染行为在 shared 用例里钉）", () => {
+    // 回同步（useEffect + lastEmitted）住在 @jayyuen66/dsh-plugin-shared/lib/card-ui 的
+    // NumberField，本仓只负责选对组件：source 里出现两处 createElement(NumberField
+    // （注入配额与门禁预算）才算接线成立。产物含 useEffect 只是"shared 组件被一起打包"的
+    // 旁证（minify 之后标识符不可辨），不能单独当作回同步的证据——shared 的
+    // test/card-ui.test.ts 用真实挂载与重渲染钉住它。
+    const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
+    const code = readFileSync(src, "utf8");
+    assert.match(
+      code,
+      /import \{[^}]*NumberField[^}]*\} from "@jayyuen66\/dsh-plugin-shared\/lib\/card-ui"/u,
+    );
+    assert.equal(
+      code.match(/createElement\(NumberField,/gu)?.length,
+      2,
+      "两处数字输入都走 NumberField",
+    );
+    assert.ok(readBundle().includes("useEffect"), "shared 的 card-ui 组件必须随包打进产物");
   });
 
   it("清空数字输入走 unset（不留过期值），写通道受理位与拒绝必须回到卡片 save()", () => {
-    const clientPath = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
-    const text = readFileSync(clientPath, "utf8");
-    assert.ok(text.includes("unset"), "空输入必须走 unset（恢复默认）");
+    const text = readBundle();
+    // unset 是极常见子串（注释与解构里都有），产物侧按字面判恒真；清空路径的判据落在源码上：
+    // writeTouched 对 undefined 走 unset(key)，NumberField 把空输入交回 undefined。
+    const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
+    const code = readFileSync(src, "utf8");
+    assert.match(
+      code,
+      /val === undefined \? unset\(key\) : set\(key, val\)/u,
+      "空输入必须走 unset",
+    );
     // 受理位消费（0.1.7 ConfigForm.set/unset 回 Promise<boolean>）：
     // false=宿主拒写 → saveRejected 文案且不清 touched（fail-closed，不静默丢修改）；
     // reject=传输失败 → saveFailed。inject 侧 swallow 受理位、卡片盲清 touched 都是这一面要挡的。
@@ -86,17 +135,22 @@ describe("quality-gate client 构建", () => {
     );
   });
 
-  it("卡片源码注释不提 danger-guard（归属正确），构建产物保持 useCard + 3 字段可配", () => {
-    const src = fileURLToPath(new URL("../src/client-entry.ts", import.meta.url));
+  it("卡片源码注释不提 danger-guard（归属正确），六个设置字段全部绑进卡片", () => {
+    const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const srcText = readFileSync(src, "utf8");
     assert.ok(!srcText.includes("danger-guard"), "头部注释不得残留 danger-guard 归属");
-    const built = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
-    const text = readFileSync(built, "utf8");
-    assert.ok(text.includes("useCard"), "保持 useCard 读快照");
-    assert.ok(
-      text.includes("maxInjectsPerTurn") && text.includes("gateBudgetMs"),
-      "保持 3 字段可配",
-    );
+    assert.ok(readBundle().includes("useCard"), "保持 useCard 读快照");
+    // 字段清单与 host Config 的 volatile 面一一对应：少绑一个，设置卡上就有一项永远改不动。
+    for (const field of [
+      "enabled",
+      "maxInjectsPerTurn",
+      "gateBudgetMs",
+      "memoryFeedback",
+      "memoryGatewayUrl",
+      "memoryGatewayKeyRef",
+    ]) {
+      assert.ok(srcText.includes(`field: "${field}"`), `${field} 必须绑进卡片`);
+    }
   });
 });
 
@@ -112,12 +166,30 @@ const ARTIFACT_FILE = "artifact.js";
  * @param extra - 该类型需要的其余字段
  * @returns 可交给 singleEntryChunk 的输出项
  */
+type OutputItem =
+  | {
+      type: "chunk";
+      fileName: string;
+      code: string;
+      isEntry?: boolean;
+      moduleIds?: readonly string[];
+    }
+  | { type: "asset"; fileName: string };
+
 function outputItem(
-  type: string,
+  type: "chunk" | "asset",
   fileName: string,
   extra: Partial<{ isEntry: boolean; code: string }> = {},
-): { type: string; fileName: string } & Partial<{ isEntry: boolean; code: string }> {
-  return { type, fileName, ...extra };
+): OutputItem {
+  if (type === "asset") {
+    return { type, fileName };
+  }
+  return {
+    type,
+    fileName,
+    code: extra.code ?? "",
+    ...(extra.isEntry === undefined ? {} : { isEntry: extra.isEntry }),
+  };
 }
 
 describe("单文件产物的输出守卫", () => {

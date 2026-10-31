@@ -37,6 +37,7 @@ import {
 } from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
+import { isCredentialSafeUrl } from "../lib/credential-url.ts";
 
 const NS: LocaleNs = "quality-gate";
 
@@ -116,17 +117,30 @@ export const CARD_NUMBER_SCHEMAS = {
   gateBudgetMs: GATE_BUDGET_MS_VALUE,
 } as const;
 
+/** 版本可移植的闭区间整数判：宿主平台冻结的 zod（实测 4.4.3）没有 `.validate`
+ *  （4.6 才回到 classic 面），判据用 `boundsOf` 折出的边界自持，不押 zod 的方法面——
+ *  否则单仓测试（catalog 4.6.7）全绿、真宿主里槽位崩溃、设置表单静默消失。 */
+function inBounds(
+  bounds: { readonly min?: number; readonly max?: number },
+  value: number,
+): boolean {
+  return (
+    Number.isInteger(value) &&
+    (bounds.min ?? Number.NEGATIVE_INFINITY) <= value &&
+    value <= (bounds.max ?? Number.POSITIVE_INFINITY)
+  );
+}
+
 /** 可选整数：越界/小数/非有限值折成 undefined，只丢那一格而不是整份快照。
- *  `.validate()` 只回答合法性、不建 ZodError，失败路径比 `.safeParse().success` 短。
  *  不引 `z.compile`：编译器给客户端 bundle 增约 28 KB，且 CSP 环境会拒绝 `new Function`；
  *  卡片每帧只解析一枚快照对象，收益抵不上这两条代价。 */
 const MAX_INJECTS_SCHEMA = z.preprocess(
-  (value) => (typeof value === "number" && MAX_INJECTS_VALUE.validate(value) ? value : undefined),
+  (value) => (typeof value === "number" && inBounds(MAX_INJECTS_BOUNDS, value) ? value : undefined),
   MAX_INJECTS_VALUE.optional(),
 );
 const GATE_BUDGET_MS_SCHEMA = z.preprocess(
   (value) =>
-    typeof value === "number" && GATE_BUDGET_MS_VALUE.validate(value) ? value : undefined,
+    typeof value === "number" && inBounds(GATE_BUDGET_MS_BOUNDS, value) ? value : undefined,
   GATE_BUDGET_MS_VALUE.optional(),
 );
 
@@ -141,18 +155,21 @@ const optionalString = z.preprocess(
   z.string().optional(),
 );
 
-/** 网关地址是 HTTP(S) URL；空串与坏文本折成未设置。本地回环/端口由 `z.url` 放行。 */
-const HTTP_URL_SCHEMA = z.url({ protocol: /^https?$/u });
-const optionalHttpUrl = z.preprocess((value: unknown): string | undefined => {
-  let text: string | undefined;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed !== "") {
-      text = trimmed;
+/** 网关地址：必须是 http(s)，且与宿主运行期同一份判据——不能带 userinfo，远端只能 https，
+ *  明文 http 只允许本机回环。空串与坏文本折成未设置。 */
+const optionalHttpUrl = z.preprocess(
+  (value: unknown): string | undefined => {
+    let text: string | undefined;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed !== "") {
+        text = trimmed;
+      }
     }
-  }
-  return text;
-}, HTTP_URL_SCHEMA.optional());
+    return text;
+  },
+  z.string().refine(isCredentialSafeUrl, { error: "credential-unsafe-url" }).optional(),
+);
 const CARD_VALUES = z.object({
   enabled: optionalBoolean,
   maxInjectsPerTurn: MAX_INJECTS_SCHEMA,
@@ -163,8 +180,8 @@ const CARD_VALUES = z.object({
 });
 export type CardValues = z.infer<typeof CARD_VALUES>;
 type CardField = keyof CardValues;
-/** 草稿面仍按宽 string 读：`TextField` 没有 invalid 态，URL 收口只放在快照投影上，
- *  用户输入中的半截地址不会被当场折成空串。 */
+/** 草稿面仍按宽 string 读：`TextField` 没有 invalid 态，输入中的半截地址不会被当场折成空串；
+ *  提交时由 `writeTouched` 用同一份凭据地址判据拦下，不合规的地址不落盘。 */
 const CARD_FIELD_SCHEMAS: { readonly [Field in CardField]: z.ZodType<CardValues[Field]> } = {
   enabled: optionalBoolean,
   maxInjectsPerTurn: MAX_INJECTS_SCHEMA,
@@ -174,10 +191,17 @@ const CARD_FIELD_SCHEMAS: { readonly [Field in CardField]: z.ZodType<CardValues[
   memoryGatewayKeyRef: optionalString,
 };
 
-/** 快照值投影：整份一次解析；每个字段的坏形状与越界值各自折成 undefined，其余字段照常渲染。 */
+/** 快照值投影：逐字段解析；坏形状与越界值只折掉那一格，其余字段照常渲染。
+ *  整份一次 `safeParse` 会让一个坏 URL 把 enabled 与两个数字字段一起清空。 */
 export function projectCardValues(raw: Record<string, unknown>): CardValues {
-  const parsed = CARD_VALUES.safeParse(raw);
-  return parsed.success ? parsed.data : {};
+  const out: Record<string, unknown> = {};
+  for (const [field, schema] of Object.entries(CARD_VALUES.shape)) {
+    const parsed = schema.safeParse(raw[field]);
+    if (parsed.success) {
+      out[field] = parsed.data;
+    }
+  }
+  return out;
 }
 
 /** save() 落到表单上需要的全部依赖：写通道（含 0.1.7 受理位）+ 本回合的 touched 快照 +
@@ -200,6 +224,10 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+/** 凭据引用名形状：与 @deepseek-ai/dsh-credentials 的 REF_PATTERN 同式。客户端不引该包的
+ *  值导出（那是宿主侧凭据服务面），所以这里按同一正则复判；两处失配时宿主运行期仍会拒绝。 */
+const CREDENTIAL_REF_PATTERN = /^[A-Za-z_]\w*$/u;
+
 /**
  * 逐键 await 写入并**消费受理位**（0.1.7 的 set/unset 回 Promise<boolean>：
  * true=宿主受理；false=拒绝或写入被跳过（官方语义："refuses stale revisions"；
@@ -215,6 +243,28 @@ async function writeTouched(channels: SaveChannels): Promise<void> {
   try {
     for (const key of keys) {
       const val = touched[key];
+      // 卡片侧与宿主运行期同一份判据：不拦的话会写进 settings.yaml，卡片显示已保存，
+      // 而 resolveFeedbackTarget 运行期判不安全后静默不投递。
+      if (
+        key === "memoryGatewayUrl" &&
+        typeof val === "string" &&
+        val.trim() !== "" &&
+        !isCredentialSafeUrl(val.trim())
+      ) {
+        setBusy(false);
+        setSaveError(t("invalidGatewayUrl"));
+        return;
+      }
+      if (
+        key === "memoryGatewayKeyRef" &&
+        typeof val === "string" &&
+        val.trim() !== "" &&
+        !CREDENTIAL_REF_PATTERN.test(val.trim())
+      ) {
+        setBusy(false);
+        setSaveError(t("invalidKeyRef"));
+        return;
+      }
       // 有意串行（非 Promise.all）：首个被拒（false/reject）即停——后面的字段
       // 不再写，touched 保留全部未落盘修改，避免"一半已写一半没写"的模糊态。
       // oxlint-disable-next-line no-await-in-loop -- 压掉本行 await 的"改 Promise.all 并行"判据：串行逐键写是宿主契约（宿主的受理位），并行批会在首个拒写后继续落后续键，造出半写状态；按规则建议改写必然弱化 fail-closed 语义。

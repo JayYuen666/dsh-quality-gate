@@ -10,7 +10,7 @@
 // 第二组门禁扫注释：日期与轮次编号写下时有用，读的人只会困惑，且没有任何读者能从中重建
 // 当时的上下文。只扫注释行与文档；测试夹具里的日期（modifiedAfter 之类的边界值）是数据，
 // 角色文档里的日期是内容，两者都不在禁面内。
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -100,11 +100,18 @@ function shapeOf(entry: string): PatternShape {
     return {
       kind: "glob",
       dir: entry.slice(0, star).replace(/\/$/u, ""),
-      extension: entry.slice(dot),
+      // 点号只在通配符之后（`dir/*.md`）才是后缀过滤；`dist/*` 没有点号，
+      // 取 lastIndexOf 会得到 "*"，用它过滤则一条也匹配不到（覆盖断言误红）。
+      extension: dot > star ? entry.slice(dot) : "",
     };
   }
   if (!entry.includes(".")) {
-    return { kind: "glob", dir: entry, extension: "" };
+    // 无点号条目可能是目录（`docs`）也可能是无扩展名的文件（`LICENSE`）：
+    // 一律当目录会把 readdir 打到文件上（ENOTDIR）。
+    const full = path.join(pkgDir, entry);
+    return existsSync(full) && statSync(full).isDirectory()
+      ? { kind: "glob", dir: entry, extension: "" }
+      : { kind: "exact", file: entry };
   }
   return { kind: "exact", file: entry };
 }
@@ -127,19 +134,32 @@ async function expand(shape: PatternShape): Promise<string[]> {
 }
 
 /**
- * 递归收集一条 `exports` 值里的具体目标文件。通配条目（值含 `*`）没有可验证的固定文件。
+ * 递归收集一条 `exports` 值里的目标。通配条目（值含 `*`）保留模式本身，由调用方展开成
+ * “至少有一枚随包文件命中”再判——返回空数组会让通配出口完全不被覆盖断言看见。
  *
  * @param value - `exports` 里某一键的值（字符串或条件对象）
- * @returns 该条目要求存在的包内路径
+ * @returns 该条目要求存在的包内路径（通配条目保留模式）
  */
 function filesOf(value: unknown): string[] {
   if (typeof value === "string") {
-    return value.includes("*") ? [] : [value];
+    return [value];
   }
   if (typeof value === "object" && value !== null) {
     return Object.values(value as Record<string, unknown>).flatMap((nested) => filesOf(nested));
   }
   return [];
+}
+
+/**
+ * `exports` 通配目标 → 匹配随包文件名的正则：`*` 展开为任意字符（含 `/`，与发布器语义一致），
+ * 其余字符按字面量转义。
+ *
+ * @param pattern - 去掉 `./` 前缀后的通配目标
+ * @returns 用于匹配实际随包文件名的正则
+ */
+function wildcardPattern(pattern: string): RegExp {
+  const escaped = pattern.split("*").map((part) => part.replaceAll(/[^\w./-]/gu, String.raw`\$&`));
+  return new RegExp(`^${escaped.join(".*")}$`, "u");
 }
 
 /** 入口目标的相对形态（去掉 `./` 前缀）。 */
@@ -217,19 +237,41 @@ async function collectSources(dir: string, prefix: string): Promise<string[]> {
   return groups.flat();
 }
 
+/** 代码面里可能是注释或字面量的片段：块注释、行注释、三种引号的字面量（含转义）。
+ *  一次扫完全文，按"块注释 → 行注释 → 字符串"的优先序取；字符串整体被收进来，所以
+ *  `"http://127.0.0.1"` 里的双斜杠不是注释起点，而 `const x = 1; // 2026-10-30` 的行尾
+ *  注释会被收成一条。文档（`.md`）与 YAML 不走这里，见 commentLines 的分支。
+ */
+const COMMENT_TOKEN =
+  /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/gu;
+
 /**
- * 取一段文本里属于注释或文档的行。文档（`.md`）整体算；代码只取注释行，免得把字符串
- * 字面量里的数据（日期夹具、示例路径）误判成注释噪音。
+ * 取一段文本里属于注释或文档的内容。文档（`.md`）整体算；YAML 只认行首 `#`（值里的 `#`
+ * 是数据）；代码只取**真正的注释内容**——行尾的双斜杠注释、行内与跨行的块注释都算，字符串与
+ * 模板字面量里的同形片段（`"http://127.0.0.1"`）不算。只认"行首即注释符"会把
+ * `const x = 1; // 2026-10-30` 这种行尾注释漏过去，日期照样随包发布而门禁全绿。
  *
  * @param file - 相对包根的文件名，用于决定判定口径
  * @param text - 文件全文
- * @returns 参与门禁的行
+ * @returns 参与门禁的注释/文档行
  */
 function commentLines(file: string, text: string): string[] {
   if (file.endsWith(".md")) {
     return text.split("\n");
   }
-  return text.split("\n").filter((line) => /^\s*(?:\/\/|\/\*|\*|#)/u.test(line));
+  if (file.endsWith(".yml") || file.endsWith(".yaml")) {
+    return text.split("\n").filter((line) => /^\s*#/u.test(line));
+  }
+  const found: string[] = [];
+  for (const match of text.matchAll(COMMENT_TOKEN)) {
+    const [token] = match;
+    if (token.startsWith("//")) {
+      found.push(token.slice(2));
+    } else if (token.startsWith("/*")) {
+      found.push(...token.slice(2, -2).split("\n"));
+    }
+  }
+  return found.filter((line) => line.trim() !== "");
 }
 
 describe("发布形态", () => {
@@ -238,10 +280,13 @@ describe("发布形态", () => {
     const targets = entryFiles(manifest);
     expect(targets.length, "入口面不该是空的").toBeGreaterThan(0);
     for (const target of targets) {
-      expect(
-        shipped.has(asRelative(target.file)),
-        `${target.label} 指向 ${target.file}，但它不在 files 覆盖范围内`,
-      ).toBe(true);
+      const relative = asRelative(target.file);
+      // 通配出口没有固定文件名：要求至少一枚随包文件命中，否则“新增通配出口指向的文件”
+      // 可以绕过 files 覆盖断言（package.json 的 `./locale/*.json` 就是这一档）。
+      const covered = relative.includes("*")
+        ? [...shipped].some((name) => wildcardPattern(relative).test(name))
+        : shipped.has(relative);
+      expect(covered, `${target.label} 指向 ${target.file}，但它不在 files 覆盖范围内`).toBe(true);
     }
   });
 
@@ -323,15 +368,34 @@ async function readArtifacts(): Promise<readonly { file: string; text: string }[
 }
 
 /**
+ * 由宿主运行时提供的冻结模块（宿主的 PLATFORM_MODULES 表）：卡片产物只留 `require("react")`，
+ * 运行期由宿主进程给同一份实例。它们不算"漏声明"——写进 dependencies 反而会让消费方
+ * profile 物化出第二份 react、产生两枚模块身份（与 @deepseek-ai/* 物化同一类坑）。
+ */
+const HOST_PROVIDED_MODULES = new Set(["react"]);
+
+/**
  * 产物文本里引用的裸说明符。
+ *
+ * 入口形态不止 `from "x"`：`require("x")`、`import("x")`、单引号与模板字面量都合法，只认
+ * 双引号 from/import 会让另外那些写法**一个都收不到**，于是"产物引用了未声明的包"这条断言
+ * 对着空数组恒绿。这里把三种引导词与两种引号都收进来。
+ *
  * @param text - 产物全文
  * @returns 去掉 node: 内建与相对路径后的说明符
  */
 function bareSpecifiers(text: string): string[] {
   const out: string[] = [];
-  for (const match of text.matchAll(/(?:from|import)\s*\(?\s*"(?<spec>[^"]+)"/gu)) {
+  for (const match of text.matchAll(
+    /(?:from|import|require)\s*\(?\s*(?<quote>["'])(?<spec>[^"']+)\k<quote>/gu,
+  )) {
     const specifier = match.groups?.["spec"] ?? "";
-    if (specifier !== "" && !specifier.startsWith("node:") && !specifier.startsWith(".")) {
+    if (
+      specifier !== "" &&
+      !specifier.startsWith("node:") &&
+      !specifier.startsWith(".") &&
+      !HOST_PROVIDED_MODULES.has(specifier)
+    ) {
       out.push(specifier);
     }
   }
@@ -404,7 +468,9 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
     // 「哪个包钉成了什么」，比逐条抛错更好读。
     const ranged = Object.entries(manifest.devDependencies ?? {}).filter(
-      ([name, range]) => name.startsWith(DSH_PREFIX) && !/^\d+\.\d+\.\d+-/u.test(range),
+      ([name, range]) =>
+        name.startsWith(DSH_PREFIX) &&
+        !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(range),
     );
     expect(ranged, "这些 dsh-* 开发依赖没有精确钉住版本").toStrictEqual([]);
   });
@@ -483,5 +549,31 @@ describe("注释与文档没有内部指涉", () => {
         }
       }
     }
+  });
+});
+
+describe("注释扫描器自身", () => {
+  const nl = "\n";
+
+  it("行尾双斜杠注释参与门禁：日期写在行尾也要被看见", () => {
+    const date = "2026-10-30";
+    const sample = `const value = 1; // ${date}${nl}const other = 2;`;
+    expect(commentLines("probe.ts", sample)).toStrictEqual([` ${date}`]);
+  });
+
+  it("字符串字面量里的双斜杠不是注释起点", () => {
+    const sample = `const url = "http://127.0.0.1:8420";${nl}const next = 1; // real-comment`;
+    expect(commentLines("probe.ts", sample)).toStrictEqual([" real-comment"]);
+  });
+
+  it("正则字面量里的引号不影响行尾注释识别", () => {
+    const quotes = "\u0022\u0027\u0060";
+    const sample = `const re = /[${quotes}]/u;${nl}const after = 1; // trailing-comment`;
+    expect(commentLines("probe.ts", sample)).toStrictEqual([" trailing-comment"]);
+  });
+
+  it("行内块注释参与门禁，跨行块注释按行拆开", () => {
+    const sample = ["const a = 1; /* first */", "/* second", " third */", "const b = 2;"].join(nl);
+    expect(commentLines("probe.ts", sample)).toStrictEqual([" first ", " second", " third "]);
   });
 });

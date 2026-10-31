@@ -7,8 +7,12 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { hostSchemaFields } from "./schema-coverage.ts";
+import { hostSchemaFields, schemaCoverageProblems } from "./schema-coverage.ts";
 
 /** 覆盖「同一行」「换行」两种字段写法 + 行内注释 + 值里带括号。 */
 const FIXTURE_HOST = `import { Schema } from "@deepseek-ai/cordis";
@@ -54,6 +58,24 @@ const B = Schema.object({ y: Schema.string() });`;
     assert.match(problems[0] ?? "", /没有恰好一处叫 Config/u);
   });
 
+  it("候选唯一但名称不是 Config 时交回问题，而不是猜一个", () => {
+    // 唯一候选不等于设置面：别的 `Schema.object` 赋值（子 schema/默认值）也会命中。
+    // 静默采纳会把别的对象的键当成卡片字段全集，门禁以错误字段面判定覆盖。
+    const { fields, problems } = hostSchemaFields(
+      `const Tool = Schema.object({ x: Schema.string() });\n`,
+    );
+    assert.deepEqual(fields, []);
+    assert.equal(problems.length, 1);
+    assert.match(problems[0] ?? "", /没有恰好一处叫 Config/u);
+  });
+
+  it("schema.object 的第一参不是对象字面量时交回问题，而不是空表", () => {
+    const { fields, problems } = hostSchemaFields("export const Config = Schema.object(Base);\n");
+    assert.deepEqual(fields, []);
+    assert.equal(problems.length, 1);
+    assert.match(problems[0] ?? "", /第一参不是对象字面量/u);
+  });
+
   it("找不到 Schema.object 赋值时交回问题，而不是空表", () => {
     const { fields, problems } = hostSchemaFields("const x = 1;\n");
     assert.deepEqual(fields, []);
@@ -73,5 +95,171 @@ const B = Schema.object({ y: Schema.string() });`;
 });`;
     const { fields } = hostSchemaFields(templated);
     assert.deepEqual(fields, ["alpha", "beta"]);
+  });
+
+  it("块注释与字符串里的左花括号不参与计数（否则对象块延后收尾、字段静默丢失）", () => {
+    const escaped = `export const Config = Schema.object({
+  alpha: Schema.string().default("a{").volatile(),
+  /* } */
+  beta: Schema.string().volatile(),
+  gamma: Schema.natural().default(1),
+});`;
+    const { fields, problems } = hostSchemaFields(escaped);
+    assert.deepEqual(problems, []);
+    assert.deepEqual(fields, ["alpha", "beta", "gamma"]);
+  });
+
+  it("正则字面量里的引号与括号不参与计数（否则其后字段被静默吞掉）", () => {
+    // 两个已知坏形态：正则里的 " 会被 skipString 当成字符串起点、正则里的 } 会让对象块提前收尾。
+    // 两种的表现都是"后一个字段少读"，而少读字段恰是本门禁的假绿形态，所以必须钉住。
+    const regexed = `export const Config = Schema.object({
+  alpha: Schema.string().default(/["}]/u.source),
+  beta: Schema.boolean(),
+  gamma: Schema.string().default(/\\}/u.source),
+});`;
+    const { fields, problems } = hostSchemaFields(regexed);
+    assert.deepEqual(problems, []);
+    assert.deepEqual(fields, ["alpha", "beta", "gamma"]);
+  });
+
+  it("除号不被当成正则起点（前一个实义字符是数字/标识符/右括号时）", () => {
+    const division = `export const Config = Schema.object({
+  alpha: Schema.natural().default(6 / 2),
+  beta: Schema.natural().default((3) / 1),
+  gamma: Schema.boolean(),
+});`;
+    const { fields, problems } = hostSchemaFields(division);
+    assert.deepEqual(problems, []);
+    assert.deepEqual(fields, ["alpha", "beta", "gamma"]);
+  });
+
+  it("解析器抛错时 schemaCoverageProblems 交回一条问题，而不是把堆栈甩给调用方", async () => {
+    // 契约分工：hostSchemaFields 对畸形源码宁可抛（不交半截字段），门禁入口负责把异常
+    // 转成可读问题。用临时包根造一份不可解析的 host.ts，跑真正的入口函数。
+    const dir = await mkdtemp(path.join(tmpdir(), "schema-coverage-"));
+    try {
+      await writeFile(path.join(dir, "package.json"), '{"name": "fixture-pkg"}', "utf8");
+      await writeFile(
+        path.join(dir, "host.ts"),
+        "export const Config = Schema.object({\n  alpha: Schema.string(),\n",
+        "utf8",
+      );
+      const problems = schemaCoverageProblems(
+        pathToFileURL(path.join(dir, "test", "gate.test.ts")).href,
+      );
+      assert.equal(problems.length, 1);
+      assert.match(problems[0] ?? "", /fixture-pkg/u);
+      assert.match(problems[0] ?? "", /设置字段面解析失败/u);
+      assert.match(problems[0] ?? "", /没有配对的闭合括号/u);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** 最小包根：host.ts 有 alpha/beta 两个设置字段，src/card.ts 只绑定 alpha。 */
+async function makeExemptFixture(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), "schema-exempt-"));
+  await writeFile(path.join(dir, "package.json"), '{"name":"fixture-exempt"}', "utf8");
+  await writeFile(
+    path.join(dir, "host.ts"),
+    "export const Config = Schema.object({\n  alpha: Schema.string(),\n  beta: Schema.string(),\n});\n",
+    "utf8",
+  );
+  await mkdir(path.join(dir, "src"));
+  await writeFile(path.join(dir, "src", "card.ts"), 'field: "alpha"\n', "utf8");
+  return dir;
+}
+
+/** 在夹具包根上跑门禁入口。 */
+async function checkExemptFixture(
+  dir: string,
+  allowUnbound?: { field: string; reason: string }[],
+): Promise<string[]> {
+  return schemaCoverageProblems(
+    pathToFileURL(path.join(dir, "test", "gate.test.ts")).href,
+    allowUnbound === undefined ? {} : { allowUnbound },
+  );
+}
+
+describe("schema-coverage：allowUnbound 校验", () => {
+  it("未绑定字段没豁免 → 点名为「卡片未暴露」", async () => {
+    const dir = await makeExemptFixture();
+    try {
+      const problems = await checkExemptFixture(dir);
+      assert.equal(problems.length, 1);
+      assert.match(problems[0] ?? "", /beta/u);
+      assert.match(problems[0] ?? "", /卡片未暴露/u);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("带理由的豁免 → 通过", async () => {
+    const dir = await makeExemptFixture();
+    try {
+      assert.deepEqual(
+        await checkExemptFixture(dir, [{ field: "beta", reason: "仅部署侧使用，卡片无入口" }]),
+        [],
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("豁免指向 host 里不存在的字段 → 挂名豁免当场红", async () => {
+    const dir = await makeExemptFixture();
+    try {
+      const problems = await checkExemptFixture(dir, [
+        { field: "beta", reason: "仅部署侧使用" },
+        { field: "gamma", reason: "拼写错误的字段" },
+      ]);
+      assert.equal(problems.length, 1, "未知豁免只报一条，不是被当成已豁免");
+      assert.match(problems[0] ?? "", /不存在的字段/u);
+      assert.match(problems[0] ?? "", /gamma/u);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("同一字段重复豁免 → 点名重复声明（Map 也不许静默合并）", async () => {
+    const dir = await makeExemptFixture();
+    try {
+      const problems = await checkExemptFixture(dir, [
+        { field: "beta", reason: "第一条理由" },
+        { field: "beta", reason: "第二条理由" },
+      ]);
+      assert.equal(problems.length, 1);
+      assert.match(problems[0] ?? "", /重复声明/u);
+      assert.match(problems[0] ?? "", /beta/u);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("豁免已绑定的字段 → 报「已过时」", async () => {
+    const dir = await makeExemptFixture();
+    try {
+      // beta 仍然带理由豁免，否则「未暴露」也会各占一条——这里只留「已过时」这一条判据。
+      const problems = await checkExemptFixture(dir, [
+        { field: "alpha", reason: "已经不用的理由" },
+        { field: "beta", reason: "仅部署侧使用" },
+      ]);
+      assert.equal(problems.length, 1);
+      assert.match(problems[0] ?? "", /已过时/u);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("豁免没有理由 → 等于无门禁，当场红", async () => {
+    const dir = await makeExemptFixture();
+    try {
+      const problems = await checkExemptFixture(dir, [{ field: "beta", reason: "   " }]);
+      assert.equal(problems.length, 1);
+      assert.match(problems[0] ?? "", /缺少 reason/u);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
