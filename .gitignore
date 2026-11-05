@@ -1,4 +1,7 @@
 node_modules/
+# pack-check.mjs 的临时打包目录：目的地用相对路径是为了绕开 cmd /c 的引号问题（见那
+# 一段注释），进程被强杀时这里会留残骸，所以要在看门人面之前先忽略掉。
+/.pack-tmp*/
 # 构建产物：只由根目录 build-client.mjs / build-host.mjs 产出（package.json 的
 # main/exports/files 也都指向根级），所以按仓库根锚定，别让嵌套同名文件被一起忽略。
 /client.js

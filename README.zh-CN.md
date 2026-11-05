@@ -11,8 +11,8 @@
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-quality-gate?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -61,8 +61,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
-- **要求 Node.js `>= 22.12`。** 产物用到 `AbortSignal.any` 这类较新的运行面。
-- **要求宿主 `dsh` 在 `0.2.1-rc.3` / `0.2.2-alpha.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.3`），它**单独决定**兼容性；预发布版本参与范围比较，`0.3.0` 及以后要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 24.9`。** 产物用到 `AbortSignal.any` 这类较新的运行面。
+- **要求宿主 `dsh` 在 `0.2.1-rc.5` 或 `0.2.2-alpha.3` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`），它**单独决定**兼容性；预发布版本参与范围比较，`0.3.0` 及以后要走显式担责的授权 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须已在同一 registry 上**，否则整组 404。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行期无网络动作，从不走 `npx` 的自动下载。
 - **`zod` 也是真实的 `dependencies`**：编辑台账投影状态与设置卡的值面/草稿面用它校验形状；版本走伞根 catalog。client 产物按宿主 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
@@ -93,7 +93,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，唯一的注册行是 `- id: quality-gate`、`name` 为裸包名（宿主只对裸包名条目扫 `dsh.client`）；`dsh plugin --profile web add/remove` 维护该行。
+- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面是**两条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件）与 `- id: quality-gate`、`name` 为裸包名（宿主只对裸包名条目扫 `dsh.client`）；`dsh plugin --profile web add/remove` 维护这两行。
 - Host 半硬依赖只有 `settings`（`default.inject = ["settings"]`）；优先级是 设置卡运行时值 > 行 `config:` > schema 内置默认。
 - Client 半（`dsh.client.platform = web`、`immediately: true`）往插件管理页的 `plugins.bundle.config` 槽注入一张卡。两枚标识刻意不同源：槽位 key 是 **bundle 包名** `@jayyuen66/dsh-quality-gate`，设置命名空间与 `configForms.get()` 用的是**裸条目 id** `quality-gate`——写混了卡片哪都不渲染。
 - 卡的保存是显式两段式：改动先留在本地暂存（状态条提示），点「保存」才逐键**串行**写入并消费 `Promise<boolean>` 受理位——首个 `false` 即停手、显示 `saveRejected` 并保留未落盘的改动；写入 reject 显示 `saveFailed`。保存期间输入框仍可编辑，期间产生的新改动保留在待保存面里，不会被这次保存顺带抹掉；「撤销」丢弃暂存。清空一个输入框 = unset，恢复该字段的 schema 默认。
@@ -158,7 +158,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
 - **白名单只有四条命令，不能经设置扩展。** 用别的检查器（`go test`、`mypy`、`eslint`…）的根得不到门禁。
-- **只记成功编辑**，且只认 `edit` / `write` / `str_replace_editor` 的写入（`view` 只读不算）。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计——没有一条门禁命令能校验它们，`.sh` 只会把根解析到别处跑出假失败。
+- **只记成功编辑**，且只认 `edit` / `write` / `str_replace_editor` / `apply_patch` 的写入（`view` 只读不算）。多文件 `apply_patch` 按每个操作目标分别记账，move 的源与目的都算。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计——没有一条门禁命令能校验它们，`.sh` 只会把根解析到别处跑出假失败。
 - **out-of-process 子代理（ACP / claude-code / codex）不发 dsh 事件**，天然不在门禁面内；in-process 子代理的回合也跳过门禁，且其编辑落在各自会话的台账，不进入父会话的编辑台账——当前不保证被父会话核验（可能漏检）。
 - **不抢话**：inbox 已有待处理消息、回合信号已取消或插件已卸载时不注入。plan mode 不豁免——规划回合改了代码同样收口。
 - **证据被截断且没有落盘文件时，首个错误可能已随截断丢弃**；文案如实说明证据不完整，不假装完整。
@@ -179,7 +179,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 ```sh
 pnpm install
-pnpm run check   # typecheck（三个 tsconfig）→ lint → client 构建 → host 构建 → 测试（含覆盖率）→ tarball 体检 → 格式
+pnpm run check   # typecheck（四个 tsconfig）→ lint → client 构建 → host 构建 → 测试（含覆盖率）→ tarball 体检 → 格式
 ```
 
 - 覆盖率统计 `host.ts`、`lib/**` 与 `src/ui-messages.ts`，四项阈值 100%。字典是纯数据、`test/client-card.test.ts` 无头就能跑满，计进分母才能让阈值守住它；`client-entry.ts` 不计——它的大头是渲染面，要 DOM 基座才能测，本包刻意不引 `react-dom` 与 `jsdom`，整体计进来会让阈值变成常红。

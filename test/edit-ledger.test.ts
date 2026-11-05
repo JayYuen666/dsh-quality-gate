@@ -99,6 +99,35 @@ describe("编辑台账投影", () => {
     );
   });
 
+  it("apply_patch 逐文件成行；失败结果否定同 callId 的全部行", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: a.ts",
+      "+a",
+      "*** Update File: b.ts",
+      "*** Move to: c.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** Delete File: d.ts",
+      "*** End Patch",
+    ].join("\n");
+    const state = fold([
+      callEvent(1, "apply_patch", { input: patch }, "c1"),
+      resultEvent(2, "c1", true),
+    ]);
+    assert.deepEqual(
+      state.edits.map((entry) => [entry.name, entry.path, entry.failed]),
+      [
+        ["apply_patch", "a.ts", true],
+        ["apply_patch", "b.ts", true],
+        ["apply_patch", "c.ts", true],
+        ["apply_patch", "d.ts", true],
+      ],
+      "四个文件效应都入账；失败结果不能只否定最后一行",
+    );
+  });
+
   it("失败结果只否定同 callId 的那一条；未匹配的结果不动台账", () => {
     const state = fold([
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),

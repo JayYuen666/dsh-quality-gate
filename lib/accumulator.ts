@@ -16,12 +16,18 @@ import path from "node:path";
 const GATED_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|py|json|ya?ml|toml)$/iu;
 
 /** 编辑类工具名。str_replace_editor 是 dsh-base 并存的另一套编辑器
- *  （host 侧只对 create/str_replace/insert 记账，view 只读不入这里）。
+ *  （host 侧只对 create/str_replace/insert 记账，view 只读不入这里）；apply_patch 是
+ *  多文件补丁，路径由 `editPathsOf` 逐枚展开，`note` 仍按单个路径去重记账。
  *
  *  这是**唯一真源**：host 侧的同名判定（isEditTool）也用这一份，两边各写一份时新增
  *  编辑器工具只改一侧就会静默分叉——只改 host 则累加器静默丢弃记账，只改这里则 host
  *  根本不会调用 note。 */
-export const EDIT_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "str_replace_editor"]);
+export const EDIT_TOOLS: ReadonlySet<string> = new Set([
+  "edit",
+  "write",
+  "str_replace_editor",
+  "apply_patch",
+]);
 
 const DEFAULT_MAX_FILES = 500;
 

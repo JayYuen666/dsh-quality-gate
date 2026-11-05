@@ -2,7 +2,11 @@
 import { z } from "zod";
 import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
-import { editPathOf, toolEventRowsOf } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import {
+  editPathOf,
+  editPathsOf,
+  toolEventRowsOf,
+} from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { EDIT_TOOLS } from "./accumulator.ts";
 
 export const EDIT_LEDGER_KEY = "quality-gate.edit-ledger";
@@ -43,20 +47,25 @@ const editLedgerSchema = z.object({
   edits: z.array(entrySchema),
 }) as unknown as LedgerStateSchema;
 
-/** 把最近一条同 callId 的记录标记为失败（tool/result 的 isError）；找不到就不动。 */
+/** 同 callId 的失败回填。普通编辑器沿用“只否定最近一条”的既有语义；`apply_patch`
+ *  一条调用可产生多行，只否定最后一行会让其余路径在失败后仍被当成成功编辑，故全部否定。 */
 function failEntry(state: readonly EditLedgerEntry[], callId: string): readonly EditLedgerEntry[] {
-  let index = -1;
-  for (let at = state.length - 1; at >= 0; at -= 1) {
+  const matches: number[] = [];
+  for (let at = 0; at < state.length; at += 1) {
     if (state[at]?.callId === callId) {
-      index = at;
-      break;
+      matches.push(at);
     }
   }
-  // 已标记失败时原样返回：重复投递同一 result 不该持续产生新状态对象。
-  if (index < 0 || state[index]?.failed === true) {
+  if (matches.length === 0) {
     return state;
   }
-  return state.map((entry, at) => (at === index ? { ...entry, failed: true } : entry));
+  const markAll = matches.some((at) => state[at]?.name === "apply_patch");
+  const selected = markAll ? matches : matches.slice(-1);
+  // 已标记失败时原样返回：重复投递同一 result 不该持续产生新状态对象。
+  if (selected.every((at) => state[at]?.failed === true)) {
+    return state;
+  }
+  return state.map((entry, at) => (selected.includes(at) ? { ...entry, failed: true } : entry));
 }
 
 export const editLedgerProjection = {
@@ -69,19 +78,21 @@ export const editLedgerProjection = {
     const { call, result } = toolEventRowsOf(event, event.seq);
     let { edits } = state;
     if (call !== undefined && EDIT_TOOLS.has(call.name) && !call.badArguments) {
-      const target = editPathOf(call);
-      if (target.kind === "write") {
-        edits = [
-          ...edits,
-          {
-            seq: call.seq,
-            callId: call.callId ?? "",
-            name: call.name,
-            path: target.path ?? "",
-            failed: false,
-          },
-        ];
+      let targets: readonly string[];
+      if (call.name === "apply_patch") {
+        targets = editPathsOf(call);
+      } else {
+        const target = editPathOf(call);
+        targets = target.kind === "write" ? [target.path ?? ""] : [];
       }
+      const additions = targets.map((filePath) => ({
+        seq: call.seq,
+        callId: call.callId ?? "",
+        name: call.name,
+        path: filePath,
+        failed: false,
+      }));
+      edits = [...edits, ...additions];
     }
     if (
       result !== undefined &&

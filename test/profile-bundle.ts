@@ -81,7 +81,8 @@ interface InsertedEntry {
 }
 
 /**
- * cordis.patch.yml 里 `insert:` 列表的条目（本仓 patch 只有这一支形态：每条一个 id + 一个 name）。
+ * cordis.patch.yml 里 `insert:` 列表的条目（本仓 patch 只有这一支形态：本包那条带 id + name，
+ * 供应卡片组件的 shared 那条只有 name）。
  *
  * 按 YAML 缩进切块而不是"全文第一条 - id:"：本文件可以有多个 insert 条目（本族其它包
  * 复制式分发时就是这样），取第一条会把别人的 id 当成本包的，而"两个标识不同值"那道针

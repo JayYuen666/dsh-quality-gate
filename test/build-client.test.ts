@@ -94,23 +94,26 @@ describe("quality-gate client 构建", () => {
   });
 
   it("数字输入用 shared 的 NumberField（外部值回同步由该组件实现，渲染行为在 shared 用例里钉）", () => {
-    // 回同步（useEffect + lastEmitted）住在 @jayyuen66/dsh-plugin-shared/lib/card-ui 的
-    // NumberField，本仓只负责选对组件：source 里出现两处 createElement(NumberField
-    // （注入配额与门禁预算）才算接线成立。产物含 useEffect 只是"shared 组件被一起打包"的
-    // 旁证（minify 之后标识符不可辨），不能单独当作回同步的证据——shared 的
-    // test/card-ui.test.ts 用真实挂载与重渲染钉住它。
+    // 回同步（useEffect + lastEmitted）住在共享客户端行的 NumberField，本仓只负责选对组件：
+    // source 里出现两处 createElement(NumberField（注入配额与门禁预算）才算接线成立。
+    // 共享组件现在由模块图的 `@jayyuen66/dsh-plugin-shared/client` 行提供，不再内联进本包；
+    // 产物必须保留这条外部请求，内联则会让每份卡片各带一份组件实现。
     const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const code = readFileSync(src, "utf8");
     assert.match(
       code,
-      /import \{[^}]*NumberField[^}]*\} from "@jayyuen66\/dsh-plugin-shared\/lib\/card-ui"/u,
+      /import \{[^}]*NumberField[^}]*\} from "@jayyuen66\/dsh-plugin-shared\/client"/u,
     );
     assert.equal(
       code.match(/createElement\(NumberField,/gu)?.length,
       2,
       "两处数字输入都走 NumberField",
     );
-    assert.ok(readBundle().includes("useEffect"), "shared 的 card-ui 组件必须随包打进产物");
+    assert.match(
+      readBundle(),
+      /dsh-plugin-shared\/client/u,
+      "共享卡片组件必须作为外部行请求，不能内联进本包",
+    );
   });
 
   it("清空数字输入走 unset（不留过期值），写通道受理位与拒绝必须回到卡片 save()", () => {

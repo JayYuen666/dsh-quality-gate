@@ -3,6 +3,7 @@
 // gate-detect：项目根 → 质量门禁命令的自动探测（ECC stop-format-typecheck 的按项目分组思想）。
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { EDIT_TOOLS, EditAccumulator } from "../lib/accumulator.ts";
 import { detectGate } from "../lib/gate-detect.ts";
 import type { ProjectRoot } from "../lib/gate-detect.ts";
@@ -20,8 +21,19 @@ const CARGO_MANIFEST = "Cargo.toml";
 const PYPROJECT = "pyproject.toml";
 /** 根目录下的 TypeScript 配置名（tsc 门禁的必要条件）。 */
 const TSCONFIG = "tsconfig.json";
+/**
+ * 记账用例的夹具路径按当前平台的分隔符构造。
+ *
+ * `EditAccumulator.note()` 会 `path.normalize` 入参，Windows 上写死的 `/w/a.ts` 归一成
+ * `\w\a.ts`——把 POSIX 形写进期望值，断言就只在半边平台成立（windows 格里那六条红正是
+ * 这么来的）。两侧同源后 normalize 成为恒等变换，去重与淘汰顺序的判据不因此变弱。
+ */
+function wPath(...parts: string[]): string {
+  return path.join("/w", ...parts);
+}
+
 /** 记账用例里那个「编辑过的 TS 源码」路径。 */
-const EDITED_TS_FILE = "/w/src/a.ts";
+const EDITED_TS_FILE = wPath("src", "a.ts");
 
 describe("EditAccumulator：本回合编辑文件记账", () => {
   let acc: EditAccumulator;
@@ -30,10 +42,10 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
   });
 
   it("记 edit/write 的 file_path，drain 时去重返回并清空", () => {
-    acc.note("edit", "/w/a.ts");
-    acc.note("edit", "/w/a.ts");
-    acc.note("write", "/w/b.rs");
-    assert.deepEqual(acc.drain(), ["/w/a.ts", "/w/b.rs"]);
+    acc.note("edit", wPath("a.ts"));
+    acc.note("edit", wPath("a.ts"));
+    acc.note("write", wPath("b.rs"));
+    assert.deepEqual(acc.drain(), [wPath("a.ts"), wPath("b.rs")]);
     assert.deepEqual(acc.drain(), [], "清空后再次 drain 为空（防重复批处理）");
   });
 
@@ -45,38 +57,38 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
   });
 
   it("str_replace_editor 记账（并存编辑器不逃过门禁）", () => {
-    acc.note("str_replace_editor", "/w/a.ts");
-    acc.note("edit", "/w/b.ts");
-    assert.deepEqual(acc.drain(), ["/w/a.ts", "/w/b.ts"]);
+    acc.note("str_replace_editor", wPath("a.ts"));
+    acc.note("edit", wPath("b.ts"));
+    assert.deepEqual(acc.drain(), [wPath("a.ts"), wPath("b.ts")]);
   });
 
   it("只记代码/配置扩展名（md/txt/png 等忽略——它们不需要门禁）", () => {
     acc.note("edit", EDITED_TS_FILE);
     acc.note("edit", "/w/b.md");
     acc.note("edit", "/w/c.png");
-    acc.note("edit", "/w/d.json");
-    acc.note("edit", "/w/e.rs");
-    assert.deepEqual(acc.drain(), [EDITED_TS_FILE, "/w/d.json", "/w/e.rs"]);
+    acc.note("edit", wPath("d.json"));
+    acc.note("edit", wPath("e.rs"));
+    assert.deepEqual(acc.drain(), [EDITED_TS_FILE, wPath("d.json"), wPath("e.rs")]);
   });
 
   it("容量上限：超出淘汰最旧（防超长回合内存膨胀）", () => {
     const small = new EditAccumulator({ maxFiles: 2 });
-    small.note("edit", "/w/1.ts");
-    small.note("edit", "/w/2.ts");
-    small.note("edit", "/w/3.ts");
+    small.note("edit", wPath("1.ts"));
+    small.note("edit", wPath("2.ts"));
+    small.note("edit", wPath("3.ts"));
     const drained = small.drain();
     assert.equal(drained.length, 2);
-    assert.ok(!drained.includes("/w/1.ts"), "最旧的被淘汰");
+    assert.ok(!drained.includes(wPath("1.ts")), "最旧的被淘汰");
   });
 
   it("重复编辑要把顺序刷到最近（否则反复编辑的文件最早被淘汰）", () => {
     const small = new EditAccumulator({ maxFiles: 2 });
-    small.note("edit", "/w/1.ts");
-    small.note("edit", "/w/2.ts");
+    small.note("edit", wPath("1.ts"));
+    small.note("edit", wPath("2.ts"));
     // 再编辑一次 1.ts → 它变成最新，被淘汰的应是 2.ts
-    small.note("edit", "/w/1.ts");
-    small.note("edit", "/w/3.ts");
-    assert.deepEqual(small.drain(), ["/w/1.ts", "/w/3.ts"]);
+    small.note("edit", wPath("1.ts"));
+    small.note("edit", wPath("3.ts"));
+    assert.deepEqual(small.drain(), [wPath("1.ts"), wPath("3.ts")]);
   });
 
   it.each([
@@ -98,19 +110,24 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
 
   it("容量淘汰计数可查 droppedCount（drain 后清零，host 侧 warn 用）", () => {
     const small = new EditAccumulator({ maxFiles: 2 });
-    small.note("edit", "/w/1.ts");
-    small.note("edit", "/w/2.ts");
+    small.note("edit", wPath("1.ts"));
+    small.note("edit", wPath("2.ts"));
     assert.equal(small.droppedCount(), 0);
-    small.note("edit", "/w/3.ts");
+    small.note("edit", wPath("3.ts"));
     assert.equal(small.droppedCount(), 1);
-    assert.deepEqual(small.drain(), ["/w/2.ts", "/w/3.ts"]);
+    assert.deepEqual(small.drain(), [wPath("2.ts"), wPath("3.ts")]);
     assert.equal(small.droppedCount(), 0, "drain 后计数清零");
   });
 
   it("accumulator 的 EDIT_TOOLS 是 host 与累加器共用的唯一真源", () => {
     // host.ts 的 isEditTool 从同一集合取值：两边各写一份时新增编辑器工具只改一侧就会
     // 静默分叉（只改 host 则累加器丢记账，只改累加器则 host 根本不调用 note）。
-    assert.deepEqual([...EDIT_TOOLS].toSorted(), ["edit", "str_replace_editor", "write"]);
+    assert.deepEqual([...EDIT_TOOLS].toSorted(), [
+      "apply_patch",
+      "edit",
+      "str_replace_editor",
+      "write",
+    ]);
   });
 });
 
@@ -339,7 +356,7 @@ describe("accumulator：.sh 不记账（四种门禁命令都无法校验 shell 
   it("其余代码/配置扩展名仍照常记账", () => {
     const acc = new EditAccumulator();
     for (const filePath of [
-      "/w/a.ts",
+      wPath("a.ts"),
       "/w/b.tsx",
       "/w/c.mjs",
       "/w/d.rs",

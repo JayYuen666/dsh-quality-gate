@@ -185,7 +185,9 @@ interface MockCtx {
     describe: () => DescribeRow[];
   };
   /** ctx.inject(deps, fn)：cordis 立即用带齐依赖的子上下文回调一次。 */
-  inject: (deps: readonly string[], attach: (child: unknown) => void) => void;
+  inject: (deps: readonly string[], attach: (child: unknown) => unknown) => void;
+  /** 每条注入的 deps 与回调返回值：宿主靠返回值做子 fiber 的 setup 屏障，所以投影那一条必须是 thenable。 */
+  injections: { deps: readonly string[]; result: unknown }[];
   /** 可选服务读取——镜像 cordis ctx.get：命中返回实例，未注册返回 undefined（不抛错）。 */
   get: (name: string) => unknown;
   /**
@@ -286,9 +288,10 @@ function createMockCtx(): MockCtx {
       // cordis 只在依赖齐备时激活子 fiber；替身按 ctx.get 判在位（settings 永远在，
       // sessionProjections 只有在用例显式装配时才注入）。
       if (deps.every((dep) => ctx.get(dep) !== undefined)) {
-        attach(ctx);
+        ctx.injections.push({ deps, result: attach(ctx) });
       }
     },
+    injections: [],
     on(event, handler) {
       // 记录本次 fire 的 agent.session，好让观察面替身交回该夹具自己挂的那份日志——
       // **只有测试侧代码**去读夹具上的 snapshotEvents 闭包（生产侧已不读它）。
@@ -478,6 +481,27 @@ describe("quality-gate host 接线", () => {
       },
     };
   }
+
+  it("apply_patch 的多文件目标会记入本回合并触发门禁", async () => {
+    ctx.gateExitCode = 1;
+    const patch = [
+      "*** Begin Patch",
+      `*** Update File: ${path.join(project, "a.ts")}`,
+      "@@",
+      "-old",
+      "+new",
+      "*** End Patch",
+    ].join("\n");
+    const events = [
+      {
+        type: "tool/call",
+        data: { name: "apply_patch", arguments: JSON.stringify({ input: patch }) },
+      },
+    ];
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentWith(1, events), turn: 1 });
+    await sleep(20);
+    assert.ok(ctx.shellCommands.length > 0, "apply_patch 的目标文件应触发项目门禁");
+  });
 
   it("隐式注册：只声明页面策略 configure({ auto: false })，owner 是本插件 fiber", () => {
     // 0.1.7 没有 settings.register：命名空间 = profile 条目 id，插件侧只剩页面策略。
@@ -2047,6 +2071,52 @@ describe("编辑台账投影读取路径", () => {
   });
 
   afterEach(recycleScratchRoots);
+
+  it("注入回调把注册交回成 thenable，且兑现即就位读口", async () => {
+    // 钉两件事：①回调返回的是这次挂载的 promise（`void` 写法回潮时这一格红）；②await 它
+    // 就足够——不靠额外等待拍数，读口随回调兑现一起装上（交回一个空 promise 时第二格红）。
+    let released = 0;
+    ctx.sessionProjections = {
+      register: () =>
+        Promise.resolve({
+          stateOf: (): unknown => ({
+            edits: [
+              { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: false },
+              { seq: 1, callId: "c2", name: "edit", path: `${project}/b.ts`, failed: false },
+            ],
+          }),
+          dispose: (): void => {
+            released += 1;
+          },
+        }),
+      stateOf: (): unknown => undefined,
+    };
+    const original = ctx.sessionQuery;
+    assert.ok(original !== undefined, "默认夹具应带观察面");
+    observed = 0;
+    ctx.sessionQuery = {
+      observeSession: (id: string) => {
+        observed += 1;
+        return original.observeSession(id);
+      },
+    };
+    applyGate(ctx, ctx.value);
+    const setup = ctx.injections.find((entry) => entry.deps.includes("sessionProjections"))?.result;
+    assert.ok(
+      ctx.injections.some((entry) => entry.deps.includes("sessionProjections")),
+      "夹具应记下投影那一条注入，否则下面的判据在测空集",
+    );
+    assert.equal(
+      typeof (setup as { then?: unknown } | undefined)?.then,
+      "function",
+      "注入回调必须把这次挂载交回给宿主——cordis 按子 fiber 的 setup 屏障等待它",
+    );
+    await setup;
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
+    await sleep(20);
+    assert.equal(observed, 0, "兑现后本回合走投影读口，不扫整日志");
+    assert.equal(released, 0, "没卸载就不该释放这次注册");
+  });
 
   it("投影在位：读台账、不碰整日志观察面，编辑照常触发门禁", async () => {
     // 第二条没有路径（空串）→ 记进台账但不会被解析成项目根；门禁仍由有路径的那条触发。

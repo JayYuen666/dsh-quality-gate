@@ -104,8 +104,9 @@ import type { GateFeedbackInput } from "./lib/feedback-content.ts";
 import {
   scanToolEvents,
   editPathOf as sharedEditPathOf,
+  editPathsOf as sharedEditPathsOf,
 } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
-import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import type { SessionEvent, ToolCallRecord } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 // lesson bus 收口：lesson-loop 的 report 已异步落库（返回 Promise），只包一层同步
 // try/catch 抓不到 rejection——失败既被静默吞掉又给宿主进程留一枚未处理拒绝。
 // 同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
@@ -446,8 +447,13 @@ interface HostCtx {
   /** 具名 logger 服务（官方 `ctx.logger(name)`）。缺席（异常 ctx/测试桩件）→
    *  回退 console——回退是**兼容路径**不是常态路径，测试两条都覆盖。 */
   logger?: (name: string) => Log;
-  /** 隐式注册后本包不再持有 scope，只经注入的子上下文挂页面策略（宿主 dsh-client-locale 同款）。 */
-  inject: (deps: readonly string[], callback: (child: InjectedCtx) => void) => unknown;
+  /** 隐式注册后本包不再持有 scope，只经注入的子上下文挂页面策略（宿主 dsh-client-locale 同款）。
+   *  回调返回域跟官方 `Plugin.Function`（返回 `any`）而不是 `void`：cordis 把返回值当子 fiber 的
+   *  setup 屏障，投影那一条要把注册的 promise 交回去。 */
+  inject: (
+    deps: readonly string[],
+    callback: (child: InjectedCtx) => void | Promise<void>,
+  ) => unknown;
   /** 本插件 fiber：`configure` 的 owner 必须显式传它（缺省是 settings 服务自己的 fiber）。
    *  类型就是官方 `SettingsForms.configure(presentation, owner?: Fiber)`（installed
    *  `@deepseek-ai/dsh-settings/lib/types/index.d.ts:80`）的那位 `Fiber`——旧代码写成 `unknown`
@@ -1077,28 +1083,14 @@ async function resolveEventWindow(
 }
 
 interface EditRecord {
+  callId: string | undefined;
   name: string;
   path: string | undefined;
 }
 
 interface PendingEdits {
-  pending: Map<string, EditRecord>;
-  noCallId: EditRecord[];
+  records: EditRecord[];
   failed: Set<string>;
-}
-
-/** 按有无 callId 分流：无 callId 直记（异常/旧形状/测试 mock 保守直记防漏），有则按 callId 关联。 */
-function storeEdit(
-  callId: string | undefined,
-  record: EditRecord,
-  pending: Map<string, EditRecord>,
-  noCallId: EditRecord[],
-): void {
-  if (callId === undefined) {
-    noCallId.push(record);
-  } else {
-    pending.set(callId, record);
-  }
 }
 
 /**
@@ -1112,18 +1104,26 @@ function storeEdit(
  *   - str_replace_editor view（只读）→ 跳过（原 EDIT_SKIP）；
  *   - 其余编辑调用按 callId 关联，tool/result isError 回填 failed。
  */
+/** 一次编辑调用的全部记账路径。apply_patch 逐操作（含 move 目的）展开；普通编辑器只
+ *  有写动词成行，view 是只读证据；写但没给路径时保留一条 undefined（历史语义）。 */
+function editPathsFor(call: ToolCallRecord): readonly (string | undefined)[] {
+  if (call.name === "apply_patch") {
+    return sharedEditPathsOf(call);
+  }
+  const target = sharedEditPathOf(call);
+  return target.kind === "write" ? [target.path] : [];
+}
+
 function collectEdits(events: readonly SessionEvent[]): PendingEdits {
-  const pending = new Map<string, EditRecord>();
-  const noCallId: EditRecord[] = [];
+  const records: EditRecord[] = [];
   const failed = new Set<string>();
   const { calls, results } = scanToolEvents(events);
   for (const call of calls) {
     // read-view（str_replace_editor view）只读不算编辑；坏参（JSON 非法）与
     // 非编辑工具同样不落地——与名义实现的 EDIT_SKIP 分支严格等价。
     if (isEditTool(call.name) && !call.badArguments) {
-      const target = sharedEditPathOf(call);
-      if (target.kind === "write") {
-        storeEdit(call.callId, { name: call.name, path: target.path }, pending, noCallId);
+      for (const filePath of editPathsFor(call)) {
+        records.push({ callId: call.callId, name: call.name, path: filePath });
       }
     }
   }
@@ -1132,7 +1132,7 @@ function collectEdits(events: readonly SessionEvent[]): PendingEdits {
       failed.add(result.callId);
     }
   }
-  return { pending, noCallId, failed };
+  return { records, failed };
 }
 
 /** 单文件向上找最近的清单根；hitDepthLimit 标记是否因超深而无根（供可观测 warn）。
@@ -1725,12 +1725,9 @@ async function readEditedFiles(
   // 游标 Map 越界时按插入序淘汰最旧的其他会话（不整体清空 → 避免全量重读历史）。
   pruneToSessionBudget(rt.lastSeqBySession, sessionId);
   const edits = collectEdits(window.events);
-  for (const entry of edits.noCallId) {
-    note(entry.name, entry.path);
-  }
-  for (const [callId, entry] of edits.pending) {
-    // 被拒/失败的编辑不记账（authoritative）
-    if (!edits.failed.has(callId)) {
+  for (const entry of edits.records) {
+    // 被拒/失败的编辑不记账（authoritative）；无 callId 的条目没有关联键，保守直记。
+    if (entry.callId === undefined || !edits.failed.has(entry.callId)) {
       note(entry.name, entry.path);
     }
   }
@@ -2128,8 +2125,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   // 编辑台账投影是**可选**增强：注册表不在位（精简组合、旧宿主）时整条回退全量扫描，
   // 门禁面不受影响。注册失败只警告一次：投影读不到是性能问题，不是判据缺失。
-  svc.inject(["sessionProjections"], (child) => {
-    void mountEditLedgerReader(child.sessionProjections, {
+  // 回调把注册那一段的 promise 交回出去：cordis 把插件回调的返回值当作子 fiber 的 setup
+  // 屏障来等待，所以读口在本条注入就绪前就已就位。就地 `void` 掉等于让注册在后台跑完。
+  svc.inject(["sessionProjections"], (child) =>
+    mountEditLedgerReader(child.sessionProjections, {
       publish: (reader) => {
         rt.editLedger.value = reader;
       },
@@ -2139,8 +2138,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
           `[quality-gate] sessionProjections register failed, falling back to full scan: ${String(error)}`,
         );
       },
-    });
-  });
+    }),
+  );
 
   svc.on("agent/turn-stopping", async (payload) => {
     // 门禁是增强能力，绝不能因自身异常杀死整轮对话：turn-stopping 走

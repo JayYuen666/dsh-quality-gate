@@ -24,7 +24,6 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // 正合本意——载入官方契约就该同时*用上*它。
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import { z } from "zod";
-import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
 import {
   CARD_UI_CSS,
   CardForm,
@@ -33,8 +32,9 @@ import {
   Section,
   TextField,
   ToggleField,
+  diffTouched,
   splitHint,
-} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
+} from "@jayyuen66/dsh-plugin-shared/client";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 import { isCredentialSafeUrl } from "../lib/credential-url.ts";

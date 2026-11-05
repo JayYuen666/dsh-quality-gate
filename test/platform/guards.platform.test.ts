@@ -3,6 +3,7 @@
 // 三平台 CI 都真跑。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import { detectGate } from "../../lib/gate-detect.ts";
 import { shellArg } from "../../host.ts";
@@ -38,7 +39,9 @@ describe("编辑路径归一的平台语义", () => {
     const acc = new EditAccumulator();
     acc.note("edit", "src/a.ts");
     acc.note("edit", "scripts/run.sh");
-    assert.deepEqual(acc.drain(), ["src/a.ts"]);
+    // 期望值按当前平台的分隔符写：note() 会 path.normalize，Windows 上 `src/a.ts` 记成
+    // `src\` 形。这一条判的是「正斜杠入参照样进账、.sh 不进」，不是那串字节长什么样。
+    assert.deepEqual(acc.drain(), [path.join("src", "a.ts")]);
   });
 });
 

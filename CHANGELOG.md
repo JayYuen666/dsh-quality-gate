@@ -1,7 +1,37 @@
 # Changelog
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html)。最新版本在最上。
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html)。最新版本在最上。这里的偏离是刻意的：
+版本标题不写发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需
+增设标准六类之外的小节（如 `Tests`、`Not changed, deliberately`）。
+
+## 0.1.6
+
+`apply_patch` 进入编辑台账与回合累加器的记账面；宿主开发基线抬到 `0.2.2-rc.1`，支持窗口从单条 `^0.2.1-rc.3` 改成两条宿主线的并集，`engines.node` 地板抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。默认配置与检查白名单不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
+
+### Added
+
+- **`apply_patch` 记账**：编辑台账与回合累加器按补丁的每个操作目标记账（含 move 的源与目的）；失败结果否定同 callId 的全部行。补丁解析复用 shared 的官方 `dsh-fs-patch` 封装。
+
+### Changed
+
+- **shared 抬到 0.2.4**：catalog、生成物与 lockfile 随之同步；shared 新增的普通依赖 `@deepseek-ai/dsh-fs-patch` 由 shared 自己安装，本包不重复声明。
+- **宿主开发基线**：`devDependencies` 的 dsh 家族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`、cordis 插件组两枚抬到 `1.1.0`、`@deepseek-ai/schemastery` 抬到 `3.19.0`；根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
+- **支持窗口写成并集**：`engines.dsh` 与 `@deepseek-ai/dsh`、`@deepseek-ai/dsh-credentials` 两枚 peer 由 `^0.2.1-rc.3` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐。caret 的预发布比较只吃自己那条元组，单线会把另一条线上的预发布判成不满足，而装载门（`app-boot` 带 `includePrerelease` 读 `engines.dsh`）没有这个差别——把窗口写窄只会让发布契约与安装器各说一套。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`，取值取自宿主自己的地板。
+- **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 的运行期值导入（`diffTouched` 与卡片组件）并入 `./client`，`package.json` 新增 `dsh.bundle.client.external`，`build-client.mjs` 的外置清单同步——组件由模块图供给，不再在每个卡片产物里内联一份；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行（写 id 会在插件页多出一个可关闭的组件，关掉后设置卡整块不激活）。
+- **CI 的 pnpm 与 node 取值**：`ci.yml` 与 `publish.yml` 的 workflow 级 `env.PNPM_VERSION` 固定为 `12.11.2`（与伞根 `packageManager` 同源，浮动主版本 `12` 会让门禁与发布在补丁版之间漂移）；`node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，`node-version` 由 `24` 改为 `24.9`。
+
+### Fixed
+
+- **注入回调不再丢掉 setup 屏障**（`host.ts`）：`inject` 的回调返回类型由 `void` 放宽为 `void | Promise<void>`，把注册那一条 promise 交回 cordis——它把回调返回值当子 fiber 的 setup 屏障，返回 `void` 时页面策略那一条投影还没挂上就被判为装配完成。`test/host.test.ts` 补两条用例钉这一时序。
+- **发布物体检在 Windows 上打不出包**（`pack-check.mjs`）：`check:pack` 原先把系统临时目录的绝对路径带引号交给 ComSpec 的 `/c`，cmd 会把那对双引号连同参数一起交给 pnpm，pnpm 于是把 `"C:\Users\…\Temp\…"` 当相对路径拼到 cwd 上，报 `Failed to create directory D:\a\…\"C:\Users\…"`（os error 123）。目的地改为本包目录下一个自建的相对名（`.pack-tmp-<pid>-<rand>`）：这一段名字既无空格也无引号，参数里没有需要保护的字符，两个平台同一种写法；`.gitignore` 补 `/.pack-tmp*/` 兜住进程被强杀时的残骸。同一条路径此前只在 Windows 格暴露——那一格上一版是 1.1 秒零输出的假绿。
+- **Windows 格首次真跑出来的八条红**（`test/gate.test.ts`、`test/platform/guards.platform.test.ts`、`test/property/gate-invariants.property.test.ts`）：`EditAccumulator.note()` 会 `path.normalize` 入参，Windows 上写死的 `/w/a.ts`、`src/a.ts` 归一成 `\` 形，而期望值是 POSIX 字形——断言因此只在半边平台成立。夹具改由 `path.join` 按当前平台构造，两侧同源后 normalize 成为恒等变换，被判的三件事（去重、淘汰顺序、扩展名过滤）没有变弱。`detectGate` 的 `root` 字面量不经归一，未动。
+- **台账的同 callId 回填不再只否定最后一行**（`lib/edit-ledger.ts`）：原先按 callId 找最近一条标记失败，普通编辑器一次调用只产一行、语义不变；`apply_patch` 一次调用可产多行，只否定最后一行会让其余路径在失败后仍被当成成功编辑，改为否定同 callId 的全部行。分流的 `pending` / `noCallId` 两张表合成一张 `records`，无 callId 的异常形状仍保守直记防漏。
+- **回合累加器的编辑面补齐**（`lib/accumulator.ts`）：`EDIT_TOOLS` 加入 `apply_patch`，多文件补丁的路径由 `editPathsOf` 逐枚展开，`note` 仍按单个路径去重。
+
+### Docs
+
+- dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；`cordis.patch.yml` 的注册行由「唯一一行」改写为「两条条目」并说明 shared 那行为何不写 id（`test/profile-bundle.ts` 里同类表述同步）；开发面命令注释的 typecheck 由「三个 tsconfig」改为四个，与 `package.json` 的 `typecheck` 实跑数一致。
 
 ## 0.1.5
 
@@ -43,7 +73,7 @@
 
 ## 0.1.3
 
-这一版把判定面与构建/CI 面一起收口：ruff 不再对只写了 `pyproject.toml` 的工程发门禁，卡片保存期间的编辑不再被静默丢弃，记忆反馈的文案与来源一致，Windows 与发布链的静默降级补上判据。宿主线抬到 `0.2.1-rc.3`。
+这一版把判定面与构建/CI 面一起收口：ruff 不再对只写了 `pyproject.toml` 的工程发门禁，卡片保存期间的编辑不再被静默丢弃，记忆反馈的文案与来源一致，Windows 与发布链的静默降级补上判据。构建/CI 那一批清掉的是只在 Windows 上才会红的判据、两个构建脚本里没有任何门看得见的静默降级，以及发布链路缺的一道检查。宿主线抬到 `0.2.1-rc.3`。
 
 ### Fixed
 
@@ -54,11 +84,19 @@
 - **四个工作流里的判断面缺陷**：`ci.yml` 的 `find … -print -quit` 在零匹配时得到空串、多匹配时静默取任意一个，改为「恰好一个 tarball」并点名实际个数；`publish.yml` 的重复发布检查把包名与依赖名写死在 URL 里（改名后会查到 404 而当成首发放行），改为从 `package.json` 读，并在版本低于 registry `latest` 时告警（只告警：从旧分支发版会把 `latest` 回退，但半吊子的预发布序比较不该一票否决发布）；静态 token 的形态校验把 `exit 1` 降级为告警，OIDC 主线不该被兜底凭据的形态卡死；`scorecard.yml` 的 job 级判据用 `github.ref_name` 比默认分支名，同名 tag 上会误判，改为比完整 ref。
 - **`ci.yml` 的 `-ignore SC2016` 是全局豁免**：一行调用同时校验四份工作流，`codeql.yml` 与 `scorecard.yml` 没有 run 脚本体，却也继承了这条豁免——它们将来真写出的同类缺陷会被一起吞掉。改成按文件分两次调用。
 - **`codeql.yml` 与 `scorecard.yml` 缺并发控制与权限声明**：前者补 `actions: read`（本仓是 public，官方只在私有仓要求它；显式声明是为了可见性变化时不静默缺权限），后者补按事件名分组的 `concurrency`，让四个入口不再互相覆盖同一份 analysis 结果。
-
 - **`test/schema-coverage.ts` 的 host schema 解析器**：括号匹配不跳过字符串、模板与注释，`Schema.object(` 只取首个块，扩展名只收 `.ts`，包根靠 `testDir/..` 硬推且读盘无兜底。这些偏差都会让「宿主字段全集」偏少而门禁假绿。解析器改成字符串/注释感知、遍历全部 `Schema.object`、按前缀识别扩展名、向上找 `package.json`、读不到时判红；新增 `test/schema-coverage.test.ts` 钉住这一面。
 - **记忆反馈的目标面与正文收口**：网关地址必须是合法的 `http(s)` URL（半截串、非 http(s) scheme 均按「未配置」处理），凭据只发 https 或回环地址；`x-tdai-service-id` 形状不合规时回落默认服务名；命令、根与错误文本在写入记忆前折成单行，避免一条反馈被拆成多段。
 - **编辑累加器的容量契约对任意入参成立**：`maxFiles` 为 NaN、0、负数或小数时回落到默认值；同一文件被反复编辑会刷新到最近位置，避免最该检查的文件第一个被淘汰；host 与累加器共用同一份编辑工具名单。
 - **消息模板插值只认自有键**：`{constructor}` / `{toString}` 这类原型链名字不再渲染成函数源码，未提供的名字留空串。
+
+构建与 CI 面（同属本版）：
+
+- **`host.ts` 里三处用 `/` 拼子项的地方改成 `path.join`。** `findManifestRoot` 探测 `MANIFESTS`、`workspaceRootUpgrade` 探测 `pnpm-workspace.yaml`、`probeProjectRoot` 过滤 manifest 与判断 `tsconfig.json`，原先都用模板串拼出 `dir/manifest`。`dir` 是宿主给的真实路径，在 Windows 上这种混形让 `existsSync` 恒假——于是所有 manifest 都探测不到、项目根一路回落到父目录，`gate-detect` 的判据整片失效而命令照常退出 0。同一处 `declaredScriptsOf` 读 `package.json` 也改成 `path.join`。新增 `TSCONFIG_MANIFEST` 常量，避免同一个文件名在文件里出现两次。
+- **`collapseStorePaths` 的折叠原先完全静默。** 正则只认 `/` 分隔的「内容寻址 store 段」（`node_modules/` 下那层带「名@版_哈希」的目录），既没有归一反斜杠，也没有折掉前缀里的 `../`。没命中时它原样放行，于是 `client.js` 会带着「版本 + 本机 store 哈希」进公共产物，而两道新鲜度门禁比的都是同一台机器上的内存构建与磁盘文件——没有任何门能看见。现在先归一分隔符，再把可选的前缀与 store 段整段折成一层，折完仍检出 store 段就抛错停止构建。
+- **`writeArtifact` 的临时文件名只用 pid。** 同一进程里并发写两个产物会撞名、各自截断对方。临时名加上 `randomUUID()`；`catch` 里清理临时文件的 `rm` 包进内层 try/catch，清理失败不再取代并吞掉真正的写失败（Windows 上 `EBUSY` / `EPERM` 会让清理自己抛）。
+- **客户端产物的 `external` 由 `id.startsWith("react/")` 改成精确集合 `REACT_RUNTIME_MODULES`。** 外壳的模块表按精确串匹配，前缀放行会给产物留下模块表里没有的键——加载期报 `not in the module table`，整张卡片静默不渲染。集合与宿主客户端侧的 `PLATFORM_MODULES` 同源，只收宿主真给得出的四个说明符。
+- **两处注释与实现不符。** 构建脚本的头注释说「react 及其子路径都要外部化」并给了「内联子路径会出现第二份 React」的理由——那个理由不成立，`react/jsx-runtime` 内联后自身仍 `require("react")`；`ci.yml` 里「门禁没跑过就别留下产物。」那行原先挂在上传覆盖率报告上方，与它描述的步骤错位。
+- **`test/host-integrity.test.ts`、`test/host.test.ts`、`test/gateway-feedback.test.ts` 的 POSIX 假设。** 新增的 Windows 矩阵会让这些判据整片红：临时目录原先写成字面量 `/tmp/qg-shallow-…`，改成 `path.join(tmpdir(), …)`；匹配 tsc 命令的正则 `/bin\/tsc --noEmit$/u` 在 Windows 上拿到的渲染是 `'C:\…\bin\tsc' --noEmit`（带引号、反斜杠），改成 `/bin[\\/]tsc'? --noEmit$/u`；`deriveProjectKey` 的注入补上 `sep: "/"`，让它与字形的来源同源——路径字形与 `resolve` 不来自同一次调用时，`path.win32` 会把 `/tmp/x/proj` 解析成带盘符的串，字面量替换一次都不命中。
 
 ### Changed
 
@@ -68,20 +106,11 @@
 - **宿主线抬到 `0.2.1-rc.3`**：`engines.dsh`、peer/dev 依赖、overrides 与 README 徽标/正文同值。
 - **构建编排统一进 shared 的 `lib/build-*`**：三个构建脚本只剩薄配置层，产物仍落 `dist/`；CI/CodeQL/Scorecard/Dependabot 与 Windows 矩阵补齐。
 
-### Build and CI fixes
+- **`publish.yml` 补回 `pnpm run check`。** 发布由 `workflow_dispatch` 手动触发，可以从任意分支派发；CI 在 `main` 上的绿不代表被派发的那个 ref 是绿的，而发布前少这一道检查等于把「发布物能装」与「发布物正确」当成一件事。现在它在 `pnpm install --frozen-lockfile` 之后、`发布` 之前跑。
+- **`ci.yml` 的覆盖率上传取 `if-no-files-found: warn` 而不是 `error`。** 这一步在 `if: always()` 下跑，而 `coverage/` 由 vitest 产出——typecheck / lint / build 任一先红时目录根本不存在，此时判红会盖住真正的失败原因，还把后面的步骤一起中断。
+- **`ci.yml` 里新增的 Windows 矩阵与多平台并发组的形状**：组键带 `event_name`，取消只给 `push` 与 `pull_request`；gate 的检查名带 `matrix.os`；attest 拆成独立 job 并补齐 `artifact-metadata: write`；install-probe 收窄到 `contents: read`；所有 `actions/checkout` 带 `persist-credentials: false`；第三方 action 与 `actionlint` 全部钉到 commit SHA / 校验和。
 
-这一版同时清掉构建侧与 CI 侧的缺陷：一批只在 Windows 上才会红的判据、两个构建脚本里没有任何门看得见的静默降级，以及发布链路缺的一道检查。
-
-#### Fixed
-
-- **`host.ts` 里三处用 `/` 拼子项的地方改成 `path.join`。** `findManifestRoot` 探测 `MANIFESTS`、`workspaceRootUpgrade` 探测 `pnpm-workspace.yaml`、`probeProjectRoot` 过滤 manifest 与判断 `tsconfig.json`，原先都用模板串拼出 `dir/manifest`。`dir` 是宿主给的真实路径，在 Windows 上这种混形让 `existsSync` 恒假——于是所有 manifest 都探测不到、项目根一路回落到父目录，`gate-detect` 的判据整片失效而命令照常退出 0。同一处 `declaredScriptsOf` 读 `package.json` 也改成 `path.join`。新增 `TSCONFIG_MANIFEST` 常量，避免同一个文件名在文件里出现两次。
-- **`collapseStorePaths` 的折叠原先完全静默。** 正则只认 `/` 分隔的「内容寻址 store 段」（`node_modules/` 下那层带「名@版_哈希」的目录），既没有归一反斜杠，也没有折掉前缀里的 `../`。没命中时它原样放行，于是 `client.js` 会带着「版本 + 本机 store 哈希」进公共产物，而两道新鲜度门禁比的都是同一台机器上的内存构建与磁盘文件——没有任何门能看见。现在先归一分隔符，再把可选的前缀与 store 段整段折成一层，折完仍检出 store 段就抛错停止构建。
-- **`writeArtifact` 的临时文件名只用 pid。** 同一进程里并发写两个产物会撞名、各自截断对方。临时名加上 `randomUUID()`；`catch` 里清理临时文件的 `rm` 包进内层 try/catch，清理失败不再取代并吞掉真正的写失败（Windows 上 `EBUSY` / `EPERM` 会让清理自己抛）。
-- **客户端产物的 `external` 由 `id.startsWith("react/")` 改成精确集合 `REACT_RUNTIME_MODULES`。** 外壳的模块表按精确串匹配，前缀放行会给产物留下模块表里没有的键——加载期报 `not in the module table`，整张卡片静默不渲染。集合与宿主客户端侧的 `PLATFORM_MODULES` 同源，只收宿主真给得出的四个说明符。
-- **两处注释与实现不符。** 构建脚本的头注释说「react 及其子路径都要外部化」并给了「内联子路径会出现第二份 React」的理由——那个理由不成立，`react/jsx-runtime` 内联后自身仍 `require("react")`；`ci.yml` 里「门禁没跑过就别留下产物。」那行原先挂在上传覆盖率报告上方，与它描述的步骤错位。
-- **`test/host-integrity.test.ts`、`test/host.test.ts`、`test/gateway-feedback.test.ts` 的 POSIX 假设。** 新增的 Windows 矩阵会让这些判据整片红：临时目录原先写成字面量 `/tmp/qg-shallow-…`，改成 `path.join(tmpdir(), …)`；匹配 tsc 命令的正则 `/bin\/tsc --noEmit$/u` 在 Windows 上拿到的渲染是 `'C:\…\bin\tsc' --noEmit`（带引号、反斜杠），改成 `/bin[\\/]tsc'? --noEmit$/u`；`deriveProjectKey` 的注入补上 `sep: "/"`，让它与字形的来源同源——路径字形与 `resolve` 不来自同一次调用时，`path.win32` 会把 `/tmp/x/proj` 解析成带盘符的串，字面量替换一次都不命中。
-
-#### Added
+### Added
 
 - **`tsconfig.build-scripts.json` 与 `typecheck` 里的一次额外 `tsc`。** 两个构建脚本头部的 `// @ts-check` 只在编辑器里生效：它们不在任何 `tsc` program 的 `include` 里，CI 因此对这一面没有任何门。新 tsconfig 继承共享基线、打开 `allowJs` / `checkJs`、`noEmit`，只收两个构建脚本；`typecheck` 追加 `&& tsc --noEmit -p tsconfig.build-scripts.json`。变异实测：往 `build-client.mjs` 塞一行 `probe.toFixed("nope")` 会红，删掉即绿。
 - **`tsconfig.build-scripts.json` 补齐之后暴露并修掉的类型缺陷**：`isRecord` 一律改成类型谓词（`@returns {raw is Record<string, unknown>}`），`asRecord` 改成守卫分支而不是类型断言（断言会同时撞 `typescript(no-unsafe-type-assertion)` 与 `eslint(no-inline-comments)`）；`invokedDirectly()` 先取 `process.argv.at(1)` 再判 `undefined`，不再把可能不存在的值直接交给 `realpathSync`；读 `package.json` 的 `name` 用 `const nameKey = "name"` 索引——点号写法被 `noPropertyAccessFromIndexSignature` 拒绝，索引写法又被 `dot-notation` 要求改成点号，两侧只能靠一次具名取值同时满足。
@@ -89,18 +118,12 @@
 - **`test/dist-size.test.ts` 的预算改成按实测锚定**：`host.js` 70 500 B（实测 61 110 B）、`client.js` 23 500 B（实测 20 222 B），取实测上浮约 15% 再向上取整到 500 B。注释写明本仓没有 `build-types.mjs`，所以只量两项。
 - **`package.json` 的 `keywords`**，以及两份 README 各新增一节「shared 的版本下限 / Shared version floor」。
 
-#### Changed
-
-- **`publish.yml` 补回 `pnpm run check`。** 发布由 `workflow_dispatch` 手动触发，可以从任意分支派发；CI 在 `main` 上的绿不代表被派发的那个 ref 是绿的，而发布前少这一道检查等于把「发布物能装」与「发布物正确」当成一件事。现在它在 `pnpm install --frozen-lockfile` 之后、`发布` 之前跑。
-- **`ci.yml` 的覆盖率上传取 `if-no-files-found: warn` 而不是 `error`。** 这一步在 `if: always()` 下跑，而 `coverage/` 由 vitest 产出——typecheck / lint / build 任一先红时目录根本不存在，此时判红会盖住真正的失败原因，还把后面的步骤一起中断。
-- **`ci.yml` 里新增的 Windows 矩阵与多平台并发组的形状**：组键带 `event_name`，取消只给 `push` 与 `pull_request`；gate 的检查名带 `matrix.os`；attest 拆成独立 job 并补齐 `artifact-metadata: write`；install-probe 收窄到 `contents: read`；所有 `actions/checkout` 带 `persist-credentials: false`；第三方 action 与 `actionlint` 全部钉到 commit SHA / 校验和。
-
-#### Not changed, deliberately
+### Not changed, deliberately
 
 - **除 ruff 的可发条件外，四条命令的白名单与优先级、`not-run` 与 `code-failure` 的分界、注入配额、预算分摊、默认设置值与双语文案内容未变。**
 - **覆盖率阈值仍由 `@jayyuen66/dsh-plugin-shared/config/vitest.base` 单源给出（100%）**，`coverageInclude` 仍只覆盖 host 半。
 
-#### Tests
+### Tests
 
 - `pnpm run check` 通过：typecheck 三个 tsconfig、`oxlint` 0 warning / 0 error、两个 rolldown 构建、`vitest run --coverage` 四项 100%、`oxfmt --check`、`check:pack` 的 tarball 体检。
 - 新增的门禁都做过变异实测：`tsconfig.build-scripts.json` 那条塞错误即红、删掉即绿；`collapseStorePaths` 的残留检查拿含 `.pnpm` 的行喂进去会抛，四种真实形态（无前缀 / `../` 前缀 / 反斜杠 / 普通相对段）折叠结果逐个断言。

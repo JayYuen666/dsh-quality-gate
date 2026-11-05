@@ -2,6 +2,7 @@
 // （白名单四元组、假失败比漏检查更贵、URL fail-closed、单行化），不从实现派生。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 import fc from "fast-check";
 
 import { detectGate } from "../../lib/gate-detect.ts";
@@ -134,9 +135,10 @@ describe("EditAccumulator 的记账性质", () => {
     assert.equal(acc.drain().length, 0);
     acc.note("edit", "src/c.ts");
     acc.note("write", "src/d.ts");
-    assert.deepEqual(acc.drain().toSorted(), ["src/c.ts", "src/d.ts"]);
+    // 期望值按平台分隔符构造：note() 归一入参，Windows 上记的是 `src\` 形。
+    assert.deepEqual(acc.drain().toSorted(), [path.join("src", "c.ts"), path.join("src", "d.ts")]);
     for (const tool of EDIT_TOOLS) {
-      assert.ok(["edit", "write", "str_replace_editor"].includes(tool));
+      assert.ok(["edit", "write", "str_replace_editor", "apply_patch"].includes(tool));
     }
   });
 });

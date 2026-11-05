@@ -11,8 +11,8 @@
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-quality-gate"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-quality-gate?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -61,8 +61,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`. The package is on the public npm registry, so installation needs no credentials.
 
-- **Requires Node.js `>= 22.12`.** The artifacts use newer runtime faces such as `AbortSignal.any`.
-- **Requires a host `dsh` on the `0.2.1-rc.3` / `0.2.2-alpha.2` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.3`), and it **decides alone**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit, risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against the three most recently released host versions at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
+- **Requires Node.js `>= 24.9`.** The artifacts use newer runtime faces such as `AbortSignal.any`.
+- **Requires a host `dsh` on the `0.2.1-rc.5` or `0.2.2-alpha.3` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.5 || ^0.2.2-alpha.3`), and it **decides alone**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit, risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **The runtime dependency `@jayyuen66/dsh-plugin-shared` must already be on the same registry**, otherwise the whole set 404s.
 - **`typescript` is a real `dependencies` entry**: the fallback entry for the `tsc` gate — the project's own install wins, then the copy shipped with this package; no network action at runtime, never an `npx` auto-download.
 - **`zod` is also a real `dependencies` entry**: the edit-ledger projection state and the settings card's value/draft faces use it for shape validation, versioned through the umbrella catalog. The client artifact keeps `require("zod")` externalized via the host's `PLATFORM_MODULES`.
@@ -91,7 +91,7 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
-- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, whose single registration line is `- id: quality-gate` with `name` set to the bare package name (the host scans `dsh.client` only on bare-name entries); `dsh plugin --profile web add/remove` maintains that line.
+- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries **two entries**: `- name: "@jayyuen66/dsh-plugin-shared"` (the supplier of the card components, deliberately **without an `id`** so the plugin page does not list it as a switchable component) and `- id: quality-gate` with `name` set to the bare package name (the host scans `dsh.client` only on bare-name entries); `dsh plugin --profile web add/remove` maintains those lines.
 - The host half hard-depends only on `settings` (`default.inject = ["settings"]`); precedence is card runtime value > the line's `config:` > schema built-in defaults.
 - The client half (`dsh.client.platform = web`, `immediately: true`) injects a card into the `plugins.bundle.config` slot of the plugin page. Two identifiers, deliberately different sources: the slot key is the **bundle package name** `@jayyuen66/dsh-quality-gate`, while the settings namespace and `configForms.get()` use the **bare entry id** `quality-gate` — mix them up and the card never renders.
 - Saving on the card is explicitly staged: edits stay in local pending state until Save writes them **serially**, key by key, consuming the `Promise<boolean>` acceptance bit — the first `false` stops the loop, shows `saveRejected` and keeps the unwritten changes; a rejecting write shows `saveFailed`. Inputs stay editable during a save, and edits made in flight stay in the pending set instead of being wiped by it; Revert discards the pending edits. Clearing an input means unset, restoring that field's schema default.
@@ -156,7 +156,7 @@ Settings persist in the host's settings file under the dsh data directory; the c
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Known boundaries
 
 - **The whitelist has exactly four commands and cannot be extended via settings.** Roots checked by other tools (`go test`, `mypy`, `eslint`, …) get no gate.
-- **Only successful edits count**, and only writes through `edit` / `write` / `str_replace_editor` (`view` is read-only). Files outside the extension whitelist (md/txt/images/`.sh`) are not counted — none of the gate commands can validate them, and a `.sh` would only drag the root resolution somewhere else and produce a false failure.
+- **Only successful edits count**, and only writes through `edit` / `write` / `str_replace_editor` / `apply_patch` (`view` is read-only). A multi-file `apply_patch` records every operation target, including both sides of a move. Files outside the extension whitelist (md/txt/images/`.sh`) are not counted — none of the gate commands can validate them, and a `.sh` would only drag the root resolution somewhere else and produce a false failure.
 - **Out-of-process subagents (ACP / claude-code / codex) emit no dsh events**, so they are outside the gate by construction; in-process subagents are skipped too, and their edits land in their own session ledger rather than the parent's — there is currently no guarantee that the parent turn verifies them (they can be missed).
 - **Never talks over the user**: no injection when the inbox has pending items, the turn signal is aborted, or the plugin is unloading. Plan mode is not exempt — a planning turn that touched code is gated the same way.
 - **When evidence is truncated with no spill file, the first error may already be gone**; the text says the evidence is incomplete instead of pretending otherwise.
@@ -177,7 +177,7 @@ Settings persist in the host's settings file under the dsh data directory; the c
 
 ```sh
 pnpm install
-pnpm run check   # typecheck (three tsconfigs) → lint → client build → host build → tests (with coverage) → tarball inspection → format
+pnpm run check   # typecheck (four tsconfigs) → lint → client build → host build → tests (with coverage) → tarball inspection → format
 ```
 
 - Coverage is measured over `host.ts`, `lib/**` and `src/ui-messages.ts`, with all four thresholds at 100%. The dictionary is plain data driven headlessly by `test/client-card.test.ts`, so counting it keeps the threshold on the part that is fully verified; `client-entry.ts` is excluded because most of it is the render surface, which needs a DOM harness this package deliberately omits (`react-dom`/`jsdom` are not pulled in). Counting it would turn the thresholds into a permanent red.

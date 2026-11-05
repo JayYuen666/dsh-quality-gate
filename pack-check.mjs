@@ -19,9 +19,8 @@
 //   ②本地未提交的产物改动会被这次重建覆盖（产物是 gitignored 的生成物，覆盖不丢源码）。
 // 这也是它同时能查"产物过期"的原因：过期产物在 pack 时就被 rebuild 掉了。
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { builtinModules } from "node:module";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { REACT_RUNTIME_MODULES } from "./build-client.mjs";
 
@@ -308,7 +307,14 @@ function inspect(tgz) {
   checkArtifacts(tgz, shipped, checkDependencies(manifest));
 }
 
-const workDir = await mkdtemp(path.join(tmpdir(), "quality-gate-pack-"));
+// 目的地用**本包目录下的相对路径**，不用系统临时目录的绝对路径：Windows 这一支要经
+// ComSpec 的 `/c`，cmd 会把命令串里的双引号连同参数一起交给 pnpm，pnpm 于是把
+// `"C:\Users\…\Temp\…"` 当成相对路径拼到 cwd 上，报 `Failed to create directory
+// D:\a\…\"C:\Users\…"`（os error 123）。自建的这一段名字既无空格也无引号，参数里就
+// 没有需要保护的字符，两个平台同一种写法。
+const packDirName = `.pack-tmp-${String(process.pid)}-${Math.random().toString(36).slice(2, 8)}`;
+const packDir = path.join(import.meta.dirname, packDirName);
+await mkdir(packDir, { recursive: true });
 try {
   /** @type {["ignore", "ignore", "pipe"]} */
   const packStdio = ["ignore", "ignore", "pipe"];
@@ -322,23 +328,23 @@ try {
   if (process.platform === "win32") {
     // pnpm 是 .cmd 垫片，execFileSync 不按 PATHEXT 解析（CI 实测 ENOENT）。显式调 ComSpec
     // 并把整条命令作为单个参数交给 /c：不经过 shell:true 的字符串拼接路径，也避开 DEP0190。
-    // workDir 来自 mkdtemp（只含安全字符），不存在 cmd 元字符注入面。
+    // 命令串里不再出现引号——原因见上面 packDirName 的说明。
     const { ComSpec } = process.env;
     const comspec = ComSpec ?? "cmd.exe";
     execFileSync(
       comspec,
-      ["/d", "/s", "/c", `pnpm pack --pack-destination "${workDir}"`],
+      ["/d", "/s", "/c", `pnpm pack --pack-destination ${packDirName}`],
       packOptions,
     );
   } else {
-    execFileSync("pnpm", ["pack", "--pack-destination", workDir], packOptions);
+    execFileSync("pnpm", ["pack", "--pack-destination", packDirName], packOptions);
   }
-  const packed = await readdir(workDir);
+  const packed = await readdir(packDir);
   const tarballName = packed.find((name) => name.endsWith(".tgz"));
   if (tarballName === undefined) {
     note("pnpm pack 没有产出 .tgz");
   } else {
-    inspect(path.join(workDir, tarballName));
+    inspect(path.join(packDir, tarballName));
   }
 } catch (error) {
   // pack / tar / JSON.parse 任一步抛错时也走汇总面：原始栈之外还要给出 stderr，
@@ -349,7 +355,7 @@ try {
     `发布物体检执行失败：${error instanceof Error ? error.message : String(error)}${stderr === "" ? "" : `\n${stderr}`}`,
   );
 } finally {
-  await rm(workDir, { recursive: true, force: true });
+  await rm(packDir, { recursive: true, force: true });
 }
 
 process.exitCode = problems.length > 0 ? 1 : 0;
