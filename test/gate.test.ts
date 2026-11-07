@@ -1,6 +1,6 @@
 // lib/accumulator + lib/gate-detect 单元测试。
 // accumulator：tool/result 事件流里收集本回合编辑过的代码文件（ECC post-edit-accumulator 移植）。
-// gate-detect：项目根 → 质量门禁命令的自动探测（ECC stop-format-typecheck 的按项目分组思想）。
+// gate-detect：项目根 → 自动探测该跑哪条质量门禁命令（ECC stop-format-typecheck 的按项目分组思路）。
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -8,7 +8,7 @@ import { EDIT_TOOLS, EditAccumulator } from "../lib/accumulator.ts";
 import { detectGate } from "../lib/gate-detect.ts";
 import type { ProjectRoot } from "../lib/gate-detect.ts";
 
-// 夹具用名（用例内的「根目录下有哪些文件 / 编辑了哪个文件」）。本包实现侧没有导出这些
+// 夹具里用的文件名（用例里的「根目录下有哪些文件、编辑了哪个文件」）。本包实现没有导出这些
 // 名字（gate-detect 按字面量比对清单），故这里是**测试自有**的期望值常量，不是实现常量
 // 的别名——断言不会退化成同义反复。
 /** 根目录下的 npm 清单名。 */
@@ -19,23 +19,23 @@ const WORKSPACE_MANIFEST = "pnpm-workspace.yaml";
 const CARGO_MANIFEST = "Cargo.toml";
 /** 根目录下的 Python 工程元数据文件名（ruff 段的宿主）。 */
 const PYPROJECT = "pyproject.toml";
-/** 根目录下的 TypeScript 配置名（tsc 门禁的必要条件）。 */
+/** 根目录下的 TypeScript 配置名（给出 tsc 这条门禁的必要条件）。 */
 const TSCONFIG = "tsconfig.json";
 /**
- * 记账用例的夹具路径按当前平台的分隔符构造。
+ * 记录编辑那几条用例的夹具路径，按当前平台的分隔符拼出来。
  *
  * `EditAccumulator.note()` 会 `path.normalize` 入参，Windows 上写死的 `/w/a.ts` 归一成
- * `\w\a.ts`——把 POSIX 形写进期望值，断言就只在半边平台成立（windows 格里那六条红正是
- * 这么来的）。两侧同源后 normalize 成为恒等变换，去重与淘汰顺序的判据不因此变弱。
+ * `\w\a.ts`——把 POSIX 的写法放进期望值，断言就只在一半平台上成立（windows 那格里失败的六条正是
+ * 这么来的）。两侧都用同一种写法之后，normalize 就成了原样返回，去重与淘汰顺序的判据不因此变松。
  */
 function wPath(...parts: string[]): string {
   return path.join("/w", ...parts);
 }
 
-/** 记账用例里那个「编辑过的 TS 源码」路径。 */
+/** 记录编辑那几条用例里那个「编辑过的 TS 源码」路径。 */
 const EDITED_TS_FILE = wPath("src", "a.ts");
 
-describe("EditAccumulator：本回合编辑文件记账", () => {
+describe("EditAccumulator：记录本回合编辑过的文件", () => {
   let acc: EditAccumulator;
   beforeEach(() => {
     acc = new EditAccumulator();
@@ -56,13 +56,13 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
     assert.deepEqual(acc.drain(), []);
   });
 
-  it("str_replace_editor 记账（并存编辑器不逃过门禁）", () => {
+  it("str_replace_editor 会记录（几种编辑器并存时不漏记）", () => {
     acc.note("str_replace_editor", wPath("a.ts"));
     acc.note("edit", wPath("b.ts"));
     assert.deepEqual(acc.drain(), [wPath("a.ts"), wPath("b.ts")]);
   });
 
-  it("只记代码/配置扩展名（md/txt/png 等忽略——它们不需要门禁）", () => {
+  it("只记代码和配置的扩展名（md、txt、png 等忽略——它们不需要跑门禁）", () => {
     acc.note("edit", EDITED_TS_FILE);
     acc.note("edit", "/w/b.md");
     acc.note("edit", "/w/c.png");
@@ -97,8 +97,8 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
     ["负数", -1],
     ["0", 0],
     ["小数", 2.5],
-  ])("非法 maxFiles（%s）回退默认值：记账照常、不淘汰", (_label, bad) => {
-    // 归一化之前这几种入参各自出问题：NaN / Infinity 让 `size >= maxFiles` 恒假（永不淘汰、
+  ])("非法的 maxFiles（%s）改用默认值：照常记录、不淘汰", (_label, bad) => {
+    // 归一化之前这几种入参各自出问题：NaN 和 Infinity 让 `size >= maxFiles` 永远不成立（永不淘汰、
     // Set 无限增长），负数每次 note 都淘汰一项，0 让容量实际变成 1。合法值为正整数，其余按"没给"处理。
     const acc2 = new EditAccumulator({ maxFiles: bad });
     for (let i = 0; i < 10; i += 1) {
@@ -119,9 +119,9 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
     assert.equal(small.droppedCount(), 0, "drain 后计数清零");
   });
 
-  it("accumulator 的 EDIT_TOOLS 是 host 与累加器共用的唯一真源", () => {
-    // host.ts 的 isEditTool 从同一集合取值：两边各写一份时新增编辑器工具只改一侧就会
-    // 静默分叉（只改 host 则累加器丢记账，只改累加器则 host 根本不调用 note）。
+  it("accumulator 的 EDIT_TOOLS 是 host 与累加器共用的唯一来源", () => {
+    // host.ts 的 isEditTool 取的是同一个集合：两边各写一份时，新增编辑器工具只改一侧就会
+    // 悄悄不一致（只改 host 则累加器漏记，只改累加器则 host 根本不会调用 note）。
     assert.deepEqual([...EDIT_TOOLS].toSorted(), [
       "apply_patch",
       "edit",
@@ -131,7 +131,7 @@ describe("EditAccumulator：本回合编辑文件记账", () => {
   });
 });
 
-describe("gate-detect：项目门禁命令自动探测", () => {
+describe("gate-detect：自动探测项目该跑哪条门禁命令", () => {
   it("pnpm-workspace + package.json + 已声明 check 脚本 → pnpm check", () => {
     const roots: ProjectRoot[] = [
       {
@@ -163,12 +163,12 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(detectGate(roots), [{ root: "/w/dup", command: ["tsc", "--noEmit"] }]);
   });
 
-  it("只有 ruff.toml（无 pyproject）→ 同样拿到 ruff 门禁（host MANIFESTS 已登记该根标记）", () => {
+  it("只有 ruff.toml（没有 pyproject）→ 同样给出 ruff 这条门禁（host 的 MANIFESTS 已登记这个根标记）", () => {
     const roots: ProjectRoot[] = [{ root: "/w/py2", files: ["ruff.toml", "a.py"] }];
     assert.deepEqual(detectGate(roots), [{ root: "/w/py2", command: ["ruff", "check", "."] }]);
   });
 
-  it("pyproject.toml 在场但无 ruff 段 → 不发 ruff 门禁（假失败回归）", () => {
+  it("pyproject.toml 在但没有 ruff 段 → 不给 ruff 这条门禁（不再报假失败）", () => {
     // pyproject.toml 不是 ruff 的配置标记，只是 Python 工程最常见的元数据文件。
     // 只写 [project]、lint 交给 pytest-flake8 / pylint 的工程大量存在；对它们发
     // `ruff check .`，宿主 PATH 上只要有 ruff，就会拿默认规则集判一个从未声明用
@@ -179,7 +179,7 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(detectGate(roots), []);
   });
 
-  it("pyproject.toml 存在但 ruff 配置信息缺失（undefined）→ 不猜，不发 ruff 门禁", () => {
+  it("pyproject.toml 存在但 ruff 的配置信息读不到（undefined）→ 不猜，不给 ruff 这条门禁", () => {
     const roots: ProjectRoot[] = [{ root: "/w/py4", files: ["pyproject.toml", "a.py"] }];
     assert.deepEqual(detectGate(roots), []);
   });
@@ -189,17 +189,17 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(detectGate(roots), [{ root: "/w/ts", command: ["tsc", "--noEmit"] }]);
   });
 
-  it("workspace 根未声明 check 脚本时不降级到 tsc（solution-style tsconfig 会恒绿）", () => {
+  it("workspace 根没有声明 check 脚本时不降级到 tsc（solution-style 的 tsconfig 下会永远通过）", () => {
     // workspace 根的 tsconfig 多为 files: [] + references：`tsc --noEmit` 不构建被引用的
-    // 子工程，直接退 0。对这种根发 tsc 等于给一条恒绿门禁，还会让 rootForFile 把子包
-    // 自己的门禁顶掉——所以「没有任何声明」就按没有门禁处理。
+    // 子工程，直接退 0。对这种根给 tsc 等于加一条永远通过的门禁，还会让 rootForFile 把子包
+    // 自己的门禁顶掉——所以「什么声明都没有」就按没有门禁处理。
     const roots: ProjectRoot[] = [
       { root: "/w/ws-empty", files: [PKG_JSON, WORKSPACE_MANIFEST, TSCONFIG] },
     ];
     assert.deepEqual(detectGate(roots), []);
   });
 
-  it("多项目根各得各的门禁（每根一条，互不影响）", () => {
+  it("多个项目根各得各的门禁命令（每根一条，互不影响）", () => {
     const roots: ProjectRoot[] = [
       { root: "/w/a", files: [PKG_JSON, TSCONFIG, "x.ts"] },
       { root: "/w/b", files: [CARGO_MANIFEST, "x.rs"] },
@@ -209,7 +209,7 @@ describe("gate-detect：项目门禁命令自动探测", () => {
     assert.deepEqual(gates[1]?.command, ["cargo", "check"]);
   });
 
-  it("无清单文件的目录 → 无门禁（空配置项跳过）", () => {
+  it("没有清单文件的目录 → 没有门禁命令（空的配置项跳过）", () => {
     const roots: ProjectRoot[] = [{ root: "/w/none", files: ["readme.md", "x.txt"] }];
     assert.deepEqual(detectGate(roots), []);
   });
@@ -265,15 +265,15 @@ describe("gate-detect：files 为根目录相对名", () => {
   });
 });
 
-describe("gate-detect：假失败回归（门禁误报 HOME 的 npm init 空壳）", () => {
-  it("只有 package.json、无 tsconfig.json → 不发 tsc 门禁（HOME 的 npm init 空壳）", () => {
+describe("gate-detect：不再报假失败（曾把 HOME 下 npm init 的空壳当成项目）", () => {
+  it("只有 package.json、没有 tsconfig.json → 不给 tsc 这条门禁（HOME 下 npm init 的空壳）", () => {
     // 实测事故：主目录下的 package.json 是 npm init 空壳（无 tsconfig），
-    // 被当 TS 项目发 tsc 门禁 → 无配置可读 → 假失败注入。tsconfig 是必要条件。
+    // 被当成 TS 项目给出 tsc门禁→ 没有配置可读 → 注入一次假失败。tsconfig 是必要条件。
     const roots: ProjectRoot[] = [{ root: "/home/dev", files: [PKG_JSON] }];
     assert.deepEqual(detectGate(roots), []);
   });
 
-  it("tsconfig.json 是 tsc 门禁的必要条件（package.json 单独不够）", () => {
+  it("tsconfig.json 是给出 tsc门禁的必要条件（只有 package.json 不够）", () => {
     assert.deepEqual(detectGate([{ root: "/w", files: [PKG_JSON] }]), []);
     assert.deepEqual(detectGate([{ root: "/w", files: [TSCONFIG] }]), []);
     assert.deepEqual(detectGate([{ root: "/w", files: [PKG_JSON, TSCONFIG] }])[0]?.command, [
@@ -282,7 +282,7 @@ describe("gate-detect：假失败回归（门禁误报 HOME 的 npm init 空壳�
     ]);
   });
 
-  it("workspace 门禁不受 tsconfig 要求影响（只要声明了 check 脚本）", () => {
+  it("workspace 的门禁命令不受 tsconfig 要求影响（只要声明了 check 脚本）", () => {
     const workspaceRoot: ProjectRoot = {
       root: "/w",
       files: [PKG_JSON, WORKSPACE_MANIFEST],
@@ -292,12 +292,12 @@ describe("gate-detect：假失败回归（门禁误报 HOME 的 npm init 空壳�
   });
 });
 
-// 门禁探测的「假失败注入」防线：`pnpm check` 只在根 package.json 真的声明了 check 脚本时
+// 探测这条底线是「不要注入假失败」：`pnpm check` 只在根 package.json 真的声明了 check 脚本时
 // 才提议。没有 check 脚本的 pnpm 工程是绝大多数，而 `pnpm check` 会以
-// 「Command "check" not found」非零退出 —— 本包把门禁失败当真实质量缺陷去开新回合注入
+// 「Command "check" not found」非零退出 —— 本包把门禁失败当成真实的质量缺陷去开新回合注入
 // 修复指令，于是「工程没问题的前提下被要求去修一个不存在的脚本」。
 describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
-  it("workspace 根 scripts 里没有 check → 一条门禁都不给（不降级到 tsc）", () => {
+  it("workspace 根的 scripts 里没有 check → 一条门禁都不给（不降级到 tsc）", () => {
     const roots: ProjectRoot[] = [
       {
         root: "/w/nocheck",
@@ -310,8 +310,8 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
     assert.deepEqual(detectGate(roots), []);
   });
 
-  it("scripts 信息缺失（undefined：package.json 读不到/JSON 坏/无 scripts 字段）→ 不发 pnpm check", () => {
-    // 保守口径：拿不到信息时**不猜**。给一条没有依据的门禁 = 给一条可能注定命令级失败
+  it("scripts 信息缺失（undefined：package.json 读不到、JSON 坏了、没有 scripts 字段）→ 不给 pnpm check", () => {
+    // 保守的做法是拿不到信息时**不猜**。给一条没有依据的门禁= 给一条很可能在命令层面就失败
     // 的门禁；少给一次门禁只是少一次自动核验，用户可以自己跑。
     const roots: ProjectRoot[] = [
       { root: "/w/unknown", files: [PKG_JSON, WORKSPACE_MANIFEST, CARGO_MANIFEST] },
@@ -326,7 +326,7 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
     );
   });
 
-  it("近似名脚本（check:ci / typecheck / precheck）不等于 check → 不发门禁", () => {
+  it("名字相近的脚本（check:ci、typecheck、precheck）不等于 check → 不给门禁命令", () => {
     // includes("check") / startsWith("check") 这类退化实现会把它们当成合法依据，
     // 而 pnpm 会以 Command "check" not found 退出——正是本节要压住的假失败。
     assert.deepEqual(
@@ -342,8 +342,8 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
   });
 });
 
-describe("accumulator：.sh 不记账（四种门禁命令都无法校验 shell 脚本）", () => {
-  it("兄弟扩展名与 edit 路径同样不计入门禁面", () => {
+describe("accumulator：.sh 不记录（四条门禁命令都校验不了 shell 脚本）", () => {
+  it("相邻的扩展名和 edit 路径一样，都不计入待门禁的文件", () => {
     const acc = new EditAccumulator();
     acc.note("write", "/home/dev/.dsh/run-all-tests.sh");
     acc.note("edit", "/home/dev/.dsh/run.sh");
@@ -353,7 +353,7 @@ describe("accumulator：.sh 不记账（四种门禁命令都无法校验 shell 
     assert.deepEqual(acc.drain(), [EDITED_TS_FILE]);
   });
 
-  it("其余代码/配置扩展名仍照常记账", () => {
+  it("其余代码和配置的扩展名仍然照常记录", () => {
     const acc = new EditAccumulator();
     for (const filePath of [
       wPath("a.ts"),

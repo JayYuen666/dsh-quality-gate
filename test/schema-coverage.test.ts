@@ -1,9 +1,9 @@
-// test/schema-coverage.test.ts —— 卡片字段覆盖门禁的**解析面**单元测试。
+// test/schema-coverage.test.ts —— 卡片字段覆盖这项门禁里，负责解析的那一部分的单元测试。
 //
-// 为什么单独钉这一面：`schemaCoverageProblems` 读少字段的表现是"门禁通过"——
-// 它交回空数组就是绿，漏掉的字段再也不会被拦。所以解析器的期望值必须来自本文件里独立
+// 为什么要单独测这一部分：`schemaCoverageProblems` 少读字段时的表现是"这项门禁通过"——
+// 它返回空数组就算通过，漏掉的字段再也不会被拦住。所以解析器的期望值必须来自本文件里独立
 // 写死的夹具文本，不能拿真实 host.ts 跑一遍、把它当时的输出抄成期望（那样实现与期望会
-// 一起错、一起绿）。
+// 一起出错、一起通过）。
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -42,8 +42,8 @@ describe("schema-coverage：host schema 解析", () => {
     assert.deepEqual(fields, ["alpha", "beta", "gamma", "delta"]);
   });
 
-  it("值里的右括号不会让块提前收尾（按裸字符计数会少读后续字段）", () => {
-    // beta 的 default("x)") 若按裸字符深度匹配，块在那一处就闭合，gamma/delta 全丢。
+  it("值里的右括号不会让块提前收尾（不区分引号、按括号本身数深度会少读后续字段）", () => {
+    // beta 的 default("x)") 若不计引号、只按括号本身数深度，块在那一处就闭合，gamma/delta 全丢。
     const { fields } = hostSchemaFields(FIXTURE_HOST);
     assert.ok(fields.includes("gamma"), "gamma 必须被读到：右括号出现在字符串里不该提前收尾");
     assert.ok(fields.includes("delta"), "delta 必须被读到：右括号出现在字符串里不该提前收尾");
@@ -59,8 +59,8 @@ const B = Schema.object({ y: Schema.string() });`;
   });
 
   it("候选唯一但名称不是 Config 时交回问题，而不是猜一个", () => {
-    // 唯一候选不等于设置面：别的 `Schema.object` 赋值（子 schema/默认值）也会命中。
-    // 静默采纳会把别的对象的键当成卡片字段全集，门禁以错误字段面判定覆盖。
+    // 唯一候选不等于那就是设置：别的 `Schema.object` 赋值（子 schema、默认值）也会命中。
+    // 静默采纳会把别的对象的键当成卡片的字段全集，这项门禁就按错误的字段清单判断覆盖。
     const { fields, problems } = hostSchemaFields(
       `const Tool = Schema.object({ x: Schema.string() });\n`,
     );
@@ -97,7 +97,7 @@ const B = Schema.object({ y: Schema.string() });`;
     assert.deepEqual(fields, ["alpha", "beta"]);
   });
 
-  it("块注释与字符串里的左花括号不参与计数（否则对象块延后收尾、字段静默丢失）", () => {
+  it("块注释和字符串里的左花括号不参与计数（否则对象块延后收尾、字段静默丢失）", () => {
     const escaped = `export const Config = Schema.object({
   alpha: Schema.string().default("a{").volatile(),
   /* } */
@@ -109,9 +109,9 @@ const B = Schema.object({ y: Schema.string() });`;
     assert.deepEqual(fields, ["alpha", "beta", "gamma"]);
   });
 
-  it("正则字面量里的引号与括号不参与计数（否则其后字段被静默吞掉）", () => {
+  it("正则字面量里的引号和括号不参与计数（否则其后的字段被静默丢掉）", () => {
     // 两个已知坏形态：正则里的 " 会被 skipString 当成字符串起点、正则里的 } 会让对象块提前收尾。
-    // 两种的表现都是"后一个字段少读"，而少读字段恰是本门禁的假绿形态，所以必须钉住。
+    // 两种情况的表现都是"后一个字段少读"，而少读字段正是这项门禁会漏报的那种形态，所以各钉一条断言。
     const regexed = `export const Config = Schema.object({
   alpha: Schema.string().default(/["}]/u.source),
   beta: Schema.boolean(),
@@ -134,8 +134,8 @@ const B = Schema.object({ y: Schema.string() });`;
   });
 
   it("解析器抛错时 schemaCoverageProblems 交回一条问题，而不是把堆栈甩给调用方", async () => {
-    // 契约分工：hostSchemaFields 对畸形源码宁可抛（不交半截字段），门禁入口负责把异常
-    // 转成可读问题。用临时包根造一份不可解析的 host.ts，跑真正的入口函数。
+    // 两层的分工：hostSchemaFields 遇到畸形源码宁可抛（不返回半截字段），门禁的入口负责把异常
+    // 转成能读的问题描述。用临时包根造一份解析不了的 host.ts，跑真正的入口函数。
     const dir = await mkdtemp(path.join(tmpdir(), "schema-coverage-"));
     try {
       await writeFile(path.join(dir, "package.json"), '{"name": "fixture-pkg"}', "utf8");
@@ -149,7 +149,7 @@ const B = Schema.object({ y: Schema.string() });`;
       );
       assert.equal(problems.length, 1);
       assert.match(problems[0] ?? "", /fixture-pkg/u);
-      assert.match(problems[0] ?? "", /设置字段面解析失败/u);
+      assert.match(problems[0] ?? "", /设置字段列表解析失败/u);
       assert.match(problems[0] ?? "", /没有配对的闭合括号/u);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -207,7 +207,7 @@ describe("schema-coverage：allowUnbound 校验", () => {
     }
   });
 
-  it("豁免指向 host 里不存在的字段 → 挂名豁免当场红", async () => {
+  it("例外声明指向 host 里不存在的字段 → 这条对不上号的例外当场失败", async () => {
     const dir = await makeExemptFixture();
     try {
       const problems = await checkExemptFixture(dir, [
@@ -222,7 +222,7 @@ describe("schema-coverage：allowUnbound 校验", () => {
     }
   });
 
-  it("同一字段重复豁免 → 点名重复声明（Map 也不许静默合并）", async () => {
+  it("同一字段重复声明例外 → 点名重复声明（Map 也不许静默合并）", async () => {
     const dir = await makeExemptFixture();
     try {
       const problems = await checkExemptFixture(dir, [
@@ -240,7 +240,7 @@ describe("schema-coverage：allowUnbound 校验", () => {
   it("豁免已绑定的字段 → 报「已过时」", async () => {
     const dir = await makeExemptFixture();
     try {
-      // beta 仍然带理由豁免，否则「未暴露」也会各占一条——这里只留「已过时」这一条判据。
+      // beta 仍然带着理由声明例外，否则"未暴露"也会各占一条——这里只留"已过时"这一条判据。
       const problems = await checkExemptFixture(dir, [
         { field: "alpha", reason: "已经不用的理由" },
         { field: "beta", reason: "仅部署侧使用" },
@@ -252,7 +252,7 @@ describe("schema-coverage：allowUnbound 校验", () => {
     }
   });
 
-  it("豁免没有理由 → 等于无门禁，当场红", async () => {
+  it("例外声明没有理由 → 等于没有这项门禁，当场失败", async () => {
     const dir = await makeExemptFixture();
     try {
       const problems = await checkExemptFixture(dir, [{ field: "beta", reason: "   " }]);

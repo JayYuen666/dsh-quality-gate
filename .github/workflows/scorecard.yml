@@ -15,7 +15,7 @@ on:
     - cron: "23 4 * * 1"
   push:
     # 与 job 级 if 的 default_branch 判据是同一件事的两处写法：默认分支改名后这里
-    # 会永久不再触发，只剩周度 cron 兜底，而不会有任何报错。
+    # 会永久不再触发，只剩周度 cron 后备，而不会有任何报错。
     branches: [main]
 # 四个入口（branch_protection_rule / workflow_dispatch / schedule / push）都落在
 # refs/heads/main 上，跑的是同一份 analysis，向 code scanning 传同名 category 的结果、

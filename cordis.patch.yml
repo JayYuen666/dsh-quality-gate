@@ -1,14 +1,14 @@
-# quality-gate：回合收口质量门禁。
+# quality-gate：回合结束前的质量门禁。
 # ECC（MIT, github.com/affaan-m/ECC）stop-format-typecheck 移植：
-#   - 编辑记账：本回合编辑过的代码/配置文件（O(1)，md 等非代码面豁免）；
+#   - 编辑记录：本回合编辑过的代码和配置文件（O(1)，md 等非代码文件不检查）；
 #   - agent/turn-stopping 批处理：从编辑路径向上探测最近清单根
 #     （pnpm-workspace 且根 package.json 声明了 check→pnpm check /
 #      Cargo.toml→cargo check / pyproject→ruff / package.json+tsconfig→tsc），
 #     门禁失败经 followup 注入修复指令 → 回合物理不结束（宿主 agent 循环在 turn-stopping
 #     之后二次检查 inbox：有排队项就再开一轮。此处刻意不写行号——那是另一个包的源码位置，
 #     随宿主升级漂移，而它恰恰是本插件唯一的机制前提）；
-#     探测只提项目自己声明过的命令，拿不到脚本清单时宁可不给门禁（防假失败注入）；
-#   - 防跑飞：每会话至多 N 次注入（默认 2，按会话跨回合累计、所有根共用一份，
+#     探测只提项目自己声明过的命令，拿不到脚本清单时宁可跳过这项门禁（防假失败注入）；
+#   - 防止无休止地反复注入：每会话至多 N 次注入（默认 2，按会话跨回合累计、所有根共用一份，
 #     门禁干净通过后重置）；总预算封顶；超时按「未执行」注入不静默通过；
 #     inbox 有待处理时不抢话。
 # 设置卡：enabled / 注入配额 / 门禁预算 / 记忆反馈（开关 + 网关地址 + 密钥凭据引用，

@@ -1,15 +1,15 @@
-// test/publish-manifest.test.ts —— 发布形态门禁：入口面必须**与发布器无关**地可解析。
+// test/publish-manifest.test.ts —— 发布形态的门禁：入口声明必须**与用哪个发布器无关**地解析得开。
 //
-// 为什么值得一条测试：构建与单测都在源码侧跑绿，而真实故障发生在装出去之后。两类坑都在
-// 那一侧。其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
+// 为什么值得一条测试：构建与单测都在源码里跑绿，而真实故障发生在装出去之后。两类坑都在那之后：
+// 其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
 // pnpm 发布时把它合并到顶层，npm 不合并（npm 会打印
 // "Unknown publishConfig config main/exports" 并忽略），同一个仓库换个发布器就发出一个
 // import 必失败的包。这里不模仿任何发布器的实现，而是把不变式钉成断言：**顶层入口自己就
 // 完整可解析，且 publishConfig 不再承载入口字段**，于是两套发布器语义的差恒为空。
 //
-// 第二组门禁扫注释：日期与轮次编号写下时有用，读的人只会困惑，且没有任何读者能从中重建
-// 当时的上下文。只扫注释行与文档；测试夹具里的日期（modifiedAfter 之类的边界值）是数据，
-// 角色文档里的日期是内容，两者都不在禁面内。
+// 第二组门禁扫注释：日期和轮次编号在写下的当时有用，读的人只会困惑，而且没有人能从中重建
+// 当时的上下文。只扫注释行和文档；夹具里的日期（modifiedAfter 这类边界值）是数据，
+// 角色文档里的日期是内容，这两种都不在禁止之列。
 import { existsSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -25,15 +25,15 @@ const pkgDir = path.join(import.meta.dirname, "..");
  *   出现在公共 tarball 里。路径段要求以字母数字开头，`<home>` 这类占位写法不命中。
  * - 内部工作项编号（`W4` / `C9` / `M8` 这种「字母+数字」）与 `xxx.md:12` 形态的笔记指针：
  *   编号所属的清单和笔记都不随包发布，读者无从对照。指向**已安装依赖**的那类
- *   `.../lib/types/index.d.ts:52` 不在禁面内——版本钉住之后人人可查，那是证据不是噪音。
- * - 上游源码仓路径（`packages/…`、`vendor/…`）：消费方拿不到那棵树，等价信息在 installed
+ *   `.../lib/types/index.d.ts:52` 不在禁止之列——版本钉住之后人人可查，那是证据不是干扰内容。
+ * - 上游源码仓路径（`packages/…`、`vendor/…`）：消费方拿不到那份源码目录树，等价信息在 installed
  *   产物里。
  * - 复核轮次的口吻（`审计` / `复核` / `旧实现` / `先例` / `拍板` …）：留约束本身，
  *   删掉"当初怎么改错的"。
  *
- * 中文的「本轮」刻意不进门禁：本仓的 `本轮` 绝大多数指**会话轮次**这个产品概念
- * （`剩余预算不足，以下门禁本轮未执行` 是随包发布的模型文案），与工作轮次同形，机器分不开；
- * 要禁只能逐条人工判断，那不是门禁能做到的事。
+ * 中文的「本轮」刻意不放进这条门禁：本仓的 `本轮` 绝大多数指**会话轮次**这个产品概念
+ * （`剩余预算不足，以下门禁本轮未执行` 是随包发布的模型文案），与工作轮次写法相同，机器分不开；
+ * 要禁只能逐条人工判断，那不是自动门禁能做到的事。
  */
 const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [
   /\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b/u,
@@ -45,17 +45,17 @@ const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [
   /(?:审计|复核|假话|旧注释|旧实现|旧版|曾写|同批|先例|拍板|口径 [A-Z])/u,
 ];
 
-/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口面。 */
+/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口字段。 */
 const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry"]);
 
-/** 遍历时跳过的目录：依赖、产物、以及本门禁刻意不管的面。 */
+/** 遍历时跳过的目录：依赖、产物，以及这条门禁刻意不管的范围。 */
 const SKIP_DIRS = new Set([
   "node_modules",
   "coverage",
   "_env",
   "dist",
   ".git",
-  // 测试夹具里的日期与轮次编号是数据，不是注释噪音。
+  // 夹具里的日期和轮次编号是数据，不是注释里的干扰内容。
   "test",
   "tests",
   "__tests__",
@@ -63,7 +63,7 @@ const SKIP_DIRS = new Set([
   "agents",
 ]);
 
-/** package.json 里与入口面有关的形状；其余字段本门禁不关心。 */
+/** package.json 里和入口声明有关的那几个字段；其余字段这条门禁不管。 */
 interface Manifest {
   readonly main?: string;
   readonly types?: string;
@@ -87,7 +87,7 @@ type PatternShape =
  * 把 `files` 的一条模式归类。本仓实际用到的只有三种写法：裸文件名、目录名、`dir/*.ext`。
  *
  * 「精确文件名」这一档不能和后缀过滤混为一谈：把 `host.js` 当成 `.js` 后缀过滤，于是
- * `files` 里列的每个构建产物都匹配不上任何条目——`files` 覆盖这道断言的集合会空掉，门禁
+ * `files` 里列的每个构建产物都匹配不上任何条目——`files` 覆盖这道断言的集合会空掉，这条门禁
  * 自己先失效。实测报出来是「main 指向 host.js，但它不在 files 覆盖范围内」。
  *
  * @param entry - `files` 数组里的一项
@@ -189,8 +189,8 @@ function entryFiles(manifest: Manifest): readonly { label: string; file: string 
  *
  * 只有这四枚：`package.json`、`LICENSE` 与根目录下 readme 形态的文件（`README.md`、
  * `README.zh-CN.md` 都按前缀命中）。`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md` **不在**
- * 这一面内——它们不在 `files` 里就发不出去，而"文档写了但没随包发布"正好是读者看不到、
- * 门禁又看不见的坑，于是下面单独有一条「根目录每个 .md 都要出现在发布面里」的门禁。
+ * 这个范围里——它们不在 `files` 里就发不出去，而"文档写了但没随包发布"正好是读者看不到、
+ * 门禁又看不见的坑，所以下面单独有一条「根目录每个 .md 都要出现在发布物清单里」的门禁。
  */
 const ALWAYS_SHIPPED = ["package.json", "README.md", "README.zh-CN.md", "LICENSE"];
 
@@ -209,7 +209,7 @@ async function readSurface(): Promise<{ manifest: Manifest; shipped: Set<string>
 }
 
 /**
- * 递归收集该纳入注释门禁的源文件与文档（相对包根、`/` 分隔）。
+ * 递归收集该纳入注释门禁的源文件和文档（相对包根、用 `/` 分隔）。
  *
  * @param dir - 当前目录的绝对路径
  * @param prefix - 相对包根的前缀
@@ -237,7 +237,7 @@ async function collectSources(dir: string, prefix: string): Promise<string[]> {
   return groups.flat();
 }
 
-/** 代码面里可能是注释或字面量的片段：块注释、行注释、三种引号的字面量（含转义）。
+/** 代码里可能是注释或字面量的片段：块注释、行注释、三种引号的字面量（含转义）。
  *  一次扫完全文，按"块注释 → 行注释 → 字符串"的优先序取；字符串整体被收进来，所以
  *  `"http://127.0.0.1"` 里的双斜杠不是注释起点，而 `const x = 1; // 2026-10-30` 的行尾
  *  注释会被收成一条。文档（`.md`）与 YAML 不走这里，见 commentLines 的分支。
@@ -249,11 +249,11 @@ const COMMENT_TOKEN =
  * 取一段文本里属于注释或文档的内容。文档（`.md`）整体算；YAML 只认行首 `#`（值里的 `#`
  * 是数据）；代码只取**真正的注释内容**——行尾的双斜杠注释、行内与跨行的块注释都算，字符串与
  * 模板字面量里的同形片段（`"http://127.0.0.1"`）不算。只认"行首即注释符"会把
- * `const x = 1; // 2026-10-30` 这种行尾注释漏过去，日期照样随包发布而门禁全绿。
+ * `const x = 1; // 2026-10-30` 这种行尾注释漏过去，日期照样随包发布而这条门禁全部通过。
  *
- * @param file - 相对包根的文件名，用于决定判定口径
+ * @param file - 相对包根的文件名，用来决定按哪条规则判断
  * @param text - 文件全文
- * @returns 参与门禁的注释/文档行
+ * @returns 参与这条门禁的注释和文档行
  */
 function commentLines(file: string, text: string): string[] {
   if (file.endsWith(".md")) {
@@ -304,7 +304,7 @@ describe("发布形态", () => {
     }
   });
 
-  it("根目录每个 .md 都在发布面里（写了却没发出去 = 读者看不见）", async () => {
+  it("根目录每个 .md 都在发布名单里（写了却没发出去 = 读者看不见）", async () => {
     // 只有 readme 形态的文件靠发布器无条件附带；CHANGELOG 与许可证之外的文档都得自己写进
     // `files`，否则"文档在仓库里、不在包里"这种状态没有任何读者能发现。
     const { shipped } = await readSurface();
@@ -320,11 +320,11 @@ describe("发布形态", () => {
 });
 
 /**
- * 随包发布的构建产物扫的这一组：注释会被打包器剥掉，所以产物面上真正会漏出去的是
+ * 随包发布的构建产物要扫这一组：注释会被打包器剥掉，所以产物里真正会漏出去的是
  * **数据**——日期、本机路径、包管理器的 store 目录名。
  *
  * 刻意不含工作项编号：产物里有 `"M3 5l4 4 4-4"` 这样的 SVG path 数据，「字母+数字」的正则
- * 会把图形指令当编号。编号是注释面的噪音，不是发布物的泄漏。
+ * 会把图形指令当编号。编号是注释里的噪音，不是发布物的泄漏。
  */
 const FORBIDDEN_IN_ARTIFACTS: readonly RegExp[] = [
   /\b(?:19|20)\d{2}-\d{2}(?:-\d{2})?\b/u,
@@ -332,7 +332,7 @@ const FORBIDDEN_IN_ARTIFACTS: readonly RegExp[] = [
   /\.pnpm\//u,
 ];
 
-/** 产物面扫描覆盖的文件：这两个就是发布物的全部代码面。 */
+/** 产物扫描覆盖的文件：这两个就是发布物里全部的代码。 */
 const SHIPPED_ARTIFACTS = ["host.js", "client.js"];
 
 /**
@@ -379,7 +379,7 @@ const HOST_PROVIDED_MODULES = new Set(["react"]);
  *
  * 入口形态不止 `from "x"`：`require("x")`、`import("x")`、单引号与模板字面量都合法，只认
  * 双引号 from/import 会让另外那些写法**一个都收不到**，于是"产物引用了未声明的包"这条断言
- * 对着空数组恒绿。这里把三种引导词与两种引号都收进来。
+ * 对着空数组永远通过。这里把三种引导词和两种引号都收进来。
  *
  * @param text - 产物全文
  * @returns 去掉 node: 内建与相对路径后的说明符
@@ -437,7 +437,7 @@ describe("发布产物的内容面", () => {
   });
 });
 
-/** 宿主 dsh 家族的包名前缀（本组三条判据都要按它筛，收常量）。 */
+/** 宿主 dsh 家族的包名前缀（这一组三条判断都要按它筛，所以收成常量）。 */
 const DSH_PREFIX = "@deepseek-ai/dsh-";
 
 describe("宿主依赖的版本形状（升级防线）", () => {
@@ -448,8 +448,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // TOOL_RUNTIME_SCHEDULER 是普通 Symbol（不是 Symbol.for），符号身份按模块实例计算：宿主的
     // dsh-agent-loop 用自己那份的 Symbol 去读由副本挂载出来的 ToolRuntime，拿到 undefined，于是
     // 每一次原生工具调用都抛 "Cannot read properties of undefined (reading 'prepare')"，整个
-    // profile 的工具一起失效。构建、类型检查与本包测试在此之前全部照绿，判据只能落在 manifest
-    // 面上——所以这条读的就是 `dependencies` 本身，不是 peer ∪ dev：那张表才是被钉的对象。
+    // profile 的工具一起失效。构建、类型检查和本包测试在此之前全部通过，判断依据只能落在 manifest
+    // 上——所以这条读的就是 `dependencies` 本身，不是 peer ∪ dev：那张表才是被固定下来的对象。
     const { manifest } = await readSurface();
     const leaked = Object.keys(manifest.dependencies ?? {}).filter((name) =>
       name.startsWith("@deepseek-ai/"),
@@ -461,8 +461,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // registry 上的 dist-tag 是实测出来的陷阱：`latest` 可能指向远早于宿主 ABI 的版本。
     // 精确钉是让「不带版本地装成远古版本」这件事不发生的最小条件；一旦放宽成 `^`/`~`，
     // 宿主某天发新 minor 就会自动跟上去，而插件与宿主 ABI 耦合，那等于让本包在没有测试的
-    // 情况下换掉编译用的宿主类型面。
-    // 只判 dev 这一侧：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
+    // 情况下换掉编译用的宿主类型声明。
+    // 只判 dev这一侧 段：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
     // 装什么版本由宿主决定，判据在下面那条。
     const { manifest } = await readSurface();
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
@@ -476,14 +476,17 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   });
 
   it("devDependencies 里的 dsh-* 全部同版本（不许装出第二份宿主类型）", async () => {
-    // 宿主类型面被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
-    // nominal 类型（品牌串、投影状态）会开始互相不认，而那不报编译错、只报运行期
+    // 宿主类型被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
+    // nominal 类型（带类型品牌的串、投影状态）会开始互相不认，而那不报编译错、只报运行期
     // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。
     const { manifest } = await readSurface();
     const dshDev = Object.entries(manifest.devDependencies ?? {}).filter(([name]) =>
       name.startsWith(DSH_PREFIX),
     );
-    expect(dshDev.length, "至少要钉住一枚 dsh-* 开发依赖，否则这条是空转").toBeGreaterThan(0);
+    expect(
+      dshDev.length,
+      "至少要有一个固定版本的 dsh-* 开发依赖，否则这条断言没有实际校验作用",
+    ).toBeGreaterThan(0);
     const baseline = dshDev[0]?.[1];
     const drifted = dshDev.filter(([, range]) => range !== baseline);
     expect(drifted, `这些 dsh-* 与 ${baseline} 不同版本`).toStrictEqual([]);
@@ -504,7 +507,7 @@ describe("宿主依赖的版本形状（升级防线）", () => {
 
   it("engines 与 peer 同基准：dsh 下界即编译目标，node 底线不低于宿主发布线", async () => {
     // engines.dsh 低于编译目标 = 在一个从没跑过的宿主版本上承诺能装。根表把 peer 与 engines.dsh
-    // 写成同一份插入符范围，所以这里要求逐字相等：算子一分叉，装载门槛和编译目标就各说各话。
+    // 写成同一份插入符范围，所以这里要求逐字相等：算子一分叉，宿主装载时的版本判据和编译目标就各说各话。
     const { manifest } = await readSurface();
     const peer = manifest.peerDependencies?.["@deepseek-ai/dsh"] ?? "";
     expect(peer, "peer 的 @deepseek-ai/dsh 缺失，engines 失去基准").not.toBe("");
@@ -555,7 +558,7 @@ describe("注释与文档没有内部指涉", () => {
 describe("注释扫描器自身", () => {
   const nl = "\n";
 
-  it("行尾双斜杠注释参与门禁：日期写在行尾也要被看见", () => {
+  it("行尾的双斜杠注释也参与门禁：日期写在行尾也要被看见", () => {
     const date = "2026-10-30";
     const sample = `const value = 1; // ${date}${nl}const other = 2;`;
     expect(commentLines("probe.ts", sample)).toStrictEqual([` ${date}`]);
@@ -572,7 +575,7 @@ describe("注释扫描器自身", () => {
     expect(commentLines("probe.ts", sample)).toStrictEqual([" trailing-comment"]);
   });
 
-  it("行内块注释参与门禁，跨行块注释按行拆开", () => {
+  it("行内的块注释参与门禁，跨行的块注释按行拆开", () => {
     const sample = ["const a = 1; /* first */", "/* second", " third */", "const b = 2;"].join(nl);
     expect(commentLines("probe.ts", sample)).toStrictEqual([" first ", " second", " third "]);
   });

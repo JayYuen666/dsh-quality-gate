@@ -1,12 +1,12 @@
-// src/ui-messages.ts —— 设置卡 UI 文案字典（中英双语）。
+// src/ui-messages.ts —— 设置卡界面文案字典（中英双语）。
 //
-// 键集一致由 tsc 保证：zh / en 两份都标注同一个 UiMessages 接口，少键多键在编译期红。
-// 注册与取值走官方 @deepseek-ai/dsh-client-locale 的**类型化**那条 register 重载
-// （`ctx.locale.register(ns, dicts)`，一次交齐两语）+ `ctx.locale.bind(ns)`，语言切换由
-// 宿主驱动、无需重载页面（见 src/client-entry.ts 的 apply）。键集之所以能由官方表达式
-// 给出，靠的是本文件把 `quality-gate` merge 进了官方 `LocaleNamespaceMap`（见下面）。
-// 插值不放进字典（官方字典是扁平字符串表）：带变量的整行用官方 `{name}` 占位符，
-// 由宿主侧的 Translate 渲染，本文件只存扁平字符串。
+// 键集一致由 tsc 保证：zh 和 en 两份都标注同一个 UiMessages 接口，键少了或多了会在编译期报错。
+// 注册与取值用官方 @deepseek-ai/dsh-client-locale 那条**带类型**的 register 重载
+// （`ctx.locale.register(ns, dicts)`，一次把两种语言交齐），再加 `ctx.locale.bind(ns)`；语言切换由
+// 宿主驱动，不用重新加载页面（见 src/client-entry.ts 的 apply）。键集能由官方类型给出，靠的是本文件
+// 把 `quality-gate` merge 进了官方的 `LocaleNamespaceMap`（见下面）。插值不放进字典（官方字典是一张
+// 扁平的字符串表）：带变量的整行用官方的 `{name}` 占位符，由宿主侧的 Translate 渲染，本文件只存整条
+// 字符串。
 import type { TranslateNS as OfficialTranslateNS } from "@deepseek-ai/dsh-client-ui-slots";
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
@@ -24,15 +24,15 @@ export interface UiMessages {
   readonly revert: string;
   /** 保存失败整行（{message} 错误摘要）。 */
   readonly saveFailed: string;
-  /** 保存被宿主拒绝（受理位 false：校验未通过或写入被跳过），修改未生效。 */
+  /** 保存被宿主拒绝（返回的受理标记是 false：校验没过，或者写入被跳过），修改没有生效。 */
   readonly saveRejected: string;
-  /** 网关地址不接受：带 userinfo，或明文 http 指向非回环地址。 */
+  /** 网关地址不接受：带 userinfo，或者明文 http 指向非回环地址。 */
   readonly invalidGatewayUrl: string;
   /** 凭据引用名不接受：宿主只认 [A-Za-z_][A-Za-z0-9_]*。 */
   readonly invalidKeyRef: string;
-  /** 数字输入越界/非法时的行内提示。 */
+  /** 数字输入超出范围或不合法时的行内提示。 */
   readonly outOfRange: string;
-  /** 门禁小节标题。 */
+  /** 质量门禁小节的标题。 */
   readonly gateSection: string;
   /** 记忆反馈小节标题。 */
   readonly memorySection: string;
@@ -59,19 +59,20 @@ export interface UiMessages {
 /**
  * 本包的文案命名空间 merge 进官方的 `LocaleNamespaceMap`（installed
  * `dsh-client-ui-slots/lib/types/index.d.ts:22-31`「Locale namespace table. Dictionary
- * owners extend via declaration merging (exactly like {@link SlotMap} …)」）。这不是可选
- * 的美化：官方 `LocaleRuntime.bind` 有两条重载（installed
- * `dsh-client-locale/lib/types/client/index.d.ts:219` 的类型化那条、:226 的
- * `bind(ns: string): Translate` 未类型化那条），不 merge 时本包命名空间只能落到后面那条，
- * 拿回来的 `t` 键域是宽 `string`——卡片要的键集收窄的 `t` 于是**没有任何官方来源**，
- * 本地只好继续手写一个官方给不出的函数形状。实测把下面这一行撤掉（本包不再 merge），
- * 官方 `LocaleDictOf` / `TranslateNS` 的约束域立刻只剩宿主包 merge 的那三个命名空间
+ * owners extend via declaration merging (exactly like {@link SlotMap} …)」）。这不是可有可无的
+ * 改善：官方 `LocaleRuntime.bind` 有两条重载（installed
+ * `dsh-client-locale/lib/types/client/index.d.ts:219` 那条带类型的、:226 的
+ * `bind(ns: string): Translate` 不带类型的那条）。不 merge 时本包的命名空间只能走后面那条，
+ * 拿回来的 `t` 接受任何 `string` 键——卡片需要的那种只认本包键的 `t` 就**没有任何官方来源**，
+ * 本地只能继续手写一个官方给不出的函数类型。实测把下面这一行撤掉（本包不再 merge），
+ * 官方 `LocaleDictOf` 和 `TranslateNS` 允许的命名空间立刻只剩宿主包 merge 的那三个
  * （`Type '"quality-gate"' does not satisfy the constraint
- * '"common" | "pluginManager" | "settings.locale"'`，TS2344）：merge 是键域的**唯一**入口。
+ * '"common" | "pluginManager" | "settings.locale"'`，TS2344）：merge 是键的取值范围进入官方类型的
+ * **唯一**入口。
  * merge 之后键集由官方 `TranslateNS<NS>`（`dsh-client-ui-slots/lib/types/index.d.ts:67`，
- * `= Translate<LocaleKeysOf<N>>`，:45/:59）表达，`t("拼错的键")` 在编译期红。
- * ⚠ 表键必须是字面量（interface 键位不接受计算属性），故下面的等式常量是本源，
- * client-entry.ts 的 `NS` 按它的类型 `LocaleNs` 标注：两边哪天分叉，那行编译期就红。
+ * `= Translate<LocaleKeysOf<N>>`，:45/:59）表达，`t("拼错的键")` 在编译期报错。
+ * ⚠ 表键必须是字面量（interface 的键位不接受计算属性），所以下面那个常量是这个值的唯一来源，
+ * client-entry.ts 的 `NS` 按它的类型 `LocaleNs` 标注：两边一旦不一致，那一行就在编译期报错。
  */
 declare module "@deepseek-ai/dsh-client-ui-slots" {
   interface LocaleNamespaceMap {
@@ -80,23 +81,24 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
   }
 }
 
-/** 编译期契约：merge 里写死的命名空间键（`Translate` 用它取 `TranslateNS`）与卡片
- *  条目 id 必须是同一个串——改任何一处都要动这一行才会红。 */
+/** 编译期的对应关系：merge 里写死的命名空间键（`Translate` 用它取 `TranslateNS`）和卡片条目
+ *  id 必须是同一个字符串。这里是这个值的唯一来源：改了上面或卡片那一处而没改这里，编译期就报错。 */
 const LOCALE_NS_KEY = "quality-gate" as const;
 
 /**
- * 本源只以**类型**形态对外流通：`client-entry.ts` 的 `const NS: LocaleNs = "quality-gate"` 把条目
- * id 钉在本源上（分叉即编译期红），而产物漂移针仍要按字面量形状从 bundle 里抓 `NS`，所以那里
- * 保留字面量、只加类型标注——值导出不必存在（用例侧同理：要断言运行时那串就写字面量）。
+ * 这个值只以**类型**形式对外流通：`client-entry.ts` 里写 `const NS: LocaleNs = "quality-gate"`，
+ * 条目 id 因此以这里为准（不一致就在编译期报错）；核对产物有没有漂移的那条断言仍要按字面量形状从
+ * bundle 里抓 `NS`，所以那里保留字面量、只加类型标注——不需要导出一份值（测试里也一样：
+ * 要断言运行时的那个字符串就直接写字面量）。
  */
 export type LocaleNs = typeof LOCALE_NS_KEY;
 
 /**
- * 卡片取文案的函数形状：官方 `TranslateNS<N>`（installed `dsh-client-ui-slots/lib/types/index.d.ts:67`，
- * `= Translate<LocaleKeysOf<N>>`，而 `Translate<K> = (key: K, params?) => string`，同文件 `:45`）——
- * 键域就是上面 merge 的 `keyof UiMessages` **并上**官方 `common`
- * 命名空间的共享词（官方 `LocaleKeysOf` 的并集：宿主查找链在本命名空间 miss 之后确实
- * 会去 consult common，见 installed dsh-client-locale/lib/client.js:1425），函数面完全归官方。
+ * 卡片取文案用的函数类型来自官方 `TranslateNS<N>`（installed `dsh-client-ui-slots/lib/types/index.d.ts:67`，
+ * `= Translate<LocaleKeysOf<N>>`，而 `Translate<K> = (key: K, params?) => string`，同文件 `:45`）：
+ * 键的范围是上面 merge 进去的 `keyof UiMessages`，**加上**官方 `common` 命名空间里的共享词
+ * （官方 `LocaleKeysOf` 取的就是这两个的并集：宿主在本命名空间里没找到时会去 common 里找，
+ * 见 installed dsh-client-locale/lib/client.js:1425），函数类型完全由官方给出。
  */
 export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 

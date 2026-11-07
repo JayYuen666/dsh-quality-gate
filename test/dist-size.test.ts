@@ -1,14 +1,14 @@
-// test/dist-size.test.ts —— 产物体积闸门。
+// test/dist-size.test.ts —— 产物体积上限检查。
 //
-// 为什么要有：本仓 `npm run check` 的顺序是 build 在 test 之前，所以这道门读到的是**当轮刚产出**
-// 的产物，不是上一次遗留的。它挡的是「有人在切面里塞进大对象字面量或整段查表」这类回退——
-// 体积不是行为，任何现有用例都不会因此变红，所以必须有一把单独的尺子。
+// 为什么要有：本仓 `npm run check` 的顺序是 build 在 test 之前，所以这道检查读到的是**当轮刚产出**
+// 的产物，不是上一次遗留的。它挡的是「有人在构建切面里塞进大对象字面量或整段查表」这类回退——
+// 体积不是行为，任何现有用例都不会因此变红，所以必须单独有一道按字节数的检查。
 //
-// 预算 = 当前实测值上浮约 15%，再向上取整到 500 B；实测值记在对应常量的注释里。
+// 预算 = 在当前实测值上加约 15%，再向上取整到 500 B；实测值记在对应常量的注释里。
 // 留这一档是给正常演进的——加一条规则、改一句文案不该立刻要人改预算；把一枚宿主包的实现
 // 整段内联进产物一定会顶穿。真需要突破时，改这些常量并写明理由。
 //
-// 只有 host.js 与 client.js 两项：本仓没有 build-types.mjs，发布面里没有类型声明目录可量。
+// 只有 host.js 与 client.js 两项：本仓没有 build-types.mjs，发布产物里没有类型声明目录可量。
 import { strict as assert } from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -33,11 +33,11 @@ describe("产物体积", () => {
     // 单独跑这个文件（没先 build）时，产物缺失必须给出可操作的说明，而不是裸 ENOENT。
     assert.ok(
       existsSync(artifact),
-      `找不到产物 ${file}：请先执行 pnpm run build:client && pnpm run build（体积闸门读的是当轮产物）。`,
+      `找不到产物 ${file}：请先执行 pnpm run build:client && pnpm run build（这条检查读的是当轮产物）。`,
     );
     const bytes = readFileSync(artifact).byteLength;
-    // 上界只能挡"太大"；0 字节/桩文件会从上界下溜过去，把闸门变成恒绿。
-    assert.ok(bytes > 0, `${file} 为 0 字节：构建没有真正产出内容，体积闸门无从判定。`);
+    // 上界只能挡住超出上界的情况；0 字节的文件和占位文件都在上界以下，会让这条检查永远通过。
+    assert.ok(bytes > 0, `${file} 为 0 字节：构建没有真正产出内容，体积上限无从判定。`);
     assert.ok(
       bytes <= budget,
       `${file} 实测 ${bytes.toLocaleString("en-US")} B，超出预算 ` +

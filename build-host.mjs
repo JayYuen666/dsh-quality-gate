@@ -3,12 +3,12 @@
 /// <reference types="node" />
 // 构建 host.js：rolldown 把 host.ts 及其 `./lib/*` 依赖打成单文件 ESM，落在**包根**
 // （与源码同目录，故 `import.meta.dirname` 的语义与源码态完全一致）。
-// 编排（输出守卫、region 正典化、moduleIds 结构性判据）统一住在
-// @jayyuen66/dsh-plugin-shared/lib/build-host，一处可改；本文件只声明本仓的入口、产物、
-// 生成头，与一项仓有取舍：optionalDependencies 刻意不外部化——可选依赖的语义是「可能
+// 编排（输出校验、region 路径规范化、moduleIds 的结构检查）统一实现在
+// @jayyuen66/dsh-plugin-shared/lib/build-host，改一处就全部改到；本文件只声明本仓的入口、产物、
+// 生成头，加一项本仓自己的选择：optionalDependencies 刻意不外部化——可选依赖的意思是"可能
 // 没装」，外部化会在产物里留一条解析不了的裸说明符，宿主载入时是整个插件
-// MODULE_NOT_FOUND；打包进产物则是「缺包时功能照旧」。（与兄弟仓「外部化、由运行期
-// require 决定」的取向相反，两边各有实据，故做成显式开关而不是统一值。）
+// 整个插件 MODULE_NOT_FOUND；打包进产物则是"缺包时功能照旧"。（这跟兄弟仓"外部化、由运行期
+// require 决定"的做法相反，两边都有实测依据，所以做成显式开关，而不是统一成一个值。）
 // 不产 .d.ts：插件包对外没有 TS API——dsh 按包名载入运行，没有人 import 它。
 import path from "node:path";
 import { rolldown } from "rolldown";
@@ -18,7 +18,7 @@ import { invokedDirectly, writeArtifact } from "@jayyuen66/dsh-plugin-shared/lib
 export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
 const root = import.meta.dirname;
-/** 本仓唯一产物名：输出、查找判据、写入路径与日志文本都从这里派生。 */
+/** 本仓唯一的产物名：输出、按名字找产物、写入路径和日志文本都从这里取。 */
 const OUTPUT_FILE = "host.js";
 
 /** 生成 host.js 的完整文本。 */

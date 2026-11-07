@@ -1,23 +1,24 @@
-// lib/messages.ts —— host 半文案字典（中英双语）。
+// lib/messages.ts —— host 侧的文案字典（中英双语）。
 //
-// 只管 host 半：设置卡的 UI 文案走官方 @deepseek-ai/dsh-client-locale
-// （client 侧 `ctx.locale.register(ns, dicts)` 一次交齐两语 + `bind`/`t`，见 src/client-entry.ts）。
-// host 侧没有官方 i18n 面，回合收口注入给模型的修复指令、门禁没跑成/被拒绝时用户能看到的
-// 回显只能自带字典；语言取官方 settings 的 `locale.preference`（shared 的
-// resolveLocalePreference），命名空间未注册即中文。
+// 只管 host 侧：设置卡的界面文案走官方 @deepseek-ai/dsh-client-locale
+// （client 侧 `ctx.locale.register(ns, dicts)` 一次交齐两种语言 + `bind`/`t`，见 src/client-entry.ts）。
+// host 侧没有官方的 i18n 接口，回合结束时注入给模型的修复指令、以及门禁没跑成或被拒绝时用户
+// 能看到的提示，只能自带字典；语言取官方 settings 的 `locale.preference`（shared 的
+// resolveLocalePreference），命名空间没注册时用中文。
 //
-// 键集一致由 tsc 保证：zh / en 两份都标注同一个 QualityGateMessages 接口，
-// 少键多键在编译期红。console.* 的日志文案不在此列——那是给排障的人看的，不随界面语言切换。
+// 键集一致由 tsc 保证：zh 和 en 两份都标注同一个 QualityGateMessages 接口，
+// 键少了或多了会在编译期报错。console.* 的日志文案不在这个字典里——那是给排查问题的人看的，
+// 不随界面语言切换。
 //
-// 带变量的整行放 `{name}` 占位符（与卡片侧官方 Translate 同语法），由本文件的
-// renderTemplate 渲染：字典仍是扁平字符串表，两种语言可以各自决定变量的语序。
+// 带变量的整行放 `{name}` 占位符（和卡片侧官方 Translate 的语法相同），由本文件的
+// renderTemplate 渲染：字典仍然是一张扁平的字符串表，两种语言可以各自决定变量的先后位置。
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
-/** 本包 host 侧产出的全部人读文案（注入给模型的修复指令 + 门禁降级回显）。 */
+/** 本包 host 侧产出的全部给人读的文案（注入给模型的修复指令，加上门禁没跑成时的提示）。 */
 export interface QualityGateMessages {
-  /** 证据被 harness 截断时的说明行（{label} = stdout/stderr，{spill} = 落盘路径或占位）。 */
+  /** 证据被 harness 截断时的说明行（{label} = stdout/stderr，{spill} = 写出的文件路径或占位文字）。 */
   readonly evidenceTruncated: string;
-  /** 截断但没有落盘文件时 {spill} 的取值。 */
+  /** 截断了但没有写出文件时 {spill} 的取值。 */
   readonly noSpillFile: string;
   /** 截断且读回头部摘录时的正文（{head} 头部摘录、{text} 留在内存的尾部）。 */
   readonly evidenceHeadTail: string;
@@ -25,39 +26,39 @@ export interface QualityGateMessages {
   readonly gateFailed: string;
   /** 门禁没跑成 → 注入的"请手动确认"说明（{command}/{root}/{reason}）。 */
   readonly gateNotRun: string;
-  /** 配额耗尽后的放行说明（{attempts}/{command}/{root}，用户可见）。 */
+  /** 配额用完后的放行说明（{attempts}/{command}/{root}，用户可见）。 */
   readonly gaveUp: string;
-  /** 预算不足被跳过的门禁清单（{budgetMs}/{list}）。 */
+  /** 时间预算不够而被跳过的门禁清单（{budgetMs}/{list}）。 */
   readonly gatesSkipped: string;
   /** 清单里的一行（{command}/{root}）。 */
   readonly skippedGateItem: string;
-  /** 沙箱事实的模式段（{mode}）。 */
+  /** 沙箱情况里的模式那一段（{mode}）。 */
   readonly sandboxMode: string;
-  /** 沙箱事实的生效度段，仅当宿主上报 enforcement 时拼上（{enforcement}）。 */
+  /** 沙箱情况里的 enforcement 那一段，只有宿主上报 enforcement 时才拼上（{enforcement}）。 */
   readonly sandboxEnforcement: string;
-  /** 沙箱 runner 起不来 = 命令根本没跑（{sandbox}）。 */
+  /** 沙箱 runner 起不来，说明命令根本没跑（{sandbox}）。 */
   readonly runnerFailed: string;
-  /** 沙箱策略拒写 = 命令未获准真正执行（{sandbox}）。 */
+  /** 沙箱策略拒绝写入工作目录，命令没有获准真正执行（{sandbox}）。 */
   readonly policyDenied: string;
   /** 超时（{seconds} 秒）。 */
   readonly timedOut: string;
   /** 回合被取消。 */
   readonly aborted: string;
-  /** exit 127 的成因短语（工具未安装）。 */
+  /** 原因短语：工具没装（exit 127）。 */
   readonly toolMissing: string;
-  /** exit 126 的成因短语（不可执行）。 */
+  /** 原因短语：命令不可执行（exit 126）。 */
   readonly toolNotExecutable: string;
-  /** 成因短语 → "门禁没有运行"（{cause}）。 */
+  /** 把原因短语拼成"门禁没有运行"（{cause}）。 */
   readonly toolNotRun: string;
-  /** 沙箱策略解析失败（{message} 错误摘要）。 */
+  /** 沙箱策略读不出来（{message} 错误摘要）。 */
   readonly policyUnresolvable: string;
   /** 沙箱在本机不可用（{message}）。 */
   readonly sandboxUnavailable: string;
   /** 门禁进程起不来（{message}）。 */
   readonly gateStartFailed: string;
-  /** 门禁失败沉淀进记忆网关的正文（{command}/{root}/{failure}）。 */
+  /** 把门禁失败写进记忆网关的正文（{command}/{root}/{failure}）。 */
   readonly memoryFeedback: string;
-  /** 记忆正文的数据边界标注：失败正文来自仓库，是指令面之外的证据。 */
+  /** 记忆正文里的内容来源说明：失败正文来自仓库，是供定位问题的证据，不是要执行的指令。 */
   readonly memoryEvidenceNotice: string;
 }
 
@@ -147,22 +148,22 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
   },
 };
 
-/** 渲染模板里的 {name} 占位符；未提供的名字留空串（宁可少一段说明，也不给模型留裸花括号）。
- *  与 client 半官方 `@deepseek-ai/dsh-client-locale` 的 Translate 插值同语义（宿主同规则）。
+/** 渲染模板里的 {name} 占位符；没给值的名字替换成空串（宁可少一段说明，也不给模型留一对没替换的花括号）。
+ *  与 client 侧官方 `@deepseek-ai/dsh-client-locale` 的 Translate 插值语义相同（宿主用同一条规则）。
  *
- *  查参数走 `Object.entries` 摊成的 Map：只取自有可枚举键，`{constructor}` / `{toString}`
- *  这类原型链名字天然不在表里，于是"未提供的名字留空串"由数据结构保证，而不是靠一次判空。
+ *  取值用 `Object.entries` 转成的 Map：只取自有可枚举键，`{constructor}` 和 `{toString}`
+ *  这类原型链上的名字本来就不在这张表里，于是"没给值的名字替换成空串"由数据结构保证，不用额外判空。
  *  @param text - 字典里的整行模板。
  *  @param params - 占位符名 → 值（数字会转成字符串）。
  *  @returns 替换后的文本。
  */
 export function renderTemplate(text: string, params: Record<string, string | number>): string {
-  // 先摊成 Map：`Object.entries` 只取自有可枚举键，原型链上的 `constructor` / `toString`
-  // 天然不在表里，于是"未提供的名字留空串"这条契约由数据结构保证，而不是靠一次判空。
+  // 先转成 Map：`Object.entries` 只取自有可枚举键，原型链上的 `constructor` 和 `toString`
+  // 不在表里，于是"没给值的名字替换成空串"这条契约由数据结构保证，而不是靠多一次判空。
   const provided = new Map(Object.entries(params));
-  // 占位符名按「花括号里任意非花括号内容」匹配：只认 \w 会把 {gate.command} 这类
-  // 名字留在正文里，与「未提供的名字留空串」的契约相悖。分组必须具名（lint 的
-  // prefer-named-capture-group），回调用的是位置参数，两者指向同一个捕获。
+  // 占位符名按"花括号里任何不含花括号的内容"匹配：只认 \w 会把 {gate.command} 这类
+  // 名字留在正文里，和"没给值的名字替换成空串"这条契约不一致。分组必须具名（lint 的
+  // prefer-named-capture-group），回调用的是位置参数，两者指的是同一个捕获。
   return text.replaceAll(
     /\{(?<key>[^{}]+)\}/gu,
     (_match: string, key: string) => provided.get(key)?.toString() ?? "",

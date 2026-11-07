@@ -1,6 +1,6 @@
-// 端到端：**真 tsc 进程**的门禁腿。host.test.ts 的门禁用 mock shell 回放退出码；
+// 端到端：真的起一个 tsc 进程来验这条门禁。host.test.ts 里那几条门禁用 mock shell 回放退出码；
 // 这一层用官方本地执行器（LocalSubprocessRuntime + LocalBashExecutor，与宿主同一对）
-// 真 spawn TypeScript 编译器，验证「门禁探测 → 命令执行 → 退出码分类」在真实进程上
+// 真 spawn TypeScript 编译器，验证「门禁命令的探测 → 命令执行 → 退出码分类」在真实进程上
 // 成立：坏工程非零退出（code-failure 语义），干净工程退 0（pass）。
 import { afterEach, describe, it } from "vitest";
 import { strict as assert } from "node:assert";
@@ -55,7 +55,7 @@ async function makeProject(root: string, broken: boolean): Promise<void> {
   await writeFile(entryPath, entry, "utf8");
 }
 
-/** 官方执行器真跑一条命令，回退出码（分类判据的数据源）。 */
+/** 用官方执行器真跑一条命令，取回退出码（分类所用的数据来源）。 */
 async function runIn(ctx: Context, command: string, workdir: string): Promise<number> {
   const shell = ctx.shell as unknown as {
     resolve: (request: { command: string; workdir: string }) => unknown;
@@ -67,7 +67,7 @@ async function runIn(ctx: Context, command: string, workdir: string): Promise<nu
   return result.exitCode;
 }
 
-describe("真 tsc 门禁进程", () => {
+describe("真实 tsc门禁进程", () => {
   afterEach(async () => {
     const current = rig;
     rig = undefined;
@@ -77,7 +77,7 @@ describe("真 tsc 门禁进程", () => {
     }
   });
 
-  it("门禁探测认出裸 TS 工程；坏工程真跑非零（code-failure），干净工程退 0（pass）", async () => {
+  it("探测认出非 workspace 的 TS 工程；有错误的工程真跑返回非零（code-failure），干净的工程退 0（pass）", async () => {
     rig = await boot();
     const { ctx, dir } = rig;
     // 探测：非 workspace + package.json + tsconfig.json ⇒ tsc 门禁（假失败比漏检查更贵的

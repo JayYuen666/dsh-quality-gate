@@ -1,4 +1,4 @@
-// host 半文案字典（lib/messages.ts）的双语契约：
+// host 这边的文案表（lib/messages.ts）的双语契约：
 //   1. 两语键集一致、值都是非空串、且不是"把中文抄一遍"；
 //   2. 带变量整行的 {占位符} 名字两语一致（漏一个占位符 = 模型收到半句话）；
 //   3. renderTemplate 的三条分支（字符串 / 数字 / 字典里没给的名字）。
@@ -15,7 +15,7 @@ const keys = Object.keys(MESSAGES.zh);
 /** 模板里的 {占位符} 名字集合（不具名捕获组，避开 dot-notation 与 TS4111 的相互要求）。 */
 function placeholders(template: string): Set<string> {
   // 必须成对（{ 起、} 止）才算占位符：只按花括号切分会把 "Save" 这类无括号的整串
-  // 误当成占位符，也会把缺右花括号的 `{name` 当合法名字（注释契约与实现就分家了）。
+  // 误当成占位符，也会把缺右花括号的 `{name` 当合法名字（注释里的契约和实现就不一致了）。
   // 不用捕获组：prefer-named-capture-group 与 noPropertyAccessFromIndexSignature
   // 对 match.groups 的写法互斥（同仓 schema-coverage.ts 记过这个坑）。
   const out = new Set<string>();
@@ -65,7 +65,7 @@ describe("host 消息字典（中英双语）", () => {
     }
   });
 
-  it("注入正文里的变量渲染后不留裸花括号（zh / en 同一入参）", () => {
+  it("注入正文里的变量渲染后不留下没替换的花括号（zh / en 同一入参）", () => {
     const params = {
       command: "pnpm check",
       root: "/w/proj",
@@ -86,9 +86,9 @@ describe("host 消息字典（中英双语）", () => {
       message: "boom",
       failure: "TS2345",
     };
-    // 反查覆盖关系才是这条用例要的判据：renderTemplate 的契约是「未提供的名字留空串」，
-    // 所以光断言渲染结果里没有裸花括号是恒真的（漏给参数也照样留空）。这里逐个模板把
-    // 占位符名字拿去比 params 的键，漏一个就红——后者才是"漏变量"的可红判据。
+    // 这条用例要的是「模板里的占位符名字都在 params 里」这层反查：renderTemplate 的契约是「未提供的名字留空串」，
+    // 所以只断言渲染结果里没有没替换的花括号永远成立（少给参数也照样留空）。这里逐个模板把
+    // 占位符名字拿去比 params 的键，漏一个就失败——这才是能查出"漏变量"的那条断言。
     const provided = new Set(Object.keys(params));
     for (const key of keys) {
       for (const dict of [zh, en]) {
@@ -99,7 +99,11 @@ describe("host 消息字典（中英双语）", () => {
           [],
           `${key} 的占位符没有被 params 覆盖：${uncovered.join(", ")}`,
         );
-        assert.doesNotMatch(renderTemplate(template, params), /[{}]/u, `${key} 渲染后留了裸花括号`);
+        assert.doesNotMatch(
+          renderTemplate(template, params),
+          /[{}]/u,
+          `${key} 渲染后留下了没替换的花括号`,
+        );
       }
     }
   });
@@ -110,7 +114,7 @@ describe("renderTemplate（{name} 插值）", () => {
     assert.equal(renderTemplate("{one}+{two}={one}", { one: "x", two: 1 }), "x+1=x");
   });
 
-  it("字典里没有的名字留空串（宁可少一段说明，也不给模型留裸花括号）", () => {
+  it("字典里没有的名字留空串（宁可少一段说明，也不给模型留下没替换的花括号）", () => {
     assert.equal(renderTemplate("前{missing}后", { other: "x" }), "前后");
   });
 
@@ -131,7 +135,7 @@ describe("renderTemplate（{name} 插值）", () => {
   });
 
   it(String.raw`占位符名可以含点号等非 \w 字符（整段按名查表，不留半截）`, () => {
-    // 只按 \w 匹配时 `{gate.command}` 原样留在正文里，模型读到的是裸花括号。
+    // 只按 \w 匹配时 `{gate.command}` 原样留在正文里，模型读到的是没替换的花括号。
     assert.equal(
       renderTemplate("{gate.command} 失败", { "gate.command": "pnpm check" }),
       "pnpm check 失败",
