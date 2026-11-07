@@ -93,7 +93,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面是**两条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件）与 `- id: quality-gate`、`name` 为裸包名（宿主只对裸包名条目扫 `dsh.client`）；`dsh plugin --profile web add/remove` 维护这两行。
+- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面只有一条 `- id: quality-gate`、`name` 为裸包名（宿主只对裸包名条目扫 `dsh.client`）；`dsh plugin --profile web add/remove` 维护这一行。卡片组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不依赖第二份包被装载。
 - Host 侧唯一必需的依赖是 `settings`（`default.inject = ["settings"]`）；取值的优先级是：设置卡里的运行时值 > 注册行的 `config:` > schema 里的内置默认。
 - Client 半（`dsh.client.platform = web`、`immediately: true`）往插件管理页的 `plugins.bundle.config` 槽注入一张卡。两枚标识刻意不同源：槽位 key 是 **bundle 包名** `@jayyuen66/dsh-quality-gate`，设置命名空间与 `configForms.get()` 用的是**裸条目 id** `quality-gate`——写混了卡片哪都不渲染。
 - 卡片的保存明确分两步：改动先留在本地暂存（状态条提示），点"保存"才逐键**串行**写入并检查返回的 `Promise<boolean>` 受理标记——第一个 `false` 就停手、显示 `saveRejected` 并保留还没写入的改动；写入 reject 显示 `saveFailed`。保存期间输入框还能编辑，这期间产生的新改动留在待保存内容里，不会被这一次保存顺带抹掉；"撤销"丢弃暂存。清空一个输入框 = unset，恢复该字段的 schema 默认值。

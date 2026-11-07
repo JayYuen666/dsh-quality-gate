@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-quality-gate",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "dsh 插件：回合收口质量门禁（在 agent/turn-stopping 按项目形态跑 pnpm check / cargo check / ruff check / tsc，未过则注入修复指令开新轮）",
   "keywords": [
     "ci",
@@ -131,10 +131,7 @@
     },
     "client": {
       "platform": "web",
-      "immediately": true,
-      "external": [
-        "@jayyuen66/dsh-plugin-shared/client"
-      ]
+      "immediately": true
     }
   }
 }

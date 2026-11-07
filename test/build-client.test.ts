@@ -98,8 +98,10 @@ describe("quality-gate client 构建", () => {
   it("数字输入用 shared 的 NumberField（外部值同步由该组件实现，渲染行为由 shared 的测试覆盖）", () => {
     // 外部值同步（useEffect + lastEmitted）写在共享客户端模块的 NumberField 里，本仓只负责选对组件：
     // 源码里出现两处 createElement(NumberField（注入配额与门禁预算）才算这条接线成立。
-    // 共享组件现在由模块图里的 `@jayyuen66/dsh-plugin-shared/client` 这一行提供，不再内联进本包；
-    // 产物必须保留这条外部请求，内联的话每份卡片会各自带一份组件实现。
+    // 组件在构建期内联进产物（build-client.mjs 的外置清单只留 react / zod）：对
+    // `@jayyuen66/dsh-plugin-shared/client` 的运行期外置要靠另一份包被装载成模块表条目才兑现，
+    // 传递依赖安装形状下宿主可能不排进启动图，页面启动时落进 "missed the module table"
+    // （dsh-ocr-review 仓 issue #2）。产物里出现这条说明符即外置回流，当场判红。
     const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const code = readFileSync(src, "utf8");
     assert.match(
@@ -111,10 +113,10 @@ describe("quality-gate client 构建", () => {
       2,
       "两处数字输入都走 NumberField",
     );
-    assert.match(
+    assert.doesNotMatch(
       readBundle(),
       /dsh-plugin-shared\/client/u,
-      "共享卡片组件必须作为外部模块请求，不能内联进本包",
+      "共享卡片组件必须内联进本包，产物不得保留对 shared/client 的模块表请求",
     );
   });
 
