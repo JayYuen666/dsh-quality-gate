@@ -1,6 +1,7 @@
-// 0.1.3 修复②（「卡片保存期间的编辑不再被静默丢弃」）的行为用例：直接驱动 writeTouched
-// 的串行写入与草稿回收。React 组件接线是渲染面、留在覆盖率分母外；这段纯异步逻辑的
-// 契约（受理位消费、在途编辑保留、拒写/传输失败不清草稿）在这里逐行为钉住。
+// 这一组用例验的是 0.1.3 那次修复里的第二条（「卡片保存期间的编辑不再被静默丢掉」）的实际行为：
+// 直接驱动 writeTouched 的串行写入与草稿回收。React 组件的接线属于渲染，不计入覆盖率统计；
+// 这段纯异步逻辑的契约（要用返回值判断是否受理、在途期间的编辑要保留、拒写和传输失败都不清草稿）
+// 在这里逐条行为验证。
 import { beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { writeTouched } from "../src/client-entry.ts";
@@ -33,7 +34,7 @@ interface Harness {
 /**
  * 造一组与生产接线同形的通道。write 回调拿到 edit()：在写请求在途时把「用户又改了」
  * 的 updater 排进同一条 setTouched 队列——保存期间输入框并未禁用，用户编辑与保存收尾
- * 走的是同一个 setter，这正是被修复的那个竞态面。
+ * 走的是同一个 setter，这正是被修复的那个竞态。
  */
 function makeHarness(
   snapshot: Record<string, unknown>,
@@ -49,7 +50,7 @@ function makeHarness(
     t: translator,
     keys: Object.keys(snapshot),
     // 冻结副本：生产实现若改成原地删键/改键，严格模式下当场抛错；正向的 setTouched
-    // 提交新对象则不受影响（草稿层不可被原地改是这条用例的数据完整性面）。
+    // 提交新对象则不受影响（草稿层不可被原地改是这条用例要保证的数据完整性）。
     touched: Object.freeze({ ...snapshot }),
     set: (field, value) => {
       writes.push(`set:${field}=${String(value)}`);
@@ -120,7 +121,7 @@ describe("writeTouched：保存期间的编辑不丢", () => {
     assert.equal(harness.state.saveError, null);
   });
 
-  it("在途期间把同一键改回快照值：该键视为已落盘，从草稿清除", async () => {
+  it("在途期间把同一键改回快照值：该键算已经写入，从草稿里清除", async () => {
     const harness = makeHarness({ alpha: 1 }, async (_field, _value, edit) => {
       edit((prev) => ({ ...prev, alpha: 1 }));
       return true;
@@ -131,7 +132,7 @@ describe("writeTouched：保存期间的编辑不丢", () => {
     assert.equal(harness.state.saveError, null);
   });
 
-  it("宿主拒写（受理位 false）：首个被拒即停，草稿全量保留并给出可见反馈", async () => {
+  it("宿主拒写（返回 false）：第一个被拒就停，草稿全部保留并给出可见反馈", async () => {
     const harness = makeHarness({ alpha: 1, beta: 2 }, async () => false);
     await writeTouched(harness.channels);
     assert.deepEqual(harness.writes, [ALPHA_SET_CALL], "后续键不再写，避免半写状态");
@@ -149,7 +150,7 @@ describe("writeTouched：保存期间的编辑不丢", () => {
     assert.equal(harness.state.saveError, "t:saveFailed");
     assert.deepEqual(tCalls.at(-1), { key: "saveFailed", params: { message: "boom" } });
     assert.equal(harness.state.busy, false);
-    assert.match(loggedText(), /save write failed/u, "传输失败要留在算子日志里，不静默");
+    assert.match(loggedText(), /save write failed/u, "传输失败要留在算子日志里，不能静默丢掉");
   });
 
   it("快照里被清成 undefined 的键走 unset 通道：受理后同样从草稿清除", async () => {
@@ -167,7 +168,7 @@ describe("writeTouched：保存期间的编辑不丢", () => {
       async () => true,
     );
     await writeTouched(harness.channels);
-    assert.deepEqual(harness.writes, [], "不合规地址不能写进设置面");
+    assert.deepEqual(harness.writes, [], "不合规的地址不能写进设置");
     assert.deepEqual(harness.draft(), {
       memoryGatewayUrl: "https://user:pass@gateway.example",
     });

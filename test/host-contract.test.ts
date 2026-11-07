@@ -1,11 +1,11 @@
-// host 契约补充测试（补齐未覆盖分支）：
-// 从「对外行为契约」验证 turn-stopping 门禁批处理的顺序依赖语义：
-//   1. 多根归并出多个门禁时，第一个失败注入成功后停止（mustStop 短路），
-//      不继续跑剩余门禁（一次只注入一个失败）；
-//   2. 门禁总预算耗尽（remaining < 最小可用预算）时跳过剩余门禁，并把"未能执行"说明
+// host 对外行为的补充测试（补上之前没覆盖到的分支）：
+// 从对外行为这一层验证 turn-stopping 批量跑门禁时的先后依赖：
+//   1. 多个项目根合出多条门禁时，第一个失败注入成功之后就停（mustStop 短路），
+//      不继续跑剩下的门禁（一次只注入一个失败）；
+//   2.门禁的总时间用完（remaining 小于最小可用预算）时跳过剩下的门禁，并把"未能执行"说明
 //      注入给模型（console.info 计数，不 warn、不制造假失败注入）；
 //   3. 所有门禁通过 → 会话配额重置（下一轮重新计数）；
-//   4. lesson bus 的 report 异步落库（返回 rejected Promise）时失败同样进日志——
+//   4. lesson bus 的 report 异步写库（返回 rejected Promise）时，失败同样进日志——
 //      旧代码只有同步 catch，异步失败既不留日志又给进程留一枚未处理拒绝。
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
@@ -27,19 +27,19 @@ vi.mock(import("../lib/gateway-feedback.ts"), async (importOriginal) => {
   };
 });
 
-/** 本次 fire 交进来的 agent.session（观察面替身的日志来源，见下面 mock 的 on）。 */
+/** 本次 fire 交进来的 agent.session（观察接口替身的日志来源，见下面 mock 的 on）。 */
 let firedSession: unknown;
 
-/** 观察面释放器的替身：本文件的用例不数释放次数，只需要这一位在场上。 */
+/** 观察接口释放器的替身：本文件的用例不数释放次数，只需要这一位在场上。 */
 function noopDispose(): void {
   void 0;
 }
 
 /**
  * 观察面替身的交付：读 fired session 上夹具挂的那份日志与 fork 切点（**只有测试侧**读
- * snapshotEvents 闭包——生产侧已改走官方 ctx.sessionQuery.observeSession，见 host.ts 的
- * SessionQueryFace）。返回刻意留 unknown，好让被测代码自己的数组判据与"非数组交付"那档
- * 照样喂得进去。
+ * （**只有测试侧**读 snapshotEvents 闭包——生产侧已改走官方 ctx.sessionQuery.observeSession，
+ * 见 host.ts 的 SessionQueryFace）。返回类型刻意留 unknown，好让被测代码自己那句数组判断
+ * 和"交回来的不是数组"那一档分支照样能走到。
  */
 function observationOfFiredSession(): {
   events: unknown;
@@ -50,9 +50,9 @@ function observationOfFiredSession(): {
     | { snapshotEvents?: (from?: number) => unknown; inheritedEventCount?: number | undefined }
     | undefined;
   const raw = typeof session?.snapshotEvents === "function" ? session.snapshotEvents(0) : [];
-  // 刻意**不**在这里补默认值：夹具没挂 fork 切点时就此交 undefined，让被测代码自己那句
-  // `observation.inheritedEventCount ?? 0` 的兜底分支真的被走到（在本处代它兜底就等于把
-  // 那条分支从覆盖率与语义上一起抹掉）。
+  // 刻意**不**在这里补默认值：夹具没挂 fork 切点时就这样返回 undefined，让被测代码自己那句
+  // `observation.inheritedEventCount ?? 0` 的兜底分支真的被走到（在这里替它补默认值，就等于把
+  // 那条分支从覆盖率和语义上一起抹掉）。
   const cut = session?.inheritedEventCount;
   return { events: raw, inheritedEventCount: cut, [Symbol.dispose]: noopDispose };
 }
@@ -64,7 +64,7 @@ interface MockCtx {
   handlers: Record<string, (payload: unknown) => void>;
   followupCalls: unknown[];
   shellCommands: unknown[];
-  /** shell.execute 每次调用的耗时（ms），模拟门禁执行时间。 */
+  /** shell.execute 每次调用的耗时（ms），用来模拟一条门禁命令跑多久。 */
   gateDelayMs: number;
   gateExitCode: number;
   /** 凭据服务：记忆反馈的 key 从这里解析（undefined = 组合里没装该服务）。 */
@@ -78,8 +78,8 @@ interface MockCtx {
   inject: (deps: readonly string[], attach: (child: unknown) => void) => void;
   get: (name: string) => unknown;
   /**
-   * 官方事件读面替身（ctx.sessionQuery.observeSession）。交回 fired session 那份日志切片，
-   * 游标由生产侧自己切；模拟"未装配"就 delete ctx.sessionQuery，模拟"拒绝/非数组交付"
+   * 官方事件读取接口（ctx.sessionQuery.observeSession）的测试替身。返回 fired session 那份日志切片，
+   * 游标由生产侧自己切；要模拟"未装配"就 delete ctx.sessionQuery，要模拟"拒绝／返回的不是数组"
    * 就整个换掉本字段。
    */
   sessionQuery?: {
@@ -111,11 +111,11 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
       maxInjectsPerTurn: 2,
       gateBudgetMs: 300_000,
       memoryFeedback: true,
-      // 记忆反馈要"开关 + 地址"两项齐了才启用；mock 给出可用配置，
-      // 让"反馈自身失败"的测试真的走到 pushGateFeedback（而不是被前置门禁挡掉）。
+      // 记忆反馈要"开关 + 地址"两项都齐了才启用；mock 给出可用的配置，
+      // 让"反馈自己失败"的那几条测试真的走到 pushGateFeedback（而不是被前面的条件挡掉）。
       memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
-      // W4 非 volatile 部署值：resolve 交普通值（refsOf 按 meta.volatile 区分形状）
+      // 非 volatile 的部署级设置：resolve 交普通值（refsOf 按 meta.volatile 区分形状）
       maxRootDepth: 10,
       gateStdoutMaxBytes: 65_536,
       ...overrides,
@@ -148,8 +148,8 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
       return (ctx as unknown as Record<string, unknown>)[name];
     },
     on(event, handler) {
-      // 记本次 fire 的 agent.session，好让观察面替身交回夹具自己挂的那份日志
-      // （**只有测试侧**读它；生产侧已不读 snapshotEvents）。
+      // 记下这次 fire 的是哪个 agent.session，好让观察用的替身返回夹具自己挂的日志
+      // （**只有测试侧**读它；生产侧已经不读 snapshotEvents）。
       ctx.handlers[event] = (payload: unknown) => {
         // 载荷恒为宿主交出的事件对象（每个 fire 点都传字面量对象），故首段不写 `?.`；
         // `agent` 是可缺字段（`{ turn: 1 }` 那类载荷就没有），那一段守卫保留。
@@ -158,8 +158,8 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
       };
     },
     effect(fn) {
-      // 立即执行工厂（apply 的页面策略与 locale 注册都在 effect 里发生），清理回调本文件
-      // 不使用：卸载收口由其他套件覆盖。
+      // 立即执行工厂（apply 的页面策略与 locale 注册都发生在 effect 里），本文件不用清理回调：
+      // 卸载时的收尾由别的测试套件覆盖。
       fn();
     },
     shell: {
@@ -256,7 +256,7 @@ function warnCapture(): { lines: string[]; restore: () => void } {
 }
 
 /**
- * 未处理拒绝探针：装一枚 process 级监听，把漏网的 rejection 收进数组。
+ * 未处理拒绝的探测：装一枚 process 级监听，把漏网的 rejection 收进数组。
  * `stop` 必须进 finally——worker 进程被所有用例共用，残留监听会把别人的
  * rejection 也算到本用例头上。
  */
@@ -275,10 +275,10 @@ function rejectionProbe(): { reasons: unknown[]; stop: () => void } {
 }
 
 describe("turn-stopping 批处理的顺序依赖语义", () => {
-  it("多根多门禁：第一个失败注入成功后停止（mustStop 短路，不跑剩余门禁）", async () => {
+  it("多个根多条门禁：第一个失败注入成功后停止（mustStop 短路，不跑剩下的门禁）", async () => {
     const scratch: string[] = [];
     const ctx = makeCtx();
-    // 第一个门禁失败
+    // 第一条门禁失败
     ctx.gateExitCode = 1;
     const projectA = makeProject("a", scratch);
     const projectB = makeProject("b", scratch);
@@ -290,8 +290,8 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
       ];
       ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(ctx, events), turn: 1 });
       await sleep(50);
-      // 契约：一次只注入一个失败——第一个失败注入后，剩余门禁不执行
-      assert.equal(ctx.shellCommands.length, 1, "mustStop 后不应再跑剩余门禁");
+      // 契约：一次只注入一个失败——第一个失败注入之后，剩下的门禁不再执行
+      assert.equal(ctx.shellCommands.length, 1, "mustStop 之后不应再跑剩下的门禁");
       assert.equal(ctx.followupCalls.length, 1, "只注入一次修复指令");
     } finally {
       for (const root of scratch) {
@@ -300,13 +300,13 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
     }
   });
 
-  it("总预算耗尽 → 跳过剩余门禁并**注入未执行说明**（不再只 warn = 静默通过）", async () => {
+  it("总时间用完 → 跳过剩下的门禁并**注入未执行说明**（不再只是 warn，那等于静默放过）", async () => {
     const scratch: string[] = [];
-    // 预算 6s：第一个门禁 sleep 1.5s 后剩余 4.5s < MIN_USEFUL_GATE_MS(5s) → 第二个被跳过
-    // memoryFeedback 显式关掉：本用例断言「零 warn」，别让记忆反馈路径的告警混进这条判据。
+    // 总预算 6 秒：第一条门禁sleep 1.5 秒后还剩 4.5 秒 < MIN_USEFUL_GATE_MS(5 秒) → 第二条被跳过
+    // memoryFeedback 显式关掉：本用例断言一条 warn 都没有，别让记忆反馈那条路径的告警混进这条判断。
     const ctx = makeCtx({ gateBudgetMs: 6000, memoryFeedback: false });
     ctx.gateDelayMs = 1500;
-    // 门禁都通过（验证注入不是因为代码失败，而是"没跑成"）
+    // 门禁都通过（用来确认注入不是因为代码有问题，而是"没跑成"）
     ctx.gateExitCode = 0;
     const projectA = makeProject("a", scratch);
     const projectB = makeProject("b", scratch);
@@ -333,9 +333,9 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
         console.warn = origWarn;
         console.info = origInfo;
       }
-      // 契约：第一个 gate 跑了；第二个因预算耗尽被跳过
-      assert.equal(ctx.shellCommands.length, 1, "剩余门禁应被预算耗尽跳过");
-      // 审计 MEDIUM 项：跳过的检查不得静默算通过——必须注入"未执行"说明
+      // 契约：第一条检查跑了；第二条因为总时间用完被跳过
+      assert.equal(ctx.shellCommands.length, 1, "剩下的门禁应因为总时间用完被跳过");
+      // 审计里那条 MEDIUM：被跳过的检查不能算通过——必须注入"未执行"的说明
       assert.equal(ctx.followupCalls.length, 1, "被跳过的门禁必须注入未执行说明");
       const injected = ctx.followupCalls[0] as { content: { text: string }[] };
       const text = injected.content.map((chunk) => chunk.text).join("");
@@ -412,7 +412,7 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
     assert.deepEqual(calls, [{ presentation: { auto: false }, owner: ctx.fiber }]);
   });
 
-  it("followup 抛错 → 回滚配额计数并继续剩余门禁（注入未发生则不短路）", async () => {
+  it("followup 抛错 → 回滚配额计数并继续剩下的门禁（注入没发生就不短路）", async () => {
     const scratch: string[] = [];
     const ctx = makeCtx();
     ctx.gateExitCode = 1;
@@ -438,9 +438,9 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
       } finally {
         console.error = origError;
       }
-      // 契约：第一个注入失败 → 不短路（mustStop=false）→ 第二个门禁继续执行；
+      // 契约：第一个注入失败 → 不短路（mustStop=false）→ 第二条门禁继续执行；
       // 配额回滚（count 恢复），不会因"没注入成功"占用注入次数。
-      assert.equal(ctx.shellCommands.length, 2, "注入失败后应继续剩余门禁");
+      assert.equal(ctx.shellCommands.length, 2, "注入失败后应继续跑剩下的门禁");
       assert.ok(
         errors.some((errorText) => errorText.includes("followup failed")),
         "followup 失败应记录 error",
@@ -519,7 +519,7 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
             warnText.includes("lessonLoop report failed:") &&
             warnText.includes("lesson bus async down"),
         ),
-        "异步失败必须与同步抛错落进同一条日志（否则被静默吞掉）",
+        "异步失败必须与同步抛错落进同一条日志（否则就被静默丢掉）",
       );
       assert.deepEqual(probe.reasons, [], "rejection 必须被接住：漏出去会污染整个宿主进程");
     } finally {
@@ -554,7 +554,7 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
             warnText.includes("memory feedback skipped") &&
             warnText.includes("gateway unreachable (mock)"),
         ),
-        "记忆反馈失败应有 warn（且必须真的走到 pushGateFeedback 才失败，不是被前置门禁挡掉）",
+        "记忆反馈失败应该有一条 warn（而且必须是真的走到了 pushGateFeedback 才失败，不是被前面的条件挡掉）",
       );
     } finally {
       console.warn = origWarn;

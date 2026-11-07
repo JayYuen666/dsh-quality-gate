@@ -51,7 +51,7 @@ jobs:
         with:
           # 本工作流只有 checkout / init / analyze 三步，不需要任何 git 写操作，token
           # 没有留在 .git/config 里的理由；这个 job 又握着 security-events: write，
-          # 少一处可被读到的凭据就少一条放大面。
+          # 少一处可被读到的凭据就少一条被放大的路径。
           persist-credentials: false
       - name: Initialize CodeQL
         uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1

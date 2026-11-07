@@ -15,7 +15,7 @@ on:
   schedule:
     - cron: "37 3 * * 1"
 # 同一分支的新推送作废排队中的旧 run：门禁一趟要几十秒，留着它只会晚到一个与当前提交无关的红灯。
-# 发布用的是另一套口径（见 publish.yml 的 cancel-in-progress: false）——发布不能中途取消。
+# 发布用的是另一套规则（见 publish.yml 的 cancel-in-progress: false）——发布不能中途取消。
 # 组的键里带 event_name：周度漂移检测与 main 上的 push 都落在 refs/heads/main 上，
 # 只按 ref 分组会让后到的把先到的取消掉，而周度那一跑是「执行环境有没有漂移」的唯一信号，
 # 被取消等于这一周没量到。取消只给 push 与 pull_request：同一分支连推几次时，旧那一轮
@@ -28,9 +28,9 @@ permissions:
   contents: read
 # pnpm 取具体补丁版本而不是主版本 12：`version: 12` 让每次运行拿上游最新的 12.x，补丁差在安装树的
 # 解法上是可观察的行为差异（本族各仓 cordis.patch.yml 就记着 pnpm 某个小版本的 add 缺陷）。取值与
-# 伞根 packageManager 同源，也是各仓 lockfile 当期由之生成的那一枚。口径：九仓 CI 都在 workflow 级
+# 伞根 packageManager 同源，也是各仓 lockfile 当期由之生成的那一枚。规则：九仓 CI 都在 workflow 级
 # env 里写这枚字面值；唯一例外是 dsh-lesson-loop，它的 package.json 自带 packageManager，由
-# pnpm/action-setup 自己读，再写 env 就成了两份真源。
+# pnpm/action-setup 自己读，再写 env 就成了两份唯一来源。
 env:
   PNPM_VERSION: 12.11.2
 jobs:
@@ -68,18 +68,42 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
       # registry-url 留空：本仓的 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
-      # 配上 registry-url 反而会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成
+      # 配上 registry-url 反而会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析规则改成
       # 和开发者不一样。
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
+      # Windows runner 的默认 shell 是 pwsh：pwsh 把 pnpm 解析成 .ps1 垫片时，pnpm 步会
+      # 零输出、秒退 0 而结论 success。本仓的 pnpm 步显式走 bash；这一步在每一格先把
+      # 解析到的 pnpm 路径与版本打出来，作为「工具就位」的正向证据。
+      - name: pnpm 可用性
+        shell: bash
+        run: |
+          command -v pnpm
+          pnpm --version
       # --frozen-lockfile：lockfile 与 package.json 不一致时直接失败，而不是在 CI 里静默改一份
       # lockfile 后继续跑——那样绿的是「CI 现场解出来的那棵树」，不是仓库里这一份。
-      - run: pnpm install --frozen-lockfile
-      # check 里已含 check:pack（对真 tarball 做入口/依赖形状/产物内容面体检），
+      - shell: bash
+        run: pnpm install --frozen-lockfile
+      # check 里已含 check:pack（对真 tarball 做入口/依赖形状/产物内容的体检），
       # 所以"仓库全绿但装出去坏"这一类坑在这一趟里就会被拦下。
-      - run: pnpm run check
+      - shell: bash
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -o pipefail
+          pnpm run check 2>&1 | tee "$RUNNER_TEMP/gate.log"
+      # 假绿的形态是「格子 success 但什么都没跑」（pwsh + pnpm 的历史实测）。判据落在门禁
+      # 本该产出的行上：没有 vitest 的测试汇总行就是没真跑，这里把红补上。不带 if：
+      # 门禁真红时本步不执行，不盖住真正的失败原因。
+      - name: 断言门禁真跑出测试
+        shell: bash
+        run: |
+          if ! grep -q "Test Files" "$RUNNER_TEMP/gate.log"; then
+            echo "::error::门禁日志里没有 vitest 测试汇总行——判定步骤可能没有真跑"
+            exit 1
+          fi
       # 门禁不该改写仓库内容。判据落在**跟踪文件**上：产物（host.js / client.js / types/）都在
       # .gitignore 里，所以这里为「零」意味着构建没有回头动过被跟踪的字节。
       # 只在 ubuntu 格判：win32 上 core.autocrlf 会让检出本身带上 CRLF，那与门禁无关。
@@ -113,7 +137,7 @@ jobs:
 
       # 运行页顶部的摘要：把结果留在这一页，不必点进每一步的日志里找。
       # 它必须排在 job 的最后一步：job.status 在执行到那一步时才求值，后面若还有判定步骤，
-      # 后续步骤失败而摘要早已写成 success——那一行会成为唯一的结论面，且是错的。
+      # 后续步骤失败而摘要早已写成 success——那一行会成为唯一的结论，且是错的。
       - name: 运行摘要
         if: always()
         # 脚本体是 bash 写法（`{ …; } >> "$GITHUB_STEP_SUMMARY"`）；矩阵含 windows 格，
@@ -198,7 +222,7 @@ jobs:
           if (NAME === undefined) throw new Error("探针工程没有记录任何依赖：npm install 没落到 package.json");
           const mod = await import(NAME);
           // 入口形状两态都收：本仓用默认导出，而同级包里也有纯命名导出的。写死一种形态
-          // 会让另一种假红——判据是「apply 与 Config 能从入口拿到」，不是「挂在 default 上」。
+          // 会让另一种误报——判据是「apply 与 Config 能从入口拿到」，不是「挂在 default 上」。
           const plugin = mod.default ?? mod;
           if (typeof plugin?.apply !== "function") throw new Error("入口没有 cordis 插件形状：缺 apply");
           if (plugin.Config === undefined) throw new Error("入口缺 Config：设置卡不会挂载");
@@ -240,7 +264,7 @@ jobs:
   # 来源证明是给「这次运行打出来的这份产物」出的第三方可验凭据，不是多一步验证：
   # 签在 PR 上，那张证明看起来属于本仓，指向的却是 PR 里 prepack 脚本产出的字节。
   # 它也不能靠在同一 job 里给某一步加 if 来做——id-token 与 attestations 是 job 级权限，
-  # 挂上去就等于 PR 也拿到了写入能力，权限面不会因为某一步被跳过而收窄。所以拆成独立 job。
+  # 挂上去就等于 PR 也拿到了写入能力，权限范围不会因为某一步被跳过而收窄。所以拆成独立 job。
   attest:
     needs: install-probe
     if: github.event_name != 'pull_request'
@@ -322,7 +346,7 @@ jobs:
           # 新增工作流默认走严格档：只有 ci.yml / publish.yml 需要 SC2016 豁免。
           # 按 glob 枚举而不是写死四份文件名：新增或改名的工作流不会被静默漏检。
           # 豁免式收到 shellcheck 的具体消息（而不仅是规则名）：-ignore 作用于整份文件，
-          # 裸 SC2016 会把这两份文件里将来真实写出的同类缺陷一并吞掉。
+          # 只按规则名豁免会把这两份文件里将来真实写出的同类缺陷一并吞掉。
           shopt -s nullglob
           for file in .github/workflows/*.yml; do
             case "$file" in

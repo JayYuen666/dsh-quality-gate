@@ -8,12 +8,12 @@ import { clientFreshnessProblems } from "./client-freshness.ts";
 import { bundleSlotPinProblems } from "./profile-bundle.ts";
 import { schemaCoverageProblems } from "./schema-coverage.ts";
 
-/** 构建产物相对本用例文件的位置（多条产物钉测都读它）。 */
+/** 构建产物相对本用例文件的位置（几条只读产物的断言都从这里取路径）。 */
 const CLIENT_BUNDLE_REL = "../client.js";
-/** 卡片入口源码相对本用例文件的位置（契约面断言都读它）。 */
+/** 卡片入口源码相对本用例文件的位置（要读源码原文的断言都从这里取路径）。 */
 const CLIENT_ENTRY_REL = "../src/client-entry.ts";
 
-/** 读取 client.js 产物正文；缺失时点名文件失败，而不是让各用例各自抛裸 ENOENT。 */
+/** 读取 client.js 产物正文；读不到时报错点名是哪个文件，而不是让每条用例各自抛出 ENOENT。 */
 function readBundle(): string {
   const clientPath = fileURLToPath(new URL(CLIENT_BUNDLE_REL, import.meta.url));
   assert.ok(
@@ -23,29 +23,30 @@ function readBundle(): string {
   return readFileSync(clientPath, "utf8");
 }
 
-// 三条跨包共用的门禁（产物新鲜度 / 卡片字段覆盖 / 槽位 key 漂移针）：helper 交回**问题清单**，
-// 断言写在本文件的用例体内。helper 自己调 it() 的旧写法等于把「声明用例」这段 setup 放到
-// 用例文件的所有 hook 之外（vitest/require-hook 模块根与 describe 体内都判它），挪进 beforeAll
-// 更不行——vitest 不允许在 hook 里定义用例；断言隔一层 helper 时 vitest/expect-expect 也看不见。
-// 判据本体（读哪两侧、比什么）仍在 helper 里，空数组即门禁通过，元素文本就是原来的报错信息。
-describe("quality-gate 产物门禁（helper 交回问题清单，断言写在这里）", () => {
+// 三条跨包共用的门禁（产物是否最新 / 卡片字段是否覆盖 host schema / 槽位 key 有没有写错标识）：
+// helper 返回问题列表，断言写在本文件的用例体内。helper 自己调 it() 的旧写法等于把"声明用例"
+// 这段准备工作放到用例文件的所有 hook 之外（vitest/require-hook 在模块根与 describe 体内都判它），
+// 挪进 beforeAll 更不行——vitest 不允许在 hook 里定义用例；断言隔了一层 helper 时
+// vitest/expect-expect 也看不见。比什么、读哪两侧仍然写在 helper 里：返回空数组即通过，
+// 数组里每条文本就是原来报错时给人的那句话。
+describe("quality-gate 产物检查（helper 返回问题列表，断言写在这里）", () => {
   it("client.js 与最新构建逐字节一致（改 src 后必须 node build-client.mjs）", async () => {
     assert.deepEqual(await clientFreshnessProblems(import.meta.url), []);
   });
 
-  it("卡片覆盖 host schema 全部字段（改 host 字段必须同步卡片或声明豁免）", () => {
+  it("卡片覆盖 host schema 的全部字段（改了 host 字段就要同步卡片，或声明例外）", () => {
     assert.deepEqual(
       schemaCoverageProblems(import.meta.url, {
         allowUnbound: [
           {
             field: "maxRootDepth",
             reason:
-              "W4 非 volatile 部署值：不占设置卡（宿主只投影 volatile 字段），只经 profile/cordis.yml 行 config 调整",
+              "非 volatile 的部署级设置：设置卡上没有它（宿主只把 volatile 字段投影到卡片），只能在 profile/cordis.yml 的那行 config 里调整",
           },
           {
             field: "gateStdoutMaxBytes",
             reason:
-              "W4 非 volatile 部署值：不占设置卡（宿主只投影 volatile 字段），只经 profile/cordis.yml 行 config 调整",
+              "非 volatile 的部署级设置：设置卡上没有它（宿主只把 volatile 字段投影到卡片），只能在 profile/cordis.yml 的那行 config 里调整",
           },
         ],
       }),
@@ -59,7 +60,7 @@ describe("quality-gate 产物门禁（helper 交回问题清单，断言写在�
 });
 
 describe("quality-gate client 构建", () => {
-  it('zod 必须外部化：产物经 require("zod") 取宿主模块表那份，而不是内联第二份', () => {
+  it('zod 必须外部化：产物用 require("zod") 拿宿主模块表里的那份，而不是内联第二份', () => {
     const text = readBundle();
     assert.match(text, /require\("zod"\)/u, "zod 应作为宿主模块被 require");
     assert.doesNotMatch(
@@ -73,31 +74,32 @@ describe("quality-gate client 构建", () => {
     const text = readBundle();
     assert.ok(text.includes("quality-gate"));
     assert.ok(text.includes("质量门禁"));
-    // i18n：两份语言的字典都要打进产物（缺 en 就是切语言后卡片空字）。
-    assert.ok(text.includes("No unsaved changes"), "en 字典必须随包产出");
+    // 两种语言的文案都要打进产物：缺英文那一份，切到英文后卡片上没有文字。
+    assert.ok(text.includes("No unsaved changes"), "英文文案必须随包产出");
   });
 
-  it("卡片 props 契约正确：读 useCard（框架把注入 hooks 转成 use* prop），不读会崩的 props.hooks", () => {
+  it("卡片 props 的用法正确：读 useCard（框架把注入的 hooks 转成 use* 形式的 prop），不读会崩溃的 props.hooks", () => {
     const text = readBundle();
-    // 框架 InjectFace/PropsHooks（client-runner 1715-1723）：注入的 { hooks: { card } } 被映射为 props.useCard
-    // 产物侧只钉能过压缩的形态：属性名与调用括号不随标识符改名消失。
+    // 框架的 InjectFace / PropsHooks（client-runner）把注入的 { hooks: { card } } 映射成 props.useCard。
+    // 产物里只断言压缩后仍然存在的形态：属性名和调用括号不会因为标识符改名而消失。
     assert.match(text, /\.useCard\(/u, "必须经 useCard prop 读快照");
-    // 负例必须在**源码**上判：产物里的局部标识符会被改名，按字面量 `props.hooks.card` 判是恒真断言
-    // （改写成 `const { card } = props.hooks` 也照样绿）。源码是契约面，注释行单独跳过。
+    // 反向的断言必须写在**源码**上：产物里的局部标识符会被改名，按字面量 `props.hooks.card`
+    // 判断永远成立（改写成 `const { card } = props.hooks` 也照样通过）。
+    // 源码才是这段代码真实写出来的样子，逐行读时要单独跳过注释行。
     const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const code = readFileSync(src, "utf8")
       .split("\n")
       .filter((line) => !line.trim().startsWith("//"))
       .join("\n");
     assert.match(code, /props\.useCard\(/u, "源码必须经 useCard prop 读快照");
-    assert.doesNotMatch(code, /props\.hooks/u, "源码不得直读 props.hooks（浏览器崩溃根因）");
+    assert.doesNotMatch(code, /props\.hooks/u, "源码不得直接读 props.hooks（浏览器崩溃的原因）");
   });
 
-  it("数字输入用 shared 的 NumberField（外部值回同步由该组件实现，渲染行为在 shared 用例里钉）", () => {
-    // 回同步（useEffect + lastEmitted）住在共享客户端行的 NumberField，本仓只负责选对组件：
-    // source 里出现两处 createElement(NumberField（注入配额与门禁预算）才算接线成立。
-    // 共享组件现在由模块图的 `@jayyuen66/dsh-plugin-shared/client` 行提供，不再内联进本包；
-    // 产物必须保留这条外部请求，内联则会让每份卡片各带一份组件实现。
+  it("数字输入用 shared 的 NumberField（外部值同步由该组件实现，渲染行为由 shared 的测试覆盖）", () => {
+    // 外部值同步（useEffect + lastEmitted）写在共享客户端模块的 NumberField 里，本仓只负责选对组件：
+    // 源码里出现两处 createElement(NumberField（注入配额与门禁预算）才算这条接线成立。
+    // 共享组件现在由模块图里的 `@jayyuen66/dsh-plugin-shared/client` 这一行提供，不再内联进本包；
+    // 产物必须保留这条外部请求，内联的话每份卡片会各自带一份组件实现。
     const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const code = readFileSync(src, "utf8");
     assert.match(
@@ -112,14 +114,14 @@ describe("quality-gate client 构建", () => {
     assert.match(
       readBundle(),
       /dsh-plugin-shared\/client/u,
-      "共享卡片组件必须作为外部行请求，不能内联进本包",
+      "共享卡片组件必须作为外部模块请求，不能内联进本包",
     );
   });
 
-  it("清空数字输入走 unset（不留过期值），写通道受理位与拒绝必须回到卡片 save()", () => {
+  it("清空数字输入走 unset（不留下过期的值），宿主是否接受写入与写入失败都要回到卡片的 save()", () => {
     const text = readBundle();
-    // unset 是极常见子串（注释与解构里都有），产物侧按字面判恒真；清空路径的判据落在源码上：
-    // writeTouched 对 undefined 走 unset(key)，NumberField 把空输入交回 undefined。
+    // unset 是很常见的子串（注释和解构里都有），在产物里按字面匹配永远成立；
+    // 清空这条路径要看源码：writeTouched 遇到 undefined 时调用 unset(key)，NumberField 把空输入返回 undefined。
     const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const code = readFileSync(src, "utf8");
     assert.match(
@@ -127,23 +129,24 @@ describe("quality-gate client 构建", () => {
       /val === undefined \? unset\(key\) : set\(key, val\)/u,
       "空输入必须走 unset",
     );
-    // 受理位消费（0.1.7 ConfigForm.set/unset 回 Promise<boolean>）：
-    // false=宿主拒写 → saveRejected 文案且不清 touched（fail-closed，不静默丢修改）；
-    // reject=传输失败 → saveFailed。inject 侧 swallow 受理位、卡片盲清 touched 都是这一面要挡的。
-    // 产物是压缩构建：局部标识符不保留，钉两门字典里的文案串（缺一门即红）。
+    // 调用方必须用 ConfigForm.set/unset 的返回值（0.1.7 起是 Promise<boolean>）：
+    // false 表示宿主拒绝写入 → 显示 saveRejected 的文案且不清掉 touched（宁可留着脏态，也不悄悄丢掉修改）；
+    // reject 表示传输失败 → 显示 saveFailed。inject 那侧忽略这个返回值、卡片无条件清掉 touched，
+    // 都是这里要防的做法。产物是压缩后的构建：局部标识符不保留，
+    // 所以断言两种语言文案里的那句话。
     assert.ok(text.includes("saveRejected"), "宿主拒写必须有可见反馈（saveRejected 文案进产物）");
     assert.ok(
       text.includes("Save rejected by the host"),
-      "en 字典同步收录拒绝文案（缺一门即切语言空字）",
+      "英文文案里也要收录这条拒绝提示（少一种语言，切过去就没有文字）",
     );
   });
 
-  it("卡片源码注释不提 danger-guard（归属正确），六个设置字段全部绑进卡片", () => {
+  it("卡片源码的注释不出现 danger-guard（那是另一个插件的名字），host 的 volatile 字段全部绑定到卡片", () => {
     const src = fileURLToPath(new URL(CLIENT_ENTRY_REL, import.meta.url));
     const srcText = readFileSync(src, "utf8");
-    assert.ok(!srcText.includes("danger-guard"), "头部注释不得残留 danger-guard 归属");
-    assert.ok(readBundle().includes("useCard"), "保持 useCard 读快照");
-    // 字段清单与 host Config 的 volatile 面一一对应：少绑一个，设置卡上就有一项永远改不动。
+    assert.ok(!srcText.includes("danger-guard"), "头部注释不得留下 danger-guard 的字样");
+    assert.ok(readBundle().includes("useCard"), "仍然通过 useCard 读取快照");
+    // 字段清单要和 host Config 里标为 volatile 的那些字段一一对应：少绑一个，设置卡上就有一项永远改不动。
     for (const field of [
       "enabled",
       "maxInjectsPerTurn",
@@ -157,17 +160,17 @@ describe("quality-gate client 构建", () => {
   });
 });
 
-/** 输出守卫测试用的最小 chunk 正文。 */
+/** 测试输出守卫用的最小 chunk 正文。 */
 const CHUNK_CODE = "export {};";
-/** 输出守卫测试用的产物文件名。 */
+/** 测试输出守卫用的产物文件名。 */
 const ARTIFACT_FILE = "artifact.js";
 
 /**
- * 造一个最小输出项；判据只看 type/fileName/isEntry/code。
+ * 构造一个最小的输出项；检查只看 type/fileName/isEntry/code。
  * @param type - rolldown 输出项类型
  * @param fileName - 产物文件名
  * @param extra - 该类型需要的其余字段
- * @returns 可交给 singleEntryChunk 的输出项
+ * @returns 可以交给 singleEntryChunk 的输出项
  */
 type OutputItem =
   | {
@@ -196,7 +199,7 @@ function outputItem(
 }
 
 describe("单文件产物的输出守卫", () => {
-  it("拒绝多个 chunk：单文件产物不能静默丢掉第二个", () => {
+  it("输出多个 chunk 时报错：单文件产物不能静默丢掉第二个", () => {
     const output = [
       outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
       outputItem("chunk", "chunk-abc.js", { isEntry: false, code: CHUNK_CODE }),
@@ -204,7 +207,7 @@ describe("单文件产物的输出守卫", () => {
     assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
   });
 
-  it("拒绝 asset：单文件产物没有落盘 asset 的位置", () => {
+  it("输出里有 asset 时报错：单文件产物没有可以写出的 asset 位置", () => {
     const output = [
       outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE }),
       outputItem("asset", "x.css"),
@@ -212,17 +215,17 @@ describe("单文件产物的输出守卫", () => {
     assert.throws(() => singleEntryChunk(output, "entry.ts"), /2 项输出/u);
   });
 
-  it("拒绝非 entry 的单个 chunk", () => {
+  it("只有一个 chunk 但它不是 entry 时报错", () => {
     const output = [outputItem("chunk", "chunk-abc.js", { isEntry: false, code: CHUNK_CODE })];
     assert.throws(() => singleEntryChunk(output, "entry.ts"), /entry chunk/u);
   });
 
-  it("拒绝空正文的 entry chunk：空产物落盘后卡片静默不渲染", () => {
+  it("entry chunk 的正文为空时报错：空产物写到磁盘后卡片不渲染，也没有任何提示", () => {
     const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: "  \n " })];
     assert.throws(() => singleEntryChunk(output, "entry.ts"), /entry chunk/u);
   });
 
-  it("接受唯一的 entry chunk", () => {
+  it("只有一个 entry chunk 时通过", () => {
     const output = [outputItem("chunk", ARTIFACT_FILE, { isEntry: true, code: CHUNK_CODE })];
     const chunk = singleEntryChunk(output, "entry.ts");
     assert.equal(chunk.code, CHUNK_CODE);

@@ -2,12 +2,12 @@
 // @ts-check
 /// <reference types="node" />
 // 构建 client.js：rolldown 把 src/client-entry.ts 打包为 CJS（react / zod 精确外置），再包进
-// window.__ModuleLoader__.load({ id, factory }) UMD 外壳。id 取 package.json 的 name，
+// window.__ModuleLoader__.load({ id, factory }) 这层 UMD 外壳。id 取 package.json 的 name，
 // 与 dsh.client 模块表键一致。
-// 编排（外置判据、store 路径折叠、外壳拼装）统一住在 @jayyuen66/dsh-plugin-shared/
-// lib/build-client；本文件只声明入口与生成头。REACT_RUNTIME_MODULES 转导出给
-// pack-check.mjs：这些说明符由宿主模块表在装载期提供，既不在 dependencies 也不在
-// peerDependencies，发布物体检必须按「宿主提供」而不是「manifest 声明」来判它们合法。
+// 编排（外置哪些模块说明符（说明符）、store 路径折叠（collapseStorePaths）、外壳 拼装）统一实现在
+// @jayyuen66/dsh-plugin-shared/lib/build-client；本文件只声明入口与生成头。REACT_RUNTIME_MODULES 转导出给
+// pack-check.mjs：这些说明符由宿主模块表在装载时提供，既不在 dependencies 也不在
+// peerDependencies，核对发布产物时要按"宿主会提供"来判断它们合法，而不是按"manifest 里声明了没有"。
 // 运行：node build-client.mjs（或 pnpm run build:client）。buildClient() 供测试导入。
 import path from "node:path";
 import {
@@ -20,20 +20,20 @@ export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifac
 export { REACT_RUNTIME_MODULES } from "@jayyuen66/dsh-plugin-shared/lib/build-client";
 
 const root = import.meta.dirname;
-/** 客户端入口源码（相对包根）。入口名、单 chunk 校验与产物头三处同源。
+/** 客户端入口源码（相对包根）。入口名、单 chunk 校验和产物头部都从这里取。
  *  用 POSIX 分隔符而不是 path.join：这一串会进产物首行，Windows 上 path.join 会写出
  *  `src\client-entry.ts`，同一份源码在不同平台生成不同字节。 */
 const ENTRY = "src/client-entry.ts";
 
-// 外置清单 = 既有 react 家族 + zod（宿主 `PLATFORM_MODULES` 里本卡值导入的第三方运行时）。
-// 不复用 shared 的默认清单、也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
-// 新导出在它发布之前不存在。zod 内联会打进每份 client.js，并让同一页面出现两份 zod 身份。
+// 外置清单 = 已有的 react 家族 + zod（本卡以值导入的第三方运行时，在宿主的 `PLATFORM_MODULES` 里）。
+// 不复用 shared 的默认清单，也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
+// 新导出在它发布之前不存在。zod 内联会打进每一份 client.js，同一页面因此会出现两份 zod 实例。
 const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod", "@jayyuen66/dsh-plugin-shared/client"];
 
 /** 生成 client.js 的完整文本（含 ModuleLoader 外壳）。 */
 export async function buildClient() {
-  // rolldown 是原生构建依赖：放到构建路径里再加载，让只 import 本文件转导出/单 chunk
-  // 校验的消费方（pack-check.mjs、test/build-client.test.ts）不必装它。
+  // rolldown 是原生构建依赖：放到真正构建时才加载，这样只用本文件转导出的部分和单 chunk
+  // 校验的调用方（pack-check.mjs、test/build-client.test.ts）不必安装它。
   const { rolldown } = await import("rolldown");
   return buildClientBundle({
     root,

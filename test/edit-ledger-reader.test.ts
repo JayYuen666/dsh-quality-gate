@@ -1,5 +1,6 @@
-// `sessionProjections` 双协议读口：判别只能在 await 之后（两版原始返回值都带 .then），
-// 且失败路径不得发布失效读口——门禁读到一个空读口会把「没有证据」当成「没有编辑」。
+// `sessionProjections` 的两种返回形态：区分只能在 await 之后做（两种原始返回值都带 .then），
+// 而且失败时不能把一个不能用的读取函数交出去——门禁逻辑读到一个总是返回空的读取函数，会把
+// "没有证据"当成"没有编辑"。
 import { describe, it } from "vitest";
 import { strict as assert } from "node:assert";
 import { EDIT_LEDGER_KEY } from "../lib/edit-ledger.ts";
@@ -8,10 +9,10 @@ import type { EditLedgerReader, ProjectionsRegistry } from "../lib/edit-ledger-r
 
 const SESSION = { id: "s1" };
 
-/** 无效的注册表读口（这些用例只关心注册结果，不读状态）。 */
+/** 无效的注册表（这些用例只关心注册结果，不读状态）。 */
 const NO_STATE = undefined;
 
-/** 旧版的释放器：本文件只断言它被调用，不做任何事。 */
+/** 旧版的释放函数：本文件只断言它被调用过，本身什么都不做。 */
 function release(): void {
   void 0;
 }
@@ -54,8 +55,8 @@ function makeFace(): Face {
   };
 }
 
-describe("编辑台账读口（双协议）", () => {
-  it("旧版：await 得到 disposer，读口经注册表 stateOf 取值", async () => {
+describe("编辑台账读取函数的挂载（两种返回形态）", () => {
+  it("旧形态：await 得到释放函数，读取时经注册表的 stateOf 取值", async () => {
     const registry: ProjectionsRegistry = {
       register: () => release,
       stateOf: (session, key) => {
@@ -66,17 +67,17 @@ describe("编辑台账读口（双协议）", () => {
     };
     const harness = makeFace();
     await mountEditLedgerReader(registry, harness.face);
-    assert.equal(typeof harness.published.at(-1), "function", "旧版发布同步读口");
+    assert.equal(typeof harness.published.at(-1), "function", "旧形态也要交出读取函数");
     assert.deepEqual(harness.published.at(-1)?.(SESSION), VALID_STATE.edits);
-    assert.equal(harness.disposers.length, 1, "登记一枚释放器");
+    assert.equal(harness.disposers.length, 1, "登记一个释放函数");
     harness.disposers[0]?.();
-    assert.equal(harness.published.at(-1), undefined, "卸载先撤读口");
+    assert.equal(harness.published.at(-1), undefined, "卸载时先收回读取函数");
   });
 
-  it("register 交回 Promise<disposer>：判别发生在 await 之后", async () => {
-    // 旧协议原始返回值是函数（新协议是 handle），而两种都可能被包在 thenable 里；
+  it("register 返回 Promise<释放函数>：区分发生在 await 之后", async () => {
+    // 旧形态的原始返回值是函数（新形态是 handle），而两种都可能被包在 thenable 里；
     // 这里用 Promise<disposer>：await 之前拿到的是 Promise，await 之后才是函数——
-    // 实现若在 await 之前按 typeof 判别，就会把它当成 handle 或直接判坏形状。
+    // 实现如果在 await 之前用 typeof 区分，就会把它当成 handle 或者直接判成不合法的结构。
     let releaseCalls = 0;
     const disposer = (): void => {
       releaseCalls += 1;
@@ -90,18 +91,18 @@ describe("编辑台账读口（双协议）", () => {
     assert.equal(
       typeof harness.published.at(-1),
       "function",
-      "Promise<disposer> await 后仍按 disposer 处理",
+      "Promise<disposer> 在 await 之后仍然按释放函数处理",
     );
     assert.deepEqual(
       harness.published.at(-1)?.(SESSION),
       VALID_STATE.edits,
-      "读口仍走注册表 stateOf",
+      "读取仍然走注册表的 stateOf",
     );
     harness.disposers[0]?.();
-    assert.equal(releaseCalls, 1, "释放器就是 await 落地后的那个函数");
+    assert.equal(releaseCalls, 1, "被调用的释放函数就是 await 之后拿到的那个函数");
   });
 
-  it("新版：await 得到 handle，读口经 handle.stateOf 取值，释放走 dispose", async () => {
+  it("新形态：await 得到 handle，读取时经 handle.stateOf 取值，释放走 dispose", async () => {
     let disposed = 0;
     const registry: ProjectionsRegistry = {
       register: () =>
@@ -116,21 +117,21 @@ describe("编辑台账读口（双协议）", () => {
           },
         }),
       stateOf: () => {
-        throw new Error("新版不应走注册表 stateOf");
+        throw new Error("新形态不应该走注册表的 stateOf");
       },
     };
     const harness = makeFace();
     await mountEditLedgerReader(registry, harness.face);
-    assert.equal(typeof harness.published.at(-1), "function", "新版也要发布读口");
+    assert.equal(typeof harness.published.at(-1), "function", "新形态也要交出读取函数");
     assert.deepEqual(harness.published.at(-1)?.(SESSION), VALID_STATE.edits);
     harness.disposers[0]?.();
-    // dispose 返回 Promise：等它落定再断言，避免用例与实现的微任务时序耦合。
+    // dispose 返回 Promise：等它结束再断言，避免用例和实现的微任务顺序绑在一起。
     await Promise.resolve();
-    assert.equal(disposed, 1, "卸载释放 handle");
+    assert.equal(disposed, 1, "卸载时释放 handle");
     assert.equal(harness.published.at(-1), undefined);
   });
 
-  it("坏形状的状态按不可读处理（读口交回 undefined，由调用方回退扫描）", async () => {
+  it("不合法的状态按读不到处理（读取函数返回 undefined，由调用方改用扫描）", async () => {
     const registry: ProjectionsRegistry = {
       register: () => (): void => {
         void 0;
@@ -139,12 +140,12 @@ describe("编辑台账读口（双协议）", () => {
     };
     const harness = makeFace();
     await mountEditLedgerReader(registry, harness.face);
-    // 先钉住读口确实发布了：只断言取值会让「根本没发布」也返回 undefined，用例自证。
-    assert.equal(typeof harness.published.at(-1), "function", "坏形状也要发布读口");
+    // 先确认读取函数确实交出去了：只断言返回值会让"根本没交出去"也得到 undefined，用例自己证明自己。
+    assert.equal(typeof harness.published.at(-1), "function", "状态不合法时也要交出读取函数");
     assert.equal(harness.published.at(-1)?.(SESSION), undefined);
   });
 
-  it("持久行元素不合 schema（seq 为负）同样按不可读处理", async () => {
+  it("存档状态里的元素不符合 schema（seq 为负）同样按读不到处理", async () => {
     const registry: ProjectionsRegistry = {
       register: () => (): void => {
         void 0;
@@ -155,10 +156,10 @@ describe("编辑台账读口（双协议）", () => {
     };
     const harness = makeFace();
     await mountEditLedgerReader(registry, harness.face);
-    assert.equal(harness.published.at(-1)?.(SESSION), undefined, "单行不合约束即整份不可读");
+    assert.equal(harness.published.at(-1)?.(SESSION), undefined, "一条不合约束就整份按读不到处理");
   });
 
-  it("同步抛错与异步拒绝都只报告、不发布", async () => {
+  it("同步抛错和异步拒绝都只报告、不交出读取函数", async () => {
     const thrown = makeFace();
     await mountEditLedgerReader(
       {
@@ -169,8 +170,8 @@ describe("编辑台账读口（双协议）", () => {
       },
       thrown.face,
     );
-    assert.equal(thrown.published.length, 0, "同步抛错不发布");
-    assert.equal(thrown.disposers.length, 0, "注册都没成功，不得登记释放器");
+    assert.equal(thrown.published.length, 0, "同步抛错时不交出读取函数");
+    assert.equal(thrown.disposers.length, 0, "注册都没成功，不能登记释放函数");
     assert.match(String(thrown.errors[0]), /sync boom/u);
 
     const rejected = makeFace();
@@ -181,12 +182,12 @@ describe("编辑台账读口（双协议）", () => {
       },
       rejected.face,
     );
-    assert.equal(rejected.published.length, 0, "异步拒绝不发布");
-    assert.equal(rejected.disposers.length, 0, "异步拒绝同样不得登记释放器");
+    assert.equal(rejected.published.length, 0, "异步拒绝时也不交出读取函数");
+    assert.equal(rejected.disposers.length, 0, "异步拒绝同样不能登记释放函数");
     assert.match(String(rejected.errors[0]), /async boom/u);
   });
 
-  it("注册成功后 effect 抛错 ⇒ 撤读口 + 释放投影 + 报告（不泄漏投影）", async () => {
+  it("注册成功之后 effect 抛错 ⇒ 收回读取函数 + 释放投影 + 报告（不把投影漏在注册表上）", async () => {
     let released = 0;
     const published: (EditLedgerReader | undefined)[] = [];
     const errors: unknown[] = [];
@@ -209,12 +210,16 @@ describe("编辑台账读口（双协议）", () => {
         },
       },
     );
-    assert.equal(released, 1, "注册成功了就必须释放，否则投影永久挂在注册表上");
-    assert.equal(published.at(-1), undefined, "已发布的读口必须撤回（没有清理路径的读口不能留着）");
+    assert.equal(released, 1, "注册成功过就必须释放，否则投影会一直挂在注册表上");
+    assert.equal(
+      published.at(-1),
+      undefined,
+      "已经交出去的读取函数必须收回（没有清理路径的读取函数不能留着）",
+    );
     assert.match(String(errors[0]), /effect boom/u, "报告的是最初那个错误");
   });
 
-  it("publish 抛错 ⇒ 释放投影 + 报告（不把已注册的投影留在注册表里）", async () => {
+  it("publish 抛错 ⇒ 释放投影 + 报告（不把已经注册的投影留在注册表里）", async () => {
     let released = 0;
     const errors: unknown[] = [];
     await mountEditLedgerReader(
@@ -240,7 +245,7 @@ describe("编辑台账读口（双协议）", () => {
     assert.match(String(errors[0]), /publish boom/u);
   });
 
-  it("撤读口本身抛错时不盖掉根因（报告最初那个错误 + 仍释放投影）", async () => {
+  it("收回读取函数这一步自己抛错时，不掩盖真正的原因（报告最初那个错误 + 仍然释放投影）", async () => {
     let released = 0;
     let publishCalls = 0;
     const errors: unknown[] = [];
@@ -266,11 +271,11 @@ describe("编辑台账读口（双协议）", () => {
         },
       },
     );
-    assert.equal(released, 1, "撤读口失败也要释放投影");
-    assert.match(String(errors[0]), /effect boom/u, "撤读口失败不许盖掉根因");
+    assert.equal(released, 1, "收回读取函数失败时也要释放投影");
+    assert.match(String(errors[0]), /effect boom/u, "收回读取函数失败不许掩盖真正的原因");
   });
 
-  it("stateOf 抛错按不可读处理：读口交回 undefined，不把异常升级给调用方", async () => {
+  it("stateOf 抛错按读不到处理：读取函数返回 undefined，不把异常转给调用方", async () => {
     const registry: ProjectionsRegistry = {
       register: () => release,
       stateOf: () => {
@@ -279,11 +284,11 @@ describe("编辑台账读口（双协议）", () => {
     };
     const harness = makeFace();
     await mountEditLedgerReader(registry, harness.face);
-    assert.equal(typeof harness.published.at(-1), "function", "stateOf 抛错不影响读口发布");
+    assert.equal(typeof harness.published.at(-1), "function", "stateOf 抛错不影响读取函数的交出");
     assert.equal(harness.published.at(-1)?.(SESSION), undefined);
   });
 
-  it("handle.dispose 拒绝 → 走 onError，不产生未处理 rejection", async () => {
+  it("handle.dispose 拒绝 → 走 onError，不产生未处理的 rejection", async () => {
     const registry: ProjectionsRegistry = {
       register: () =>
         Promise.resolve({
@@ -295,13 +300,13 @@ describe("编辑台账读口（双协议）", () => {
     const harness = makeFace();
     await mountEditLedgerReader(registry, harness.face);
     harness.disposers[0]?.();
-    // dispose 是异步的：让它的 rejection 落到 onError。
+    // dispose 是异步的：让它的 rejection 落到 onError 上。
     await Promise.resolve();
     await Promise.resolve();
     assert.match(String(harness.errors.at(-1)), /dispose boom/u);
   });
 
-  it("清理重复调用只释放一次（宿主重放清理不得二次 dispose）", async () => {
+  it("清理被重复调用时只释放一次（宿主重放清理不能二次 dispose）", async () => {
     let disposed = 0;
     const registry: ProjectionsRegistry = {
       register: () =>
@@ -319,16 +324,16 @@ describe("编辑台账读口（双协议）", () => {
     harness.disposers[0]?.();
     harness.disposers[0]?.();
     await Promise.resolve();
-    assert.equal(disposed, 1, "重复清理只释放一次");
+    assert.equal(disposed, 1, "重复清理时只释放一次");
   });
 
-  it("既非 disposer 也非 handle ⇒ TypeError 走报告面", async () => {
+  it("既不是释放函数也不是 handle ⇒ TypeError 走报告", async () => {
     const harness = makeFace();
     await mountEditLedgerReader(
       { register: () => Promise.resolve({}), stateOf: () => NO_STATE },
       harness.face,
     );
     assert.equal(harness.published.length, 0);
-    assert.ok(harness.errors[0] instanceof TypeError, "第三种形状按类型错报告");
+    assert.ok(harness.errors[0] instanceof TypeError, "第三种返回形态按类型错误报告");
   });
 });

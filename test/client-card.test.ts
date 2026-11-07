@@ -1,8 +1,8 @@
-// 卡片半的双语契约（本包无 jsdom/react-dom 依赖，故不渲染 DOM）：
-//   1. apply 的官方 locale 接线——两语字典都注册、bind 到本包命名空间、translator 经
-//      slots.register 的 payload 下发成 `t` prop（= 样板包 client-card 测试里渲染点补的 `t`）；
-//   2. UI_MESSAGES 两语键集/占位符一致、值非空且互不相同；
-//   3. 卡片源码里不再有任何中文字面量（注释除外）——迁移完整性的硬门禁。
+// 卡片这边的双语契约（本包不依赖 jsdom/react-dom，所以不渲染 DOM）：
+//   1. apply 怎么接上官方 locale——两种语言的文案都注册、bind 到本包命名空间、translator 经
+//      slots.register 的 payload 下发成 `t` prop（和样板包 client-card 测试里渲染处补的那个 `t` 是同一个）；
+//   2. UI_MESSAGES 两种语言的键集与占位符一致、值非空且互不相同；
+//   3. 卡片源码里不再有任何中文字面量（注释除外）——这条门禁用来确认迁移没留尾巴。
 /// <reference types="node" />
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -18,12 +18,12 @@ import { UI_MESSAGES } from "../src/ui-messages.ts";
 import type { LocaleNs, Translate } from "../src/ui-messages.ts";
 import { patchEntryId, profileBundleName } from "./profile-bundle.ts";
 
-/** apply 的真实宿主面（ClientCtx 未导出，从函数签名取——假 ctx 因此仍受结构类型检查）。 */
+/** apply 真正需要的宿主类型（ClientCtx 没有导出，从函数签名取——这样假 ctx 仍然受结构类型检查）。 */
 type CardCtx = Parameters<typeof apply>[0];
 
 type Snap = ConfigFormSnapshot<Record<string, unknown>>;
 
-/** 官方 `ConfigFormSnapshot` 的合法形状（6 位全必选）：桩件必须交得出真宿主的面，
+/** 官方 `ConfigFormSnapshot` 的形状（六个字段全部必选）：测试替身必须交出真实宿主需要的字段，
  *  少了 `base`/`user`/`revision`/`mode` 或把 status 写成宽 `string` 都会编译失败。 */
 function snap(over: Partial<Snap> = {}): Snap {
   return {
@@ -37,7 +37,7 @@ function snap(over: Partial<Snap> = {}): Snap {
   };
 }
 
-/** 官方 locale 的 `{name}` 插值（宿主同语义）：测试里自己实现，不引宿主内部实现。 */
+/** 官方 locale 的 `{name}` 插值（宿主是同一个语义）：测试里自己实现一份，不去引宿主内部的实现。 */
 function fillTemplate(text: string, params: Record<string, unknown>): string {
   return text.replaceAll(/\{(?<key>\w+)\}/gu, (_all: string, key: string) => {
     const value = params[key];
@@ -49,13 +49,12 @@ function fillTemplate(text: string, params: Record<string, unknown>): string {
 }
 
 /**
- * 官方 locale 的取值语义（测试侧复刻）：本包字典命中即用，未命中回落**键名本身**
- * （官方 `LocaleRuntime.translate` 在 active 链与 common 命名空间都 miss 后的行为，
- * installed dsh-client-locale/lib/client.js:1415-1417）。
+ * 官方 locale 的取值语义（在测试侧复刻一份）：本包文案命中就用，未命中回落到**键名本身**
+ * （官方 `LocaleRuntime.translate` 在 active 链和 common 命名空间都没命中时就是这样）。
  * 表按 `Record<string, string>` 承载而不是 `UiMessages`：merge 进 `LocaleNamespaceMap`
- * 之后 `TranslateNS<NS>` 的键域是「本包键 ∪ common 命名空间键」（官方 `LocaleKeysOf`），
- * 按 `UiMessages` 索引那条并集会在编译期红（实测
- * `Property 'back' does not exist on type 'UiMessages'`），而运行时真相就是回落。
+ * 之后 `TranslateNS<NS>` 允许的键是「本包的键 ∪ common 命名空间的键」（官方 `LocaleKeysOf`），
+ * 用 `UiMessages` 去索引那个并集会在编译期报错（实测
+ * `Property 'back' does not exist on type 'UiMessages'`），而运行时的行为就是回落。
  * 展开成字面量是为了拿到隐式索引签名（`UiMessages` 是 interface，本身给不出）。
  */
 function localeText(
@@ -66,29 +65,29 @@ function localeText(
   return fillTemplate(dict[key] ?? key, params);
 }
 
-/** 中日韩文字（含扩展 A / 兼容区）+ CJK 标点 + 全角符号：判"这段文本里还有中文"。
- *  只覆盖 U+4E00–U+9FFF 会放行中文标点（：、。「」）、全角符号（！？）与扩展区生僻字。 */
+/** 中日韩文字（含扩展 A / 兼容区）+ CJK 标点 + 全角符号：用来判断"这段文本里还有中文"。
+ *  只覆盖 U+4E00–U+9FFF 会放行中文标点（：、。「」）、全角符号（！？）和扩展区的生僻字。 */
 const CJK = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF01-\uFF60\uFFE0-\uFFE6]/u;
 
-/** locale 字典 effect 的登记 label：与 src/client-entry.ts 的那个第二参必须一致。 */
+/** locale 文案 effect 登记时用的 label：必须和 src/client-entry.ts 里传的第二个参数一致。 */
 const LOCALE_EFFECT_LABEL = "quality-gate-card: locale dictionaries";
 
-/** 网关地址样例：同一字面量在断言的输入与期望里各出现一次，会被重复串规则盯上。 */
+/** 网关地址的样例值：同一个字面量在断言的输入和期望里各出现一次，会被检查重复字符串的规则点名。 */
 const GATEWAY_URL = "http://127.0.0.1:8420";
 
-/** 两语字典的 `Record<string, string>` 面：取值断言与 translator 共用同一份投影。 */
+/** 两种语言文案的 `Record<string, string>` 形式：取值的断言和 translator 用的是同一份。 */
 const zh: Record<string, string> = { ...UI_MESSAGES.zh };
 const en: Record<string, string> = { ...UI_MESSAGES.en };
 
-/** 中文/英文 translator：断言里的中文串因此与 i18n 迁移前完全一致。 */
+/** 中文/英文的 translator：这样断言里写的中文串和多语言迁移之前完全一致。 */
 const tZh: Translate = (key, params) => localeText(zh, key, params ?? {});
 const tEn: Translate = (key, params) => localeText(en, key, params ?? {});
 
-/** 模板里的 {占位符} 名字集合。 */
+/** 模板里 {占位符} 的名字集合。 */
 function placeholders(template: string): Set<string> {
-  // 必须成对（{ 起、} 止）才算占位符：只按花括号切分会把 "Save" 这类无括号的整串
-  // 误当成占位符。不用捕获组：prefer-named-capture-group 与 noPropertyAccessFromIndexSignature
-  // 对 match.groups 的写法互斥（同仓 schema-coverage.ts 记过这个坑）。
+  // 必须成对（{ 起、} 止）才算占位符：只按花括号切分会把 "Save" 这类没有括号的整串
+  // 误当成占位符。这里不用捕获组：prefer-named-capture-group 和 noPropertyAccessFromIndexSignature
+  // 对 match.groups 的写法要求互相冲突（同一个坑在 schema-coverage.ts 里写过）。
   const out = new Set<string>();
   for (const part of template.split("{").slice(1)) {
     const name = part.split("}")[0] ?? "";
@@ -99,7 +98,7 @@ function placeholders(template: string): Set<string> {
   return out;
 }
 
-/** 两语键清单（`zh` / `en` 的 string 面投影见上面两处常量）。 */
+/** 两种语言的键列表（上面 zh / en 两个常量给出了它们的 string 形式）。 */
 const keys = Object.keys(UI_MESSAGES.zh);
 
 /**
@@ -115,8 +114,9 @@ const COMMENT_TOKEN =
 /**
  * 剥掉注释后的源码（注释按约定保持中文，不参与断言）。
  *
- * 必须按字面量感知来剥：行内块注释里的中文也要被剥掉（旧写法只认行首块注释开符号，
- * 那会把行内块注释里的中文误判成字面量而假红），字符串里的双斜杠要留在原地（否则假绿）。
+ * 必须按字面量感知来剥：行内块注释里的中文也要被剥掉（旧写法只认行首的块注释开符号，
+ * 那会把行内块注释里的中文误判成字面量，报出不该报的失败），字符串里的双斜杠要留在原地
+ * （否则该报的失败报不出来）。
  */
 function codeOnly(source: string): string {
   return source.replaceAll(COMMENT_TOKEN, (token) =>
@@ -124,12 +124,12 @@ function codeOnly(source: string): string {
   );
 }
 
-describe("卡片双语字典（UI_MESSAGES）", () => {
-  it("两语键集一致、值非空", () => {
-    // toSorted 在本包 lint 的 lib 目标下不存在 → 无序比较用 Set + size/has。
+describe("卡片的双语文案（UI_MESSAGES）", () => {
+  it("两种语言的键一致、值非空", () => {
+    // toSorted 在本包 lint 的 lib 目标下不存在 → 不比较顺序，用 Set + size/has。
     const enKeys = new Set(Object.keys(UI_MESSAGES.en));
     assert.equal(keys.length, enKeys.size, "键数必须相同");
-    assert.ok(keys.length >= 20, "卡片文案全部收进字典");
+    assert.ok(keys.length >= 20, "卡片文案全部收进两种语言的文案表");
     for (const key of keys) {
       assert.ok(enKeys.has(key), `en 缺键：${key}`);
       assert.ok((zh[key] ?? "").length > 0, `zh 空值：${key}`);
@@ -137,9 +137,9 @@ describe("卡片双语字典（UI_MESSAGES）", () => {
     }
   });
 
-  it("两语文案互不相同，且带变量的整行占位符名字一致", () => {
+  it("两种语言的文案互不相同，且带变量的整句里占位符名字一致", () => {
     for (const key of keys) {
-      assert.notEqual(en[key], zh[key], `${key} 两语文案相同`);
+      assert.notEqual(en[key], zh[key], `${key} 两种语言的文案相同`);
       assert.deepEqual(
         placeholders(en[key] ?? ""),
         placeholders(zh[key] ?? ""),
@@ -148,7 +148,7 @@ describe("卡片双语字典（UI_MESSAGES）", () => {
     }
   });
 
-  it("同一渲染路径换 translator 即换语言（状态条与失败整行）", () => {
+  it("同一条渲染路径换上别的 translator 就换成另一种语言（状态条与失败提示）", () => {
     assert.equal(tZh("statusClean"), "无未保存的修改");
     assert.equal(tEn("statusClean"), "No unsaved changes");
     assert.equal(tZh("saveFailed", { message: "boom" }), "保存失败：boom");
@@ -157,26 +157,26 @@ describe("卡片双语字典（UI_MESSAGES）", () => {
     assert.doesNotMatch(tEn("outOfRange"), CJK);
   });
 
-  it("client-entry.ts 的非注释行没有中文字面量（本仓卡片侧只有这一份源码，字典在 ui-messages.ts）", () => {
+  it("client-entry.ts 的非注释行没有中文字面量（本仓卡片源码只有这一份，文案在 ui-messages.ts）", () => {
     const src = fileURLToPath(new URL("../src/client-entry.ts", import.meta.url));
     assert.doesNotMatch(codeOnly(readFileSync(src, "utf8")), CJK);
   });
 
-  it("剥离器自身：字符串里的双斜杠不是注释起点（否则同行后段被切掉，断言就看不见它）", () => {
+  it("剥注释这一步自身：字符串里的双斜杠不算注释起点（否则同一行后半段被切掉，断言就看不见它）", () => {
     // 本仓 client-entry.ts 就有 placeholder: "http://127.0.0.1:8420"：按行 indexOf 找双斜杠
-    // 会从那里截断，同一行后面的内容（包括真正该拦的中文字面量）整段消失。
+    // 会从那里截断，同一行后面的内容（包括真正该拦住的中文文字面量）整段消失。
     const source = 'const a = "http://127.0.0.1:8420"; const b = "中文";\n';
     assert.match(codeOnly(source), /"中文"/u);
   });
 
-  it("剥离器自身：行尾注释与行内块注释都剥掉（注释里的中文不算违例）", () => {
+  it("剥注释这一步自身：行尾注释和行内块注释都要剥掉（注释里的中文不算违规）", () => {
     const source = "const a = 1; // 中文注释\nconst b = 2 /* 中文块注释 */ + 3;\n";
     assert.doesNotMatch(codeOnly(source), CJK);
   });
 });
 
-describe("卡片值面的 zod 区间", () => {
-  it("数值字段按 host schema 的闭区间取整数：边界收下，越界/小数折成未设置", () => {
+describe("卡片取值的 zod 区间", () => {
+  it("数值字段按 host schema 的闭区间取整数：边界接受，越界和小数变成未设置", () => {
     assert.equal(projectCardValues({ maxInjectsPerTurn: 1 }).maxInjectsPerTurn, 1);
     assert.equal(projectCardValues({ maxInjectsPerTurn: 5 }).maxInjectsPerTurn, 5);
     assert.equal(projectCardValues({ maxInjectsPerTurn: 6 }).maxInjectsPerTurn, undefined);
@@ -202,7 +202,7 @@ describe("卡片值面的 zod 区间", () => {
     assert.equal(budgetJson.maximum, 600_000);
   });
 
-  it("网关地址按 URL 收口：http(s) 与本地回环收下，缺 scheme/别家协议折成未设置", () => {
+  it("网关地址按 URL 判断：接受 http(s) 与本地回环，缺 scheme 或别的协议算作未设置", () => {
     assert.equal(
       projectCardValues({ memoryGatewayUrl: GATEWAY_URL }).memoryGatewayUrl,
       GATEWAY_URL,
@@ -222,43 +222,43 @@ describe("卡片值面的 zod 区间", () => {
     assert.equal(
       projectCardValues({ memoryGatewayUrl: "https://user:pass@example.com" }).memoryGatewayUrl,
       undefined,
-      "带 userinfo 的地址不当作已配置",
+      "带 userinfo 的地址不算已配置",
     );
     assert.equal(
       projectCardValues({ memoryGatewayUrl: "http://192.168.1.10:8420" }).memoryGatewayUrl,
       undefined,
-      "远端明文 http 不当作已配置",
+      "远端明文 http 不算已配置",
     );
   });
 
-  it("一格越界不拖掉同快照的其余字段", () => {
+  it("一个字段越界不影响同一份快照里的其余字段", () => {
     const values = projectCardValues({
       maxInjectsPerTurn: 99,
       enabled: true,
       memoryGatewayUrl: GATEWAY_URL,
     });
-    assert.equal(values.maxInjectsPerTurn, undefined, "越界数值只丢自己这一格");
-    assert.equal(values.enabled, true, "同快照的布尔字段不受影响");
-    assert.equal(values.memoryGatewayUrl, GATEWAY_URL, "同快照的字符串字段不受影响");
+    assert.equal(values.maxInjectsPerTurn, undefined, "越界的数值只影响自己这一项");
+    assert.equal(values.enabled, true, "同一份快照里的布尔字段不受影响");
+    assert.equal(values.memoryGatewayUrl, GATEWAY_URL, "同一份快照里的字符串字段不受影响");
   });
 });
 
-describe("卡片 apply 的官方 locale 接线", () => {
-  /** 一次装载登记下来的宿主调用轨迹。 */
+describe("卡片 apply 怎么接上官方 locale", () => {
+  /** 一次装载记录下来的宿主调用轨迹。 */
   interface Trace {
-    /** label → effect 工厂（样式那个会碰 document，用例只跑 locale 那个）。
-     *  工厂面直接取官方 `Context["effect"]` 的第一参（cordis 的 `Effect` 联合：一个
+    /** label → effect 工厂（样式那个会读 document，用例只跑 locale 那个）。
+     *  类型直接取官方 `Context["effect"]` 的第一个参数（cordis 的 `Effect` 联合：一个
      *  disposer 或一组 disposer），不在这里重抄签名。 */
     effects: Map<string, Parameters<Context["effect"]>[0]>;
-    /** 注册进官方 locale 的入参（命名空间 + 一次交齐的两语字典）。
-     *  形状就是官方 `LocaleRuntime.register` 类型化重载的两个参数。 */
+    /** 注册进官方 locale 的入参（命名空间 + 一次交齐的两种语言文案）。
+     *  形状就是官方 `LocaleRuntime.register` 带类型那个重载的两个参数。 */
     registrations: {
       ns: string;
       dicts: Record<BuiltInLocaleId, LocaleDictOf<LocaleNs>>;
     }[];
     /** disposer 回收掉的 locale id（官方实现按 `Object.entries(dicts)` 逐个摘除）。 */
     disposedLocales: string[];
-    /** apply 向 `configForms.get()` 要过哪些条目 id（0.1.6 的 scopeBindNs 对应物）。 */
+    /** apply 向 `configForms.get()` 要过哪些条目 id（对应 0.1.6 里的 scopeBindNs）。 */
     formEntryIds: string[];
     /** 卡片写入落到表单上的 (field, value) 序列。 */
     setCalls: [string, unknown][];
@@ -269,9 +269,9 @@ describe("卡片 apply 的官方 locale 接线", () => {
     desc: { name: string; key: string | undefined } | null;
     payload: Record<string, unknown> | null;
     view: unknown;
-    /** 表单被 dispose 的次数：0.1.7 的 `ConfigForm` 契约里没有 dispose，恒应为空。 */
+    /** 表单被 dispose 的次数：0.1.7 的 `ConfigForm` 声明里没有 dispose，所以这里应该一直是空的。 */
     disposeCalls: number[];
-    /** 官方 `ConfigForm.mutate`（路径级原子写入）的调用留痕：本卡只走 set/unset，恒应为空。 */
+    /** 官方 `ConfigForm.mutate`（按路径原子写入）的调用记录：这张卡只用 set/unset，应该一直是空的。 */
     mutateCalls: unknown[][];
   }
 
@@ -292,12 +292,13 @@ describe("卡片 apply 的官方 locale 接线", () => {
       disposeCalls: [],
       mutateCalls: [],
     };
-    // 本条目共享表单的假面：直接绑官方 `ConfigForm<Record<string, unknown>>`
-    // （installed dsh-client-ui-settings/lib/types/client/config-form-types.d.ts 的 ConfigForm），
-    // 快照走同文件 `ConfigFormSnapshot`（:6-32，6 位全必选）——见上面的 snap() 工厂。
-    // set/unset 回「宿主是否受理」的 boolean，只有传输失败才 reject。mutate 是官方第五位
-    // （路径级原子写入），本卡不走它，但类型面要求它在位。dispose 不在契约里，留在这里
-    // 只作 tripwire：卡片若再试图销毁 provider 持有的表单，disposeCalls 就会非空 → 用例红。
+    // 本条目共享表单的测试替身：直接按官方 `ConfigForm<Record<string, unknown>>` 写
+    // （dsh-client-ui-settings 的 config-form-types.d.ts 里那个 ConfigForm），
+    // 快照用同一个文件的 `ConfigFormSnapshot`（六个字段全部必选）——见上面的 snap()。
+    // set/unset 返回「宿主是否受理」这个 boolean，只有传输失败才 reject。mutate 是官方第五个方法
+    // （按路径原子写入），这张卡不走它，但类型要求它在位。dispose 不在官方声明里，留在这里
+    // 只是为了把行为暴露出来：卡片若再试图销毁 provider 持有的表单，disposeCalls 就会非空，
+    // 用例当场失败。
     const scope = {
       getSnapshot: () => snap(),
       subscribe: () => () => {
@@ -321,23 +322,23 @@ describe("卡片 apply 的官方 locale 接线", () => {
       },
     };
     const ctx: CardCtx = {
-      // 只登记工厂不执行：本包无 jsdom，样式 effect 里的 document 不存在。
-      // `effect` / `slots` 在 ClientCtx 里已是**官方**服务投影（cordis `Context["effect"]`
-      // 与 `Pick<SlotRegistry, "inject" | "register">`），生产侧签名一漂移就红在编译期。
-      // 两处不得已的显式标注：
-      //  - `effect`：官方是**两**个重载（同步 `Disposable<Promise<void>>` 与可 await 的
-      //    `AsyncDisposable<Promise<void>>`，后者还是 PromiseLike），单个箭头签名同时满足
-      //    不了两边，故一次性投影到官方面；cordis 的入参形状一改，这个 `as` 的源类型就先红。
-      //  - `register`：官方是**双重载**（`inject?: undefined` 与 `inject: (…) => I`），
-      //    重载目标推不出上下文参数类型（TS7006），故按 `unknown` 收、在桩内一次性投影
-      //    回本卡实际传的那一重载。
+      // 只登记工厂不执行：本包没有 jsdom，样式 effect 里读的 document 不存在。
+      // `effect` / `slots` 在 ClientCtx 里已经是官方服务的类型投影（cordis `Context["effect"]`
+      // 与 `Pick<SlotRegistry, "inject" | "register">`），真实实现一改签名就会在编译期报错。
+      // 两处不得不显式标注：
+      //  - `effect`：官方有**两**个重载（同步的 `Disposable<Promise<void>>` 与可以 await 的
+      //    `AsyncDisposable<Promise<void>>`，后者还是 PromiseLike），单个箭头的签名同时满足
+      //    不了两边，所以一次性投影到官方的类型上；cordis 的入参形状一改，这个 `as` 的源类型就先报错。
+      //  - `register`：官方是**两个重载**（`inject?: undefined` 与 `inject: (…) => I`），
+      //    从重载目标推不出上下文参数类型（TS7006），所以按 `unknown` 收、在替身里一次性投影
+      //    回这张卡实际传的那个重载。
       effect: ((factory, label) => {
         trace.effects.set(label ?? "", factory);
       }) as Context["effect"],
       slots: {
         inject: (slot, factory) => {
           trace.slots.push(slot);
-          // 官方 `SlotInjectionEffect`：一个 disposer 或一组 disposer（本卡是前者）。
+          // 官方 `SlotInjectionEffect`：一个 disposer 或一组 disposer（这张卡是前者）。
           const teardown = factory();
           if (typeof teardown === "function") {
             trace.slotCleanups.push(teardown);
@@ -367,8 +368,8 @@ describe("卡片 apply 的官方 locale 接线", () => {
         },
       },
       locale: {
-        // 官方类型化重载：一次交齐两语，返回**一个**回收全部 locale 的 disposer
-        // （installed dsh-client-locale/lib/client.js:1379-1405 正是这个形状）。
+        // 官方带类型的重载：一次交齐两种语言，返回**一个**能把这些 locale 全部回收的 disposer
+        // （dsh-client-locale 的 client.js 里 LocaleRuntime.register 正是这个形状）。
         register: (ns, dicts) => {
           trace.registrations.push({ ns, dicts });
           return () => {
@@ -384,46 +385,50 @@ describe("卡片 apply 的官方 locale 接线", () => {
     return { ctx, trace };
   }
 
-  it("inject 列出 configForms + locale；表单按条目 id 取；两语字典按命名空间注册；bind 一次；payload 下发 t", async () => {
-    // configForms 取代 0.1.6 的 settingsScope（该服务在 installed 0.1.7 全树零命中，
-    // 继续注入它 = 整条 client 入口挂不上）：契约源 installed
-    // dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98（Context 增强）
-    // 与 :142（get<T>(entryId): ConfigForm<T>）。仍是**精确全等**清单，不放宽为包含判定。
+  it("inject 列出 configForms + locale；表单按条目 id 取；两种语言的文案按命名空间注册；bind 一次；payload 下发 t", async () => {
+    // configForms 取代 0.1.6 的 settingsScope（那个服务在 0.1.7 的已安装树里已经找不到，
+    // 继续注入它等于整条 client 入口装载不上）。声明来源是 dsh-client-ui-settings 的
+    // config-form.d.ts：它对 Context 的增强里有 `get<T>(entryId): ConfigForm<T>`。
+    // 这里仍然要求数组精确相等，不放宽成「包含即可」。
     assert.deepEqual(inject, ["slots", "configForms", "locale"], "locale 必须列进 inject");
     const { ctx, trace } = makeHost(tEn);
     apply(ctx);
-    // 0.1.7 起 settings 命名空间 = profile 条目 id（本包 cordis.patch.yml 的裸
-    // `quality-gate`），故 get() 的入参与旧 bind({namespace}) 的取值仍是同一个串。
+    // 0.1.7 起 settings 的命名空间就是 profile 条目 id（本包 cordis.patch.yml 里那行的条目 id
+    // `quality-gate`），所以 get() 的入参和旧 bind({namespace}) 的取值仍是同一个字符串。
     assert.deepEqual(
       trace.formEntryIds,
       [patchEntryId()],
       "只取本条目那张共享表单（裸条目 id），且只取一次",
     );
     assert.deepEqual(trace.slots, ["plugins.bundle.config"]);
-    // 只按 label 断言本包关心的 effect 在位，不锁 effect 总数：新增样式/清理 effect 属合法演进。
+    // 只按 label 断言本包关心的 effect 存在，不按 effect 总数设限：新增样式或清理用的 effect 是允许的。
     const localeEffect = trace.effects.get(LOCALE_EFFECT_LABEL);
-    assert.ok(localeEffect !== undefined, "locale 字典 effect 已登记");
+    assert.ok(localeEffect !== undefined, "locale 文案的 effect 已登记");
     const teardown = localeEffect();
     assert.deepEqual(
       trace.registrations.map((row) => [row.ns, Object.keys(row.dicts)]),
       [["quality-gate", ["zh", "en"]]],
-      "两语字典按本包命名空间一次性注册进官方 locale，且只注册一次",
+      "两种语言的文案按本包命名空间一次性注册进官方 locale，且只注册一次",
     );
     assert.equal(trace.registrations[0]?.dicts.zh.statusClean, UI_MESSAGES.zh.statusClean);
     assert.equal(trace.registrations[0]?.dicts.en.statusClean, UI_MESSAGES.en.statusClean);
-    assert.equal(typeof teardown, "function", "官方类型化 register 交回一个 disposer");
+    assert.equal(typeof teardown, "function", "官方带类型的 register 返回一个 disposer");
     if (typeof teardown === "function") {
       teardown();
     }
-    assert.deepEqual(trace.disposedLocales, ["zh", "en"], "两语随那一个 disposer 一起回收");
-    assert.deepEqual(trace.localeBindNs, ["quality-gate"], "bind 只调一次（稳定身份）");
+    assert.deepEqual(trace.disposedLocales, ["zh", "en"], "两种语言随那一个 disposer 一起回收");
+    assert.deepEqual(
+      trace.localeBindNs,
+      ["quality-gate"],
+      "bind 只调一次（translator 的身份保持稳定）",
+    );
     assert.ok(trace.desc !== null && trace.payload !== null, "slots.register 已调用");
     assert.equal(trace.desc.name, "plugins.bundle.config");
-    // 登记位收到的第二参就是卡片本体：传 undefined 或错位参数时，槽位里没有可渲染的组件。
+    // 登记时收到的第二个参数就是卡片本体：传 undefined 或参数错位时，槽位里没有可渲染的组件。
     assert.equal(typeof trace.view, "function", "卡片组件必须交给 slots.register");
     // 槽位 key 与条目 id 是**两个**标识：key = profile 里那条 bundle 的包名（宿主按包名
     // 派发 plugins.bundle.config，证据链见 test/profile-bundle.ts），裸条目 id 只喂
-    // configForms.get()（上面那条断言）。两侧同读真源、不抄常量，改错任何一边都炸。
+    // configForms.get()（上面那条断言）。两处都去各自的来源读、不抄常量，改错任何一边都会失败。
     assert.notEqual(
       profileBundleName(),
       patchEntryId(),
@@ -442,11 +447,11 @@ describe("卡片 apply 的官方 locale 接线", () => {
     };
     assert.equal(payload.t, tEn, "bind 出的 translator 经 payload 下发成 t prop");
     assert.notEqual(payload.hooks.card, undefined, "hooks.card 仍在");
-    // 写入仍落到 configForms.get() 交回的那张表单上（set 存值 / unset 恢复默认），
-    // 且 0.1.7 的受理位 Promise<boolean> **原样透传**给卡片（消费在 save()）：
-    // 写通道不再 swallow——宿主拒写（false）与传输失败（reject）都必须回到卡片。
-    assert.equal(await payload.set("gateBudgetMs", 30_000), true, "set 受理位透传");
-    assert.equal(await payload.unset("memoryGatewayUrl"), true, "unset 受理位透传");
+    // 写入仍然落到 configForms.get() 返回的那张表单上（set 存值 / unset 恢复默认），
+    // 且 0.1.7 返回的 Promise<boolean> 原样传给卡片（由 save() 使用）：
+    // 写入这条路径不再忽略返回值——宿主拒写（false）与传输失败（reject）都必须回到卡片。
+    assert.equal(await payload.set("gateBudgetMs", 30_000), true, "set 的返回值原样传给卡片");
+    assert.equal(await payload.unset("memoryGatewayUrl"), true, "unset 的返回值原样传给卡片");
     assert.deepEqual(trace.setCalls, [["gateBudgetMs", 30_000]], "payload.set 必须写进本条目表单");
     assert.deepEqual(
       trace.unsetCalls,
@@ -456,17 +461,17 @@ describe("卡片 apply 的官方 locale 接线", () => {
     assert.deepEqual(
       trace.mutateCalls,
       [],
-      "写入只用 set/unset，不碰官方 mutate（路径级原子写入是第五位，本卡不用）",
+      "写入只用 set/unset，不用官方 mutate（按路径原子写入的那个第五个方法，这张卡用不上）",
     );
-    // slot 清理回调：只注销登记，**绝不 dispose 表单**——0.1.7 的 ConfigForm 契约里没有
-    // dispose（installed config-form-types.d.ts 的 ConfigForm），表单归 provider 长活；销毁它正是
-    // 旧 settingsScope 那个「收起插件页后每次保存被静默丢弃」缺陷的来源。
+    // slot 的清理回调：只注销登记，**绝不 dispose 表单**——0.1.7 的 ConfigForm 声明里没有
+    // dispose（见 config-form-types.d.ts 的 ConfigForm），表单归 provider 长期持有；销毁它正是
+    // 旧 settingsScope 那个「收起插件页后每次保存都被静默丢掉」的缺陷来源。
     assert.equal(trace.slotCleanups.length, 1);
     trace.slotCleanups[0]?.();
     assert.deepEqual(trace.disposeCalls, [], "disposer 不得销毁 provider 持有的共享表单");
   });
 
-  it("一次注册里的 zh / en 两份字典指向本包那两份对象（切语言 = 官方 locale 换 translator）", () => {
+  it("一次注册里的 zh / en 两份文案指向本包那两份对象（切语言 = 官方 locale 换 translator）", () => {
     const { ctx, trace } = makeHost(tZh);
     apply(ctx);
     const disposeDictionaries = trace.effects.get(LOCALE_EFFECT_LABEL)?.();

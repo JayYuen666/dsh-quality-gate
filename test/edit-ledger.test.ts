@@ -1,12 +1,12 @@
-// 编辑台账投影的单元用例：折叠判定与回退扫描**同源**（同一套 EDIT_TOOLS / badArguments /
-// editPathOf），所以这里逐条钉的是「哪些事件成行、哪些不成行」，不重复测 shared 的字段解析。
+// 编辑台账投影的单元测试：从事件累加状态与从历史重放走的是同一套判断（`EDIT_TOOLS`、badArguments、
+// editPathOf 都共用），所以这里逐条固定的是"哪些事件会记成条目、哪些不会"，不重复测 shared 的字段解析。
 import { describe, it } from "vitest";
 import { strict as assert } from "node:assert";
 import type { SessionEvent } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import { EDIT_LEDGER_KEY, EDIT_LEDGER_MAX, editLedgerProjection } from "../lib/edit-ledger.ts";
 import type { EditLedgerState } from "../lib/edit-ledger.ts";
 
-/** 一条 tool/call 事件。参数按原始 JSON 串给（与模型产出同形）。 */
+/** 一条 tool/call 事件。参数按原始 JSON 字符串给出（和模型实际产出的写法一致）。 */
 function callEvent(seq: number, name: string, args: unknown, callId?: string): SessionEvent {
   return {
     type: "tool/call",
@@ -17,11 +17,11 @@ function callEvent(seq: number, name: string, args: unknown, callId?: string): S
       arguments: typeof args === "string" ? args : JSON.stringify(args),
       ...(callId === undefined ? {} : { callId }),
     },
-    // 本文件只喂投影，事件的其余位不参与折叠；一次显式断言比逐字段照抄官方判别联合稳。
+    // 本文件只把事件交给投影，事件的其他字段不参与状态累加；写一次显式类型转换比照着官方的判别联合逐个字段抄更可靠。
   } as unknown as SessionEvent;
 }
 
-/** 一条 tool/result 事件（isError 在 data.message 里，与官方 v4 同形）。 */
+/** 一条 tool/result 事件（isError 在 data.message 里，与官方 v4 的结构一致）。 */
 function resultEvent(seq: number, callId: string, isError: boolean): SessionEvent {
   return {
     type: "tool/result",
@@ -40,25 +40,25 @@ function fold(events: readonly SessionEvent[]): EditLedgerState {
 }
 
 describe("编辑台账投影", () => {
-  it("空 callId 的失败结果不误标最近一条无 callId 编辑", () => {
+  it("callId 为空串的失败结果，不会把最近一条没有 callId 的编辑标成失败", () => {
     const state = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }), resultEvent(2, "", true)]);
     assert.deepEqual(
       state.edits.map((entry) => entry.failed),
       [false],
-      "空 callId 不是关联键",
+      "空字符串的 callId 不能当作关联依据",
     );
   });
 
-  it("同一失败结果重复投递 → 状态引用不变（命中项已失败时原样返回）", () => {
+  it("同一条失败结果重复送入 → 状态引用不变（已经标为失败时原样返回）", () => {
     const first = fold([
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
       resultEvent(2, "c1", true),
     ]);
     const again = editLedgerProjection.apply(first, resultEvent(2, "c1", true));
-    assert.equal(again, first, "无变化必须回同一引用");
+    assert.equal(again, first, "没有变化时必须返回同一个引用");
   });
 
-  it("stateSchema 能校验真实折叠产物，并剥离未知字段（旧版本残留不拖垮整份台账）", () => {
+  it("stateSchema 能校验真实累加出的状态，并去掉未知字段（旧版本留下的字段不会让整份台账读不出来）", () => {
     const folded = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1")]);
     assert.equal(editLedgerProjection.stateSchema.safeParse(folded).success, true);
     const withExtra = {
@@ -66,12 +66,12 @@ describe("编辑台账投影", () => {
     };
     const parsed = editLedgerProjection.stateSchema.safeParse(withExtra);
     if (!parsed.success) {
-      assert.fail("含未知字段的持久行必须能恢复（内层 schema 会剥离未知字段）");
+      assert.fail("带未知字段的存档状态必须能读出来（内层 schema 会去掉未知字段）");
     }
     assert.equal(parsed.data.edits[0]?.name, "edit");
   });
 
-  it("写类编辑成行；read-view、非编辑工具与坏参数都不入账", () => {
+  it("写类编辑会记成条目；read-view、非编辑工具和参数不合法都不记录", () => {
     const state = fold([
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
       callEvent(2, "write", { file_path: "/w/b.ts" }, "c2"),
@@ -79,7 +79,7 @@ describe("编辑台账投影", () => {
       callEvent(4, "read", { file_path: "/w/d.ts" }, "c4"),
       callEvent(5, "edit", "{not json", "c5"),
       callEvent(6, "str_replace_editor", { command: "create", path: "/w/e.ts" }, "c6"),
-      // 写操作但没给路径：照样成行，路径记空串（noCallId 组同款保守直记）。
+      // 是写操作但没给路径：仍然记一条，路径用空串（和没有 callId 那组一样，保守地直接记录）。
       callEvent(7, "edit", {}, "c7"),
     ]);
     assert.deepEqual(
@@ -90,16 +90,16 @@ describe("编辑台账投影", () => {
         [6, "c6", "str_replace_editor", "/w/e.ts"],
         [7, "c7", "edit", ""],
       ],
-      "只有真写操作成行，且 seq 取事件自带的日志位",
+      "只有真正的写操作会记录，seq 用事件自带的日志序号",
     );
     assert.equal(
       state.edits.every((entry) => !entry.failed),
       true,
-      "没见到失败结果前一律按未否定处理",
+      "没看到失败结果之前一律按未失败处理",
     );
   });
 
-  it("apply_patch 逐文件成行；失败结果否定同 callId 的全部行", () => {
+  it("apply_patch 每个文件记一条；失败结果把同 callId 的全部记录都标为失败", () => {
     const patch = [
       "*** Begin Patch",
       "*** Add File: a.ts",
@@ -124,11 +124,11 @@ describe("编辑台账投影", () => {
         ["apply_patch", "c.ts", true],
         ["apply_patch", "d.ts", true],
       ],
-      "四个文件效应都入账；失败结果不能只否定最后一行",
+      "四处文件改动都要记录；失败结果不能只标最后一条",
     );
   });
 
-  it("失败结果只否定同 callId 的那一条；未匹配的结果不动台账", () => {
+  it("失败结果只标 callId 相同的那一条；匹配不上的结果不改动台账", () => {
     const state = fold([
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
       callEvent(2, "edit", { file_path: "/w/b.ts" }, "c2"),
@@ -142,48 +142,48 @@ describe("编辑台账投影", () => {
         ["c1", true],
         ["c2", false],
       ],
-      "只否定命中 callId 的那一条，成功结果与陌生 callId 都不改状态",
+      "只标 callId 匹配上的那一条；成功的结果和找不到的 callId 都不改变状态",
     );
   });
 
-  it("缺 callId 的编辑记空串（noCallId 组保守直记）", () => {
+  it("没有 callId 的编辑记成空串（保守地直接记录）", () => {
     const state = fold([callEvent(7, "edit", { file_path: "/w/a.ts" })]);
     assert.deepEqual(state.edits, [
       { seq: 7, callId: "", name: "edit", path: "/w/a.ts", failed: false },
     ]);
   });
 
-  it("无关事件原样交回同一份状态（投影按引用判变化）", () => {
+  it("无关的事件原样返回同一份状态（投影按引用判断有没有变化）", () => {
     const empty = editLedgerProjection.init();
     const same = editLedgerProjection.apply(empty, resultEvent(1, "nobody", false));
-    assert.equal(same, empty, "非记录事件不产生新状态");
+    assert.equal(same, empty, "不需要记录的事件不能产生新状态");
   });
 
-  it("超过上限丢最旧的，保留最近 EDIT_LEDGER_MAX 条", () => {
+  it("条数超过上限时丢掉最旧的，保留最近 EDIT_LEDGER_MAX 条", () => {
     const events: SessionEvent[] = [];
     for (let at = 0; at < EDIT_LEDGER_MAX + 2; at += 1) {
       events.push(callEvent(at, "edit", { file_path: `/w/${String(at)}.ts` }, `c${String(at)}`));
     }
     const state = fold(events);
-    assert.equal(state.edits.length, EDIT_LEDGER_MAX, "台账有界");
+    assert.equal(state.edits.length, EDIT_LEDGER_MAX, "台账条数有上限");
     assert.equal(state.edits[0]?.seq, 2, "丢掉的是最旧的两条");
-    assert.equal(state.edits.at(-1)?.seq, EDIT_LEDGER_MAX + 1, "最新一条仍在");
+    assert.equal(state.edits.at(-1)?.seq, EDIT_LEDGER_MAX + 1, "最新一条还在");
   });
 
-  it("投影不原地修改传入的 state（回放不得污染历史快照）", () => {
+  it("投影不会就地修改传进来的 state（重放不能污染历史快照）", () => {
     const empty = editLedgerProjection.init();
     const before = empty.edits;
     const after = editLedgerProjection.apply(
       empty,
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
     );
-    assert.equal(before.length, 0, "原 state.edits 必须仍为空");
+    assert.equal(before.length, 0, "原来的 state.edits 必须仍然为空");
     assert.equal(after.edits.length, 1);
     assert.notEqual(after.edits, before, "新状态必须用新数组，而不是往旧数组里 push");
   });
 
-  it("callId 重复时失败结果只否定最近那一条（从尾部找，语义显式固定）", () => {
-    // 真实日志里 callId 可能被重试/代理重放复用；本投影按「最近一条同 callId」标记失败。
+  it("callId 重复时，失败结果只标最近那一条（从末尾找，这个行为在此明确固定）", () => {
+    // 真实日志里 callId 可能被重试或者代理重放复用；这个投影按"最近一条相同 callId"来标失败。
     const state = fold([
       callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
       callEvent(2, "edit", { file_path: "/w/b.ts" }, "c1"),
@@ -198,7 +198,7 @@ describe("编辑台账投影", () => {
     );
   });
 
-  it("键与版本号是发布契约的一部分", () => {
+  it("键和版本号属于发布时对外声明的一部分", () => {
     assert.equal(editLedgerProjection.key, EDIT_LEDGER_KEY);
     assert.equal(editLedgerProjection.stateVersion, 1);
   });

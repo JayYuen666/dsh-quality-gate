@@ -1,5 +1,5 @@
-// 门禁探测、编辑记账与记忆反馈的属性面。期望值来自各模块头注写明的契约
-// （白名单四元组、假失败比漏检查更贵、URL fail-closed、单行化），不从实现派生。
+// 门禁命令的探测、编辑记录与记忆反馈这三个模块的性质测试。期望值来自各模块文件头写明的契约
+// （允许的四条命令、假失败比漏检查更贵、URL 判不确定时不放行、把失败文本压成一行），不从实现派生。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -26,7 +26,7 @@ const unsafeUrlArb = fc.oneof(
   fc.constant(""),
 );
 
-/** 探测判据点名的那两份清单文件（白名单性质的锚点）。 */
+/** 探测那段代码点名的那两份清单文件（"只认这几条命令"这个性质体现在哪两份清单上）。 */
 const PKG_JSON = "package.json";
 const TSCONFIG_JSON = "tsconfig.json";
 const WORKSPACE_YAML = "pnpm-workspace.yaml";
@@ -85,7 +85,11 @@ describe("detectGate 的白名单与优先级性质", () => {
           files.includes("package.json") &&
           scripts?.includes("check") === true;
         if (isWorkspace && !hasPnpmCheck) {
-          assert.equal(tsc, false, "workspace 根发了裸 tsc 门禁（solution-style 恒绿陷阱）");
+          assert.equal(
+            tsc,
+            false,
+            "workspace 根发了直接跑 tsc 的检查（solution-style 下会永远通过）",
+          );
         }
         if (tsc) {
           assert.equal(isWorkspace, false);
@@ -97,7 +101,7 @@ describe("detectGate 的白名单与优先级性质", () => {
   });
 });
 
-describe("EditAccumulator 的记账性质", () => {
+describe("EditAccumulator 记录编辑的性质", () => {
   const pathArb = fc
     .tuple(
       fc.constantFrom("src", "lib", "scripts"),
@@ -106,7 +110,7 @@ describe("EditAccumulator 的记账性质", () => {
     )
     .map(([dir, stem, ext]) => `${dir}/${stem}.${ext}`);
 
-  it("drain 只收门禁后缀的路径；容量上限与 droppedCount 守恒", () => {
+  it("drain 只取走门禁用的那几种后缀的路径；容量上限与 droppedCount 相互对得上", () => {
     fc.assert(
       fc.property(
         fc.array(pathArb, { maxLength: 12 }),
@@ -128,7 +132,7 @@ describe("EditAccumulator 的记账性质", () => {
     );
   });
 
-  it("非编辑工具名不记账（EDIT_TOOLS 是唯一真源）", () => {
+  it("不是编辑工具的名字不记录（EDIT_TOOLS 是唯一来源）", () => {
     const acc = new EditAccumulator();
     acc.note("read", "src/a.ts");
     acc.note("glob", "src/b.ts");
@@ -169,7 +173,7 @@ describe("resolveGatewayUrl 与 isCredentialSafeUrl 的 fail-closed 性质", () 
   });
 });
 
-describe("buildFeedbackText 的单行化与空证据契约", () => {
+describe("buildFeedbackText 压成一行与空证据时的返回契约", () => {
   it("failure 值单行化：输出恰两行（渲染模板 + 证据声明）；空 failure 回空串", () => {
     fc.assert(
       fc.property(commandArb, failureArb, (command, failure) => {
