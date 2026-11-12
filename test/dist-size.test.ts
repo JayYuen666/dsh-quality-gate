@@ -16,8 +16,10 @@ import { describe, it } from "vitest";
 
 const pkgDir = path.resolve(import.meta.dirname, "..");
 
-/** host 半产物体积预算（定这一档时实测 75,036 B）：宿主按包名载入它，这些字节是真实装载成本。 */
-const HOST_BUDGET_BYTES = 86_500;
+/** host 半产物体积预算（本次扩充时实测 98,917 B）：宿主按包名载入它，这些字节是真实装载成本。
+ *  这一档的上一次实测是 75,036 B；rc.2 集成的四条行为路径（可写根登记、具名子代理聚合、
+ *  inspectSession 台账读取、工具失败身份）连同它们的证据注释一起进入产物，预算按同一规则重定。 */
+const HOST_BUDGET_BYTES = 114_000;
 /** client 半产物体积预算（定这一档时实测 34,895 B）：浏览器侧加载，按平台计账。 */
 const CLIENT_BUDGET_BYTES = 40_500;
 

@@ -21,13 +21,21 @@ function callEvent(seq: number, name: string, args: unknown, callId?: string): S
   } as unknown as SessionEvent;
 }
 
-/** 一条 tool/result 事件（isError 在 data.message 里，与官方 v4 的结构一致）。 */
-function resultEvent(seq: number, callId: string, isError: boolean): SessionEvent {
+/** 一条 tool/result 事件（isError 在 data.message 里，失败身份在 data 顶层；与官方 rc.2 结构一致）。 */
+function resultEvent(
+  seq: number,
+  callId: string,
+  isError: boolean,
+  error?: { readonly name: string; readonly code: string },
+): SessionEvent {
   return {
     type: "tool/result",
     seq,
     time: seq,
-    data: { message: { source: { callId }, isError } },
+    data: {
+      message: { source: { callId }, isError },
+      ...(error === undefined ? {} : { error }),
+    },
   } as unknown as SessionEvent;
 }
 
@@ -39,12 +47,21 @@ function fold(events: readonly SessionEvent[]): EditLedgerState {
   return state;
 }
 
+/** 一条编辑 + 一次带身份的失败结算 → 台账里那条记录的状态。 */
+function outcomeOf(error: { name: string; code: string }): string | undefined {
+  const state = fold([
+    callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
+    resultEvent(2, "c1", true, error),
+  ]);
+  return state.edits[0]?.outcome;
+}
+
 describe("编辑台账投影", () => {
   it("callId 为空串的失败结果，不会把最近一条没有 callId 的编辑标成失败", () => {
     const state = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }), resultEvent(2, "", true)]);
     assert.deepEqual(
-      state.edits.map((entry) => entry.failed),
-      [false],
+      state.edits.map((entry) => entry.outcome),
+      ["ok"],
       "空字符串的 callId 不能当作关联依据",
     );
   });
@@ -62,7 +79,7 @@ describe("编辑台账投影", () => {
     const folded = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1")]);
     assert.equal(editLedgerProjection.stateSchema.safeParse(folded).success, true);
     const withExtra = {
-      edits: [{ seq: 1, callId: "c1", name: "edit", path: "/w/a.ts", failed: false, legacy: "x" }],
+      edits: [{ seq: 1, callId: "c1", name: "edit", path: "/w/a.ts", outcome: "ok", legacy: "x" }],
     };
     const parsed = editLedgerProjection.stateSchema.safeParse(withExtra);
     if (!parsed.success) {
@@ -93,7 +110,7 @@ describe("编辑台账投影", () => {
       "只有真正的写操作会记录，seq 用事件自带的日志序号",
     );
     assert.equal(
-      state.edits.every((entry) => !entry.failed),
+      state.edits.every((entry) => entry.outcome === "ok"),
       true,
       "没看到失败结果之前一律按未失败处理",
     );
@@ -117,12 +134,12 @@ describe("编辑台账投影", () => {
       resultEvent(2, "c1", true),
     ]);
     assert.deepEqual(
-      state.edits.map((entry) => [entry.name, entry.path, entry.failed]),
+      state.edits.map((entry) => [entry.name, entry.path, entry.outcome]),
       [
-        ["apply_patch", "a.ts", true],
-        ["apply_patch", "b.ts", true],
-        ["apply_patch", "c.ts", true],
-        ["apply_patch", "d.ts", true],
+        ["apply_patch", "a.ts", "failed"],
+        ["apply_patch", "b.ts", "failed"],
+        ["apply_patch", "c.ts", "failed"],
+        ["apply_patch", "d.ts", "failed"],
       ],
       "四处文件改动都要记录；失败结果不能只标最后一条",
     );
@@ -137,10 +154,10 @@ describe("编辑台账投影", () => {
       resultEvent(5, "c9", true),
     ]);
     assert.deepEqual(
-      state.edits.map((entry) => [entry.callId, entry.failed]),
+      state.edits.map((entry) => [entry.callId, entry.outcome]),
       [
-        ["c1", true],
-        ["c2", false],
+        ["c1", "failed"],
+        ["c2", "ok"],
       ],
       "只标 callId 匹配上的那一条；成功的结果和找不到的 callId 都不改变状态",
     );
@@ -149,7 +166,7 @@ describe("编辑台账投影", () => {
   it("没有 callId 的编辑记成空串（保守地直接记录）", () => {
     const state = fold([callEvent(7, "edit", { file_path: "/w/a.ts" })]);
     assert.deepEqual(state.edits, [
-      { seq: 7, callId: "", name: "edit", path: "/w/a.ts", failed: false },
+      { seq: 7, callId: "", name: "edit", path: "/w/a.ts", outcome: "ok" },
     ]);
   });
 
@@ -190,16 +207,44 @@ describe("编辑台账投影", () => {
       resultEvent(3, "c1", true),
     ]);
     assert.deepEqual(
-      state.edits.map((entry) => [entry.path, entry.failed]),
+      state.edits.map((entry) => [entry.path, entry.outcome]),
       [
-        ["/w/a.ts", false],
-        ["/w/b.ts", true],
+        ["/w/a.ts", "ok"],
+        ["/w/b.ts", "failed"],
       ],
     );
   });
 
   it("键和版本号属于发布时对外声明的一部分", () => {
     assert.equal(editLedgerProjection.key, EDIT_LEDGER_KEY);
-    assert.equal(editLedgerProjection.stateVersion, 1);
+    assert.equal(editLedgerProjection.stateVersion, 2);
+  });
+});
+
+describe("结算身份对编辑语义的分档（rc.2 的 data.error）", () => {
+  it("审批类拒绝与派发前取消归为 rejected：工具体没执行，文件一定没变", () => {
+    for (const code of [
+      "APPROVAL_REJECTED",
+      "APPROVAL_CANCELLED",
+      "APPROVAL_UNAVAILABLE",
+      "ABORTED_BEFORE_DISPATCH",
+    ]) {
+      assert.equal(outcomeOf({ name: "ApprovalError", code }), "rejected", code);
+    }
+  });
+
+  it("已派发后中止归为 aborted：写可能已落盘，门禁必须核验", () => {
+    assert.equal(outcomeOf({ name: "AbortError", code: "ABORTED" }), "aborted");
+    // 只带 AbortError 名字的取消（码不认识）同样按"可能已写"处理
+    assert.equal(outcomeOf({ name: "AbortError", code: "CANCELLED" }), "aborted");
+  });
+
+  it("其余错误身份与完全没有身份都归为 failed（沿用旧行为：不核验）", () => {
+    assert.equal(outcomeOf({ name: "ToolOutputError", code: "UNKNOWN" }), "failed");
+    const state = fold([
+      callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1"),
+      resultEvent(2, "c1", true),
+    ]);
+    assert.equal(state.edits[0]?.outcome, "failed");
   });
 });

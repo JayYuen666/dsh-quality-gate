@@ -18,7 +18,7 @@ function release(): void {
 }
 
 const VALID_STATE = {
-  edits: [{ seq: 1, callId: "c1", name: "edit", path: "/w/a.ts", failed: false }],
+  edits: [{ seq: 1, callId: "c1", name: "edit", path: "/w/a.ts", outcome: "ok" }],
 };
 
 interface Face {
@@ -151,7 +151,7 @@ describe("编辑台账读取函数的挂载（两种返回形态）", () => {
         void 0;
       },
       stateOf: () => ({
-        edits: [{ seq: -1, callId: "c1", name: "edit", path: "/w/a.ts", failed: false }],
+        edits: [{ seq: -1, callId: "c1", name: "edit", path: "/w/a.ts", outcome: "ok" }],
       }),
     };
     const harness = makeFace();

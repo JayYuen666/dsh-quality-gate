@@ -85,6 +85,7 @@ describe("host 消息字典（中英双语）", () => {
       cause: "命令不存在（工具未安装）",
       message: "boom",
       failure: "TS2345",
+      names: "reviewer/checker",
     };
     // 这条用例要的是「模板里的占位符名字都在 params 里」这层反查：renderTemplate 的契约是「未提供的名字留空串」，
     // 所以只断言渲染结果里没有没替换的花括号永远成立（少给参数也照样留空）。这里逐个模板把

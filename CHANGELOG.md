@@ -5,6 +5,23 @@
 版本标题不写发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需
 增设标准六类之外的小节（如 `Tests`、`Not changed, deliberately`）。
 
+## 0.1.8
+
+接入宿主 rc.2 的四项新能力：门禁根的临时写权限、具名子代理的编辑聚合与推迟、`inspectSession` 台账读取、工具失败身份。宿主开发基线抬到 `0.2.2-rc.2`，支持窗口随之收到 `^0.2.2-rc.2`。
+
+### Added
+
+- **门禁根的临时写权限（`sandboxPolicy.registerWritableRoot`）**：会话开在 monorepo 子包、而 `pnpm check` / `cargo check` / `tsc` 必须回到仓库根执行时，根目录不在本会话的可写边界内——产物写不出去会让命令非零退出，变成假失败。现在只在 `workspace-write` 且门禁根未被工作区/额外可写根覆盖时为**这一批门禁**登记该根，批次结束（通过、失败、跳过或抛错）在 `finally` 里释放；`read-only` 不登记（不替用户提权），`danger-full-access` 无需登记。
+- **具名子代理的编辑聚合（AgentTeam）**：根会话回合结束时经 `subagents.listDescendants` 递归列出本树子代理。有队友仍在执行（`agents` 里 `status === running`）→ **推迟**本轮门禁并保留已收集的文件（队友完成后会开启新的根回合再检查）；其余子代理的编辑台账按各自游标增量并入本回合的文件集，门禁失败时在注入文案里点名改过该根的子代理。
+- **`sessionQuery.inspectSession` 读取子代理台账**：只读本包自己的编辑台账投影与 header，准备冷会话后在当次截面同步取值并立即释放，不 attach、不恢复 Agent；事件窗仍走 `observeSession`（官方禁止新增同步历史读取）。
+- **工具失败身份（`tool/result.error.info`）**：编辑台账按结算身份分档——审批被拒与派发前取消（`APPROVAL_*` / `ABORTED_BEFORE_DISPATCH`）不核验，已派发后中止（`ABORTED` / `AbortError`）保守核验（写可能已落盘），其余失败与无身份沿用旧的"不核验"。投影状态版本升到 2。
+
+### Changed
+
+- **宿主开发基线抬到 `0.2.2-rc.2`**：`devDependencies` 整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-rc.2`，并补上 rc.2 新增的 `@deepseek-ai/dsh-error`（`dsh-llm` 的精确 peer，`autoInstallPeers: false` 下须显式声明）。
+- **支持窗口收到 `^0.2.2-rc.2`**：`engines.dsh` 与 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 改为 `^0.2.2-rc.2`（单条 0.2.2 线，rc.1 宿主不再声明支持）；`@deepseek-ai/schemastery` peer 由 `^3.18.5 || ^3.18.6-alpha.1` 收到 `^3.19.0`。devDependencies 仍精确钉版。
+- **运行时依赖 shared 抬到 `^0.2.6`**：工具失败身份读的是该版本 `ToolResultRecord.error`；catalog 与 `pnpm-lock.yaml` 随根 `sync` / `sync:lock` 重解，装到 0.2.5 时该字段恒为 `undefined`，失败身份集成会退回旧的"只核验成功编辑"语义。
+
 ## 0.1.7
 
 修复 0.1.6 引入的 web 启动隐患：卡片组件收回 `client.js` 内联，移除对 `@jayyuen66/dsh-plugin-shared/client` 的模块表外置与 `cordis.patch.yml` 里的 shared 供应行。默认配置与检查命令白名单不变。

@@ -57,6 +57,12 @@ async function waitUntil(condition: () => boolean, timeoutMs: number): Promise<b
 /** 本包的插件 id（logger 具名、patch 条目 id、设置命名空间三处同值）。 */
 const PLUGIN_ID = "quality-gate";
 
+/** 事件/目录行的类型字面量（多处复用，避免重复字符串规则把同一写法判成噪音）。 */
+const TOOL_RESULT_EVENT = "tool/result";
+const CHILD_ROW_KIND = "child";
+const INACTIVE_ACTIVITY = "inactive";
+const REJECTED_CHILD_ID = "s-rejected";
+
 // 本文件创建的临时项目根统一登记，各 suite 的 afterEach 显式回收。
 // 只靠"系统清理 tmp 目录"不算回收：macOS 的 TMPDIR 清理并不激进，套件跑完的残留会一直
 // 堆在盘上，所以这里显式 rmSync。
@@ -164,7 +170,19 @@ interface MockCtx {
   /** shell.execute 抛错（准备期失败 / SandboxUnavailableError）。 */
   shellRunError: Error | undefined;
   /** ctx.sandboxPolicy 服务（undefined = 组合里是非沙箱 executor）。 */
-  sandboxPolicy: { resolve: (request: unknown) => unknown } | undefined;
+  sandboxPolicy:
+    | {
+        resolve: (request: unknown) => unknown;
+        /** rc.2 的额外可写根登记（返回释放函数）。 */
+        registerWritableRoot?: (session: unknown, directory: string) => () => void;
+      }
+    | undefined;
+  /** ctx.subagents（rc.2 具名子代理）：递归列出根会话的子代理。undefined = 精简组合。 */
+  subagents?:
+    | { listDescendants: (id: string, signal?: AbortSignal) => Promise<readonly unknown[]> }
+    | undefined;
+  /** ctx.agents（AgentRegistry）：live agent 的 id/status。 */
+  agents?: { list: () => readonly unknown[] } | undefined;
   /** ctx.credentials 服务（undefined = 组合里没装凭据服务；记忆反馈据此降级不推送）。 */
   credentials: { resolve: (ref: string) => Promise<CredentialHit | undefined> } | undefined;
   /** resolve 的返回（undefined = 该引用未配置凭据）。 */
@@ -206,6 +224,8 @@ interface MockCtx {
       inheritedEventCount: number | undefined;
       [Symbol.dispose]: () => void;
     }>;
+    /** rc.2 的 inspectSession：同步 getter + 立即释放（测试替身直接把 fixture 交给 getter）。 */
+    inspectSession?: <Result>(id: string, read: (session: unknown) => Result) => Promise<Result>;
   };
   on: (event: string, handler: (payload: unknown) => void) => void;
   effect: (fn: () => (() => void) | undefined) => void;
@@ -1100,29 +1120,27 @@ describe("quality-gate host 接线", () => {
         ctx.followupCalls.push(msg);
       },
     };
-    {
-      log.push({
-        type: "tool/call",
-        data: { name: "edit", arguments: JSON.stringify({ file_path: `${project}/a.ts` }) },
-      });
-      ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
-      await sleep(20);
-      ids.push((ctx.followupCalls.at(-1) as { id: string }).id);
-      log.push({
-        type: "tool/call",
-        data: { name: "edit", arguments: JSON.stringify({ file_path: `${project}/a.ts` }) },
-      });
-      ctx.handlers["agent/turn-stopping"]!({ agent, turn: 2 });
-      await sleep(20);
-      ids.push((ctx.followupCalls.at(-1) as { id: string }).id);
-      log.push({
-        type: "tool/call",
-        data: { name: "edit", arguments: JSON.stringify({ file_path: `${project}/a.ts` }) },
-      });
-      ctx.handlers["agent/turn-stopping"]!({ agent, turn: 3 });
-      await sleep(20);
-      ids.push((ctx.followupCalls.at(-1) as { id: string }).id);
-    }
+    log.push({
+      type: "tool/call",
+      data: { name: "edit", arguments: JSON.stringify({ file_path: `${project}/a.ts` }) },
+    });
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
+    await sleep(20);
+    ids.push((ctx.followupCalls.at(-1) as { id: string }).id);
+    log.push({
+      type: "tool/call",
+      data: { name: "edit", arguments: JSON.stringify({ file_path: `${project}/a.ts` }) },
+    });
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 2 });
+    await sleep(20);
+    ids.push((ctx.followupCalls.at(-1) as { id: string }).id);
+    log.push({
+      type: "tool/call",
+      data: { name: "edit", arguments: JSON.stringify({ file_path: `${project}/a.ts` }) },
+    });
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 3 });
+    await sleep(20);
+    ids.push((ctx.followupCalls.at(-1) as { id: string }).id);
     assert.equal(new Set(ids).size, 3, "三次注入 id 必须唯一");
     for (const id of ids) {
       assert.match(id, uuidRe, `id 必须 randomUUID 形态（实测 ${id}）`);
@@ -1332,7 +1350,7 @@ describe("quality-gate host 接线", () => {
         },
       },
       {
-        type: "tool/result",
+        type: TOOL_RESULT_EVENT,
         data: { message: { source: { callId: "c1" }, isError: true } },
       },
     ];
@@ -1362,7 +1380,7 @@ describe("quality-gate host 接线", () => {
         },
       },
       {
-        type: "tool/result",
+        type: TOOL_RESULT_EVENT,
         data: { message: { source: { callId: "c2" }, isError: false } },
       },
     ];
@@ -2061,7 +2079,7 @@ describe("编辑台账投影的读取路径", () => {
   });
 
   const validLedger = (): unknown => ({
-    edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: false }],
+    edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "ok" }],
   });
 
   beforeEach(() => {
@@ -2081,8 +2099,8 @@ describe("编辑台账投影的读取路径", () => {
         Promise.resolve({
           stateOf: (): unknown => ({
             edits: [
-              { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: false },
-              { seq: 1, callId: "c2", name: "edit", path: `${project}/b.ts`, failed: false },
+              { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "ok" },
+              { seq: 1, callId: "c2", name: "edit", path: `${project}/b.ts`, outcome: "ok" },
             ],
           }),
           dispose: (): void => {
@@ -2122,8 +2140,8 @@ describe("编辑台账投影的读取路径", () => {
     // 第二条没有路径（空串）→ 记进台账但不会被解析成项目根；门禁仍由有路径的那条触发。
     await armProjection(() => ({
       edits: [
-        { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: false },
-        { seq: 1, callId: "c2", name: "edit", path: "", failed: false },
+        { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "ok" },
+        { seq: 1, callId: "c2", name: "edit", path: "", outcome: "ok" },
       ],
     }));
     ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
@@ -2135,7 +2153,7 @@ describe("编辑台账投影的读取路径", () => {
 
   it("失败的条目被跳过：只剩失败的编辑时门禁不跑", async () => {
     await armProjection(() => ({
-      edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, failed: true }],
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "failed" }],
     }));
     ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
     await sleep(20);
@@ -2162,5 +2180,627 @@ describe("编辑台账投影的读取路径", () => {
     ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(undefined), turn: 1 });
     await sleep(20);
     assert.equal(observed, 1, "推不动游标就不该走投影");
+  });
+});
+
+/** 一次 turn-stopping 的载荷替身：root 会话、指定 cwd/seq、把注入记进 env。 */
+function fireRootTurn(
+  env: MockCtx,
+  options: { id?: string; cwd: string; seq?: number; events?: unknown[] },
+): void {
+  const agent = {
+    session: {
+      id: options.id ?? "s-root",
+      header: { cwd: options.cwd },
+      ...(options.seq === undefined ? {} : { seq: options.seq }),
+      snapshotEvents: (from?: number) => (options.events ?? []).slice(from ?? 0),
+    },
+    status: "running",
+    inbox: { nextTurn: [], nextStep: [] },
+    followup(msg: unknown) {
+      env.followupCalls.push(msg);
+    },
+  };
+  env.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
+}
+
+/** 一条编辑事件的夹具（调用 + 可选结算，结算身份用 rc.2 的 data.error 形状）。 */
+function editCall(file: string, callId?: string): unknown {
+  return {
+    type: "tool/call",
+    data: {
+      name: "edit",
+      arguments: JSON.stringify({ file_path: file }),
+      ...(callId === undefined ? {} : { callId }),
+    },
+  };
+}
+
+function editResult(
+  callId: string,
+  error?: { readonly name: string; readonly code: string },
+): unknown {
+  return {
+    type: TOOL_RESULT_EVENT,
+    data: {
+      message: { source: { callId }, isError: error !== undefined },
+      ...(error === undefined ? {} : { error }),
+    },
+  };
+}
+
+describe("rc.2 集成：门禁根的临时写权限（registerWritableRoot）", () => {
+  let ctx: MockCtx;
+  let parent: string;
+  let sub: string;
+  let registered: string[];
+  let released: string[];
+  let mode: "read-only" | "workspace-write" | "danger-full-access";
+
+  beforeEach(() => {
+    ctx = createMockCtx();
+    parent = makeProject("wg-parent");
+    sub = path.join(parent, "packages", "app");
+    mkdirSync(sub, { recursive: true });
+    registered = [];
+    released = [];
+    mode = "workspace-write";
+    ctx.sandboxPolicy = {
+      // 策略的 workspaceRoot 就是会话 cwd（和官方 sandbox-policy 对 session.header.cwd 的解析一致）
+      resolve: (request: unknown) => ({
+        mode,
+        workspaceRoot:
+          (request as { session?: { header?: { cwd?: string } } }).session?.header?.cwd ?? sub,
+      }),
+      registerWritableRoot: (_session: unknown, directory: string) => {
+        registered.push(directory);
+        return () => {
+          released.push(directory);
+        };
+      },
+    };
+    applyGate(ctx, ctx.value);
+  });
+
+  afterEach(recycleScratchRoots);
+
+  it("workspace-write 且门禁根在会话 cwd 之上 → 登记该根，批次结束释放", async () => {
+    fireRootTurn(ctx, { cwd: sub, events: [editCall(path.join(parent, "a.ts"))] });
+    await sleep(20);
+    assert.deepEqual(registered, [parent], "门禁根不在会话可写边界内时必须登记");
+    assert.deepEqual(released, [parent], "批次结束后必须释放，授权不能留到下一回合");
+    assert.equal(ctx.shellCommands[0]?.workdir, parent);
+  });
+
+  it("门禁根已在会话工作区内 → 不登记（不扩大既有权限）", async () => {
+    fireRootTurn(ctx, { cwd: parent, events: [editCall(path.join(parent, "a.ts"))] });
+    await sleep(20);
+    assert.deepEqual(registered, []);
+    assert.equal(ctx.shellCommands.length, 1, "门禁照常执行");
+  });
+
+  it("read-only 模式不登记：用户选择的只读边界不得由插件提权", async () => {
+    mode = "read-only";
+    fireRootTurn(ctx, { cwd: sub, events: [editCall(path.join(parent, "a.ts"))] });
+    await sleep(20);
+    assert.deepEqual(registered, []);
+    assert.equal(ctx.shellCommands.length, 1);
+  });
+
+  it("登记抛错 → 只警告，门禁照跑（不把授权失败伪装成代码失败）", async () => {
+    ctx.sandboxPolicy!.registerWritableRoot = () => {
+      throw new Error("registration refused");
+    };
+    const warns = await collectWarns(async () => {
+      fireRootTurn(ctx, { cwd: sub, events: [editCall(path.join(parent, "a.ts"))] });
+      await sleep(20);
+    });
+    assert.ok(
+      warns.some((line) => line.includes("writable-root registration failed")),
+      "登记失败必须留下可见记录",
+    );
+    assert.equal(ctx.shellCommands.length, 1);
+  });
+
+  it("释放抛错 → 只警告，批次的结论不受影响", async () => {
+    ctx.sandboxPolicy!.registerWritableRoot = (_session: unknown, directory: string) => {
+      registered.push(directory);
+      return () => {
+        throw new Error("release refused");
+      };
+    };
+    const warns = await collectWarns(async () => {
+      fireRootTurn(ctx, { cwd: sub, events: [editCall(path.join(parent, "a.ts"))] });
+      await sleep(20);
+    });
+    assert.ok(
+      warns.some((line) => line.includes("writable-root release failed")),
+      "释放失败必须留下可见记录",
+    );
+  });
+
+  it("danger-full-access 不需要登记", async () => {
+    mode = "danger-full-access";
+    fireRootTurn(ctx, { cwd: sub, events: [editCall(path.join(parent, "a.ts"))] });
+    await sleep(20);
+    assert.deepEqual(registered, []);
+  });
+});
+
+describe("rc.2 集成：具名子代理的编辑与推迟", () => {
+  let ctx: MockCtx;
+  let project: string;
+  let members: unknown[];
+  let live: unknown[];
+  let ledgers: Map<string, unknown>;
+  let childSessions: Map<string, unknown>;
+
+  /** 挂 Team 相关的三个服务 + 台账投影，然后装载插件。 */
+  function arm(): void {
+    ctx.subagents = { listDescendants: async () => members };
+    ctx.agents = { list: () => live };
+    const base = ctx.sessionQuery;
+    assert.ok(base !== undefined, "默认夹具应带观察接口");
+    ctx.sessionQuery = {
+      observeSession: base.observeSession,
+      inspectSession: async <Result>(
+        id: string,
+        read: (session: unknown) => Result,
+      ): Promise<Result> => read(childSessions.get(id)),
+    };
+    ctx.sessionProjections = {
+      register: async () => ({
+        stateOf: (session: unknown) => ledgers.get((session as { id: string }).id),
+        dispose: () => Promise.resolve(),
+      }),
+      stateOf: () => null,
+    };
+    applyGate(ctx, ctx.value);
+  }
+
+  beforeEach(() => {
+    ctx = createMockCtx();
+    project = makeProject("team");
+    members = [];
+    live = [];
+    ledgers = new Map<string, unknown>([["s-root", { edits: [] }]]);
+    childSessions = new Map<string, unknown>();
+  });
+
+  afterEach(recycleScratchRoots);
+
+  it("队友仍在执行 → 推迟本轮门禁，且不丢文件；队友停下后下一回合补跑", async () => {
+    members = [{ kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: "running" }];
+    live = [{ id: "s-child", status: "running" }];
+    ledgers.set("s-root", {
+      edits: [
+        { seq: 0, callId: "c1", name: "edit", path: path.join(project, "a.ts"), outcome: "ok" },
+      ],
+    });
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "队友在跑时不得检查正在被并发改写的树");
+    assert.equal(ctx.followupCalls.length, 0, "推迟不是失败，不注入");
+    // 队友完成、根会话因队友消息开启下一个回合：累加器里的文件还在
+    live = [{ id: "s-child", status: "idle" }];
+    fireRootTurn(ctx, { cwd: project, seq: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "推迟的文件必须在后续回合补检");
+  });
+
+  it("空闲队友的台账并入门禁，并在失败文案里点名", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [{ id: "s-child", status: "idle" }];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    ledgers.set("s-child", {
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    ctx.gateExitCode = 1;
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "相对路径按子代理 cwd 解析后应命中项目根");
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+    const message = ctx.followupCalls[0] as { content: { text: string }[] };
+    assert.match(message.content[0]!.text, /reviewer/u, "注入文案要点出改过该根的具名子代理");
+  });
+
+  it("子代理被拒绝的编辑不参与门禁；已派发中止的编辑参与", async () => {
+    members = [
+      {
+        kind: CHILD_ROW_KIND,
+        id: REJECTED_CHILD_ID,
+        path: "reviewer",
+        activity: INACTIVE_ACTIVITY,
+      },
+      { kind: CHILD_ROW_KIND, id: "s-aborted", path: "fixer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set(REJECTED_CHILD_ID, {
+      id: REJECTED_CHILD_ID,
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    childSessions.set("s-aborted", {
+      id: "s-aborted",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    ledgers.set(REJECTED_CHILD_ID, {
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "rejected" }],
+    });
+    ledgers.set("s-aborted", {
+      edits: [{ seq: 0, callId: "c2", name: "edit", path: "a.ts", outcome: "aborted" }],
+    });
+    ctx.gateExitCode = 1;
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "aborted 的那份编辑必须核验");
+    const message = ctx.followupCalls[0] as { content: { text: string }[] };
+    assert.match(message.content[0]!.text, /fixer/u);
+    assert.doesNotMatch(message.content[0]!.text, /reviewer/u, "被拒绝的编辑不该被点名");
+  });
+
+  it("子代理台账只取 fork 切点之后、且落在本项目内的编辑", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 2,
+      header: { cwd: project },
+      seq: 4,
+    });
+    ledgers.set("s-child", {
+      edits: [
+        { seq: 1, callId: "inherited", name: "edit", path: "inherited.ts", outcome: "ok" },
+        { seq: 3, callId: "own", name: "edit", path: "a.ts", outcome: "ok" },
+      ],
+    });
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+  });
+
+  it("不在任何项目根下的子代理编辑不参与归因，也不影响门禁", async () => {
+    const orphan = path.join(tmpdir(), `qg-orphan-${Date.now()}`);
+    mkdirSync(orphan, { recursive: true });
+    scratchRoots.push(orphan);
+    writeFileSync(path.join(orphan, "b.ts"), "export const b = 1\n");
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 2,
+    });
+    ledgers.set("s-child", {
+      edits: [
+        { seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" },
+        { seq: 1, callId: "c2", name: "edit", path: path.join(orphan, "b.ts"), outcome: "ok" },
+      ],
+    });
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "有项目根的那份编辑照常核验");
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+  });
+
+  it("具名子代理缺 path 时用 Session id 作名字；agents 列表里的坏形状跳过", async () => {
+    members = [{ kind: CHILD_ROW_KIND, id: "s-child", activity: INACTIVE_ACTIVITY }];
+    // 坏形状（不是对象 / id 不是字符串）不参与状态表，合法的那条照常给出 idle
+    live = [42, { id: 42, status: "running" }, { id: "s-child", status: "idle" }];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    ledgers.set("s-child", {
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    ctx.gateExitCode = 1;
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+    const message = ctx.followupCalls[0] as { content: { text: string }[] };
+    assert.match(message.content[0]!.text, /s-child/u, "没有具名路径时用 Session id 归因");
+  });
+
+  it("子代理目录列不出来 → 警告一次，根会话自己的编辑照常过门禁", async () => {
+    ctx.subagents = {
+      listDescendants: async () => {
+        throw new Error("catalog unavailable");
+      },
+    };
+    ctx.agents = { list: () => [] };
+    ledgers.set("s-root", {
+      edits: [
+        { seq: 0, callId: "c1", name: "edit", path: path.join(project, "a.ts"), outcome: "ok" },
+      ],
+    });
+    ctx.sessionProjections = {
+      register: async () => ({
+        stateOf: (session: unknown) => ledgers.get((session as { id: string }).id),
+        dispose: () => Promise.resolve(),
+      }),
+      stateOf: () => null,
+    };
+    applyGate(ctx, ctx.value);
+    await sleep(0);
+    const warns = await collectWarns(async () => {
+      fireRootTurn(ctx, { cwd: project, seq: 1 });
+      await sleep(20);
+      fireRootTurn(ctx, { cwd: project, seq: 1 });
+      await sleep(20);
+    });
+    assert.equal(
+      warns.filter((line) => line.includes("subagent listing unavailable")).length,
+      1,
+      "同类失败只警告一次",
+    );
+    assert.equal(ctx.shellCommands.length, 1, "根会话自己的编辑仍要过门禁");
+  });
+
+  it("没有 agents 服务 → 不聚合也不推迟，只警告一次", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    ledgers.set("s-child", {
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    ctx.subagents = { listDescendants: async () => members };
+    ctx.sessionProjections = {
+      register: async () => ({
+        stateOf: (session: unknown) => ledgers.get((session as { id: string }).id),
+        dispose: () => Promise.resolve(),
+      }),
+      stateOf: () => null,
+    };
+    applyGate(ctx, ctx.value);
+    await sleep(0);
+    const warns = await collectWarns(async () => {
+      fireRootTurn(ctx, { cwd: project, seq: 0 });
+      await sleep(20);
+      fireRootTurn(ctx, { cwd: project, seq: 0 });
+      await sleep(20);
+    });
+    assert.equal(
+      warns.filter((line) => line.includes("agents service unavailable")).length,
+      1,
+      "同类失败只警告一次",
+    );
+    assert.equal(ctx.shellCommands.length, 0, "分不清运行状态时不聚合，也不误跑");
+  });
+
+  it("个别子代理台账读不出来 → 其余子代理仍然聚合", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-bad", path: "broken", activity: INACTIVE_ACTIVITY },
+      { kind: CHILD_ROW_KIND, id: "s-good", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-bad", {
+      id: "s-bad",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    childSessions.set("s-good", {
+      id: "s-good",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    ledgers.set("s-good", {
+      edits: [{ seq: 0, callId: "c2", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    arm();
+    await sleep(0);
+    const original = ctx.sessionQuery!.inspectSession!;
+    ctx.sessionQuery!.inspectSession = async <Result>(
+      id: string,
+      read: (session: unknown) => Result,
+    ) => {
+      if (id === "s-bad") {
+        throw new Error("cold read failed");
+      }
+      return original(id, read);
+    };
+    const warns = await collectWarns(async () => {
+      fireRootTurn(ctx, { cwd: project, seq: 0 });
+      await sleep(20);
+    });
+    assert.ok(warns.some((line) => line.includes("teammate edit read failed")));
+    assert.equal(ctx.shellCommands.length, 1, "其余子代理的编辑仍要核验");
+  });
+
+  it("多个子代理台账都读不出来 → 只警告一次", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-a", path: "a", activity: INACTIVE_ACTIVITY },
+      { kind: CHILD_ROW_KIND, id: "s-b", path: "b", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    arm();
+    await sleep(0);
+    ctx.sessionQuery!.inspectSession = async () => {
+      throw new Error("cold read failed");
+    };
+    const warns = await collectWarns(async () => {
+      fireRootTurn(ctx, { cwd: project, seq: 0 });
+      await sleep(20);
+    });
+    assert.equal(
+      warns.filter((line) => line.includes("teammate edit read failed")).length,
+      1,
+      "同一轮里第二个失败不再重复警告",
+    );
+  });
+
+  it("subagents / agents 形状不符时逐级退场，不抛错", async () => {
+    const mutable = ctx as unknown as Record<string, unknown>;
+    mutable["subagents"] = 42;
+    mutable["agents"] = 42;
+    applyGate(ctx, ctx.value);
+    await sleep(0);
+    // 1) subagents 不是对象；2) 没有 listDescendants；3) listDescendants 交回非数组
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    mutable["subagents"] = { listDescendants: 42 };
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    mutable["subagents"] = { listDescendants: async () => 42 };
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    // 4) 有成员之后，agents 依次是：不是对象 / 没有 list / list 交回非数组
+    mutable["subagents"] = {
+      listDescendants: async () => [{ kind: CHILD_ROW_KIND, id: "s-x" }],
+    };
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    mutable["agents"] = { list: 42 };
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    mutable["agents"] = { list: () => 42 };
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0);
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("诊断行与坏形状跳过；没有可读台账时不聚合", async () => {
+    members = [
+      { kind: "diagnostic", id: "s-broken", reason: "corrupt" },
+      { kind: CHILD_ROW_KIND, id: "" },
+      null,
+    ];
+    live = [];
+    ctx.subagents = { listDescendants: async () => members };
+    ctx.agents = { list: () => [] };
+    applyGate(ctx, ctx.value);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0);
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("没有台账投影 → 不聚合子代理编辑（但仍在读根会话）", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 1,
+    });
+    ctx.subagents = { listDescendants: async () => members };
+    ctx.agents = { list: () => [] };
+    applyGate(ctx, ctx.value);
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 0 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "根会话没有编辑、又没有台账可读 → 没有门禁");
+  });
+});
+
+describe("rc.2 集成：工具失败身份影响是否核验", () => {
+  let ctx: MockCtx;
+  let project: string;
+
+  beforeEach(() => {
+    ctx = createMockCtx();
+    project = makeProject("identity");
+    applyGate(ctx, ctx.value);
+  });
+
+  afterEach(recycleScratchRoots);
+
+  it("结算没有 callId → 不参与关联，编辑按保守规则记录", async () => {
+    fireRootTurn(ctx, {
+      cwd: project,
+      events: [
+        editCall(path.join(project, "a.ts"), "c1"),
+        { type: TOOL_RESULT_EVENT, data: { message: { isError: true } } },
+      ],
+    });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "关联不上的失败不能反转成'不核验'");
+  });
+
+  it("参数不是合法 JSON 的编辑调用不进入门禁", async () => {
+    fireRootTurn(ctx, {
+      cwd: project,
+      events: [{ type: "tool/call", data: { name: "edit", arguments: "{not json" } }],
+    });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "解析不出路径的调用不能当成编辑");
+  });
+
+  it("已派发后中止（ABORTED）仍要核验该文件", async () => {
+    fireRootTurn(ctx, {
+      cwd: project,
+      events: [
+        editCall(path.join(project, "a.ts"), "c1"),
+        editResult("c1", { name: "AbortError", code: "ABORTED" }),
+      ],
+    });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+  });
+
+  it("审批被拒（APPROVAL_REJECTED）不核验：工具根本没执行", async () => {
+    fireRootTurn(ctx, {
+      cwd: project,
+      events: [
+        editCall(path.join(project, "a.ts"), "c1"),
+        editResult("c1", { name: "ApprovalError", code: "APPROVAL_REJECTED" }),
+      ],
+    });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0);
+  });
+
+  it("派发前取消（ABORTED_BEFORE_DISPATCH）不核验", async () => {
+    fireRootTurn(ctx, {
+      cwd: project,
+      events: [
+        editCall(path.join(project, "a.ts"), "c1"),
+        editResult("c1", { name: "AbortError", code: "ABORTED_BEFORE_DISPATCH" }),
+      ],
+    });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0);
   });
 });

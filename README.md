@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.2-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,23 +31,25 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Contents
 
-- [What it does](#what-it-does)
-- [Install](#install)
-- [Verify it is working](#verify-it-is-working)
-- [What it does not provide](#what-it-does-not-provide)
-- [Enabling it in dsh](#enabling-it-in-dsh)
-- [The four check commands](#the-four-check-commands)
-- [Settings](#settings)
-- [Public interface](#public-interface)
-- [Data and privacy](#data-and-privacy)
-- [Known boundaries](#known-boundaries)
-- [FAQ](#faq)
-- [Development](#development)
-- [License](#license)
+- [ Contents](#-contents)
+- [ What it does](#-what-it-does)
+- [ Install](#-install)
+  - [ Shared version floor](#-shared-version-floor)
+- [ Verify it is working](#-verify-it-is-working)
+- [ What it does not provide](#-what-it-does-not-provide)
+- [ Enabling it in dsh](#-enabling-it-in-dsh)
+- [ The four check commands](#-the-four-check-commands)
+- [ Settings](#-settings)
+- [ Public interface](#-public-interface)
+- [ Data and privacy](#-data-and-privacy)
+- [ Known boundaries](#-known-boundaries)
+- [ FAQ](#-faq)
+- [ Development](#-development)
+- [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
 
-- **At turn end, not while the turn runs.** The hook is the host event `agent/turn-stopping`: read this session's **successful** edits → walk each file up to the nearest directory that has a manifest → decide which check applies → run it. A failure is sent back through `agent.followup`; the host still checks the inbox after turn-stopping, so a repair instruction opens a new turn.
+- **At turn end, not while the turn runs.** The hook is the host event `agent/turn-stopping`: read this session's **successful** edits (an idle named subagent's ledger is merged into this turn by cursor; while a teammate is still running the turn is deferred) → walk each file up to the nearest directory that has a manifest → decide which check applies → run it. A failure is sent back through `agent.followup`; the host still checks the inbox after turn-stopping, so a repair instruction opens a new turn. Under `workspace-write`, a gate root above the session cwd is granted write access for exactly this batch and released when it ends.
 - **One run has exactly three outcomes**: `pass` (it really finished with exit 0), `code-failure` (it ran and reported code errors), `not-run` (it never ran). A check that did not truly finish is never recorded as passed, and "could not run" is never mixed up with "code error" — the first sends "please confirm manually", writes no memory and never reaches the lesson bus as `gate-failure`.
 - **Only commands the project itself declares.** One of four whitelisted commands per root; with no declaration no command is issued — no check is better than an invented command that fails every time (see "The four check commands").
 - **Keeps a repair loop from running away.** Repair injections are counted per session across turns; once the count is used up, one user-visible release note is sent and auto-repair stops. Total running time is capped; a timeout is sent as "could not run" rather than passing without a word.
@@ -62,8 +64,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`. The package is on the public npm registry, so installation needs no credentials.
 
 - **Requires Node.js `>= 24.9`.** The artifacts use newer runtime features such as `AbortSignal.any`.
-- **Requires a host `dsh` on the `0.2.1-rc.5` or `0.2.2-alpha.3` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.5 || ^0.2.2-alpha.3`), and it **decides compatibility on its own**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version numbers in this bullet are not a standing promise.
-- **The runtime dependency `@jayyuen66/dsh-plugin-shared` must already be on the same registry**, otherwise the whole set 404s.
+- **Requires a host `dsh` on the `0.2.2-rc.2` line or later.** The requirement the host reads is `engines.dsh` (`^0.2.2-rc.2`), and it **decides compatibility on its own**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version numbers in this bullet are not a standing promise.
+- **The runtime dependency `@jayyuen66/dsh-plugin-shared` must be on the same registry at `0.2.6` or later** (the failure-identity path reads its new `ToolResultRecord.error`); a lower copy makes the whole set 404, or that feature silently falls back to the old behavior.
 - **`typescript` is a real `dependencies` entry**: the backup entry point for the `tsc` check — the project's own install wins, then the copy shipped with this package; nothing touches the network at runtime, and `npx` never downloads a compiler.
 - **`zod` is also a real `dependencies` entry**: the edit-record projection state and the settings card's stored and pending values use it for shape validation, versioned through the umbrella catalog. The client artifact keeps `require("zod")` externalized through the host's `PLATFORM_MODULES`.
 - **`@deepseek-ai/schemastery` is resolved from the host, not installed by this package**: only the host's fork resolves `.volatile()` fields into live references; with a public schemastery, "edit a setting" becomes "restart to apply". Two validator functions from `@deepseek-ai/dsh-credentials` are value imports, so that package sits in `peerDependencies` — keeping `@deepseek-ai/*` out of `dependencies` is a publishing rule (`test/publish-manifest.test.ts` enforces it: a host package listed there installs a second copy inside the user's profile, next to the running host).
@@ -156,8 +158,8 @@ Settings persist in the host's settings file under the dsh data directory; the c
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Known boundaries
 
 - **The whitelist has exactly four commands and cannot be extended through settings.** Roots checked by other tools (`go test`, `mypy`, `eslint`, …) get no command.
-- **Only successful edits count**, and only writes through `edit`, `write`, `str_replace_editor` and `apply_patch` (`view` is read-only). A multi-file `apply_patch` records every operation target, including both sides of a move. Files outside the extension whitelist (md/txt/images/`.sh`) are not counted — none of the check commands can validate them, and for a `.sh` the root would resolve somewhere else and produce a failure that is not real.
-- **Out-of-process subagents (ACP, claude-code, codex) emit no dsh events**, so they are outside the checks by construction; in-process subagents are skipped too, and their edits are recorded in their own session rather than the parent's — there is currently no guarantee that the parent turn reviews them (they can be missed).
+- **Only successful edits count**, and only writes through `edit`, `write`, `str_replace_editor` and `apply_patch` (`view` is read-only). A multi-file `apply_patch` records every operation target, including both sides of a move. A call whose result identity is an approval rejection or a pre-dispatch cancellation is not recorded (the tool never ran, so no file changed); a call aborted after dispatch is recorded conservatively (the write may already be on disk, so checking again is the safer side). Files outside the extension whitelist (md/txt/images/`.sh`) are not counted — none of the check commands can validate them, and for a `.sh` the root would resolve somewhere else and produce a failure that is not real.
+- **Named subagents in the same tree are covered**: an idle or cold subagent's edit ledger is merged into the parent turn through `sessionQuery.inspectSession`, and a failure names the subagents that touched that root. While a teammate is still running its turn the parent gate is **deferred** (the tree is being written concurrently) and runs on the next turn that teammate completion opens. Out-of-process subagents (ACP, claude-code, codex) emit no dsh events and do not share this working tree, so they remain outside the checks.
 - **Never talks over the user**: nothing is injected when the inbox has pending items, the turn signal is aborted, or the plugin is unloading. Plan mode is not exempt — a planning turn that touched code is checked the same way.
 - **When evidence is truncated and no file was written, the first error may already be gone**; the text says the evidence is incomplete instead of pretending otherwise.
 - **When the sandbox policy cannot be resolved, no command runs at all** (reported as not-run); it never falls back to the deployment-level policy — that would run the check outside the sandbox, have it denied, and produce a repair instruction that is not about your code.

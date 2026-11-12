@@ -24,6 +24,8 @@ export interface QualityGateMessages {
   readonly evidenceHeadTail: string;
   /** 门禁报了代码错误 → 注入给模型的修复指令（{command}/{root}/{output}）。 */
   readonly gateFailed: string;
+  /** 同一根下的文件也有具名子代理改过时追加的归因行（{names}）。 */
+  readonly teammatesEdited: string;
   /** 门禁没跑成 → 注入的"请手动确认"说明（{command}/{root}/{reason}）。 */
   readonly gateNotRun: string;
   /** 配额用完后的放行说明（{attempts}/{command}/{root}，用户可见）。 */
@@ -71,6 +73,7 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
     gateFailed:
       "[quality-gate] 回合收口门禁未通过（{command}，根 {root}）：\n{output}\n" +
       "请修复上述问题后结束回合。不要重做已完成的工作，只修门禁报出的错误。",
+    teammatesEdited: "同一根下的文件也有这些子代理改过，修复时请一并检查它们的工作：{names}。",
     gateNotRun:
       "[quality-gate] 回合收口门禁**未能执行**（{command}，根 {root}）：\n{reason}\n" +
       "这不是代码错误的证据：**不要为此修改代码**，也不要把它当成已通过。" +
@@ -109,6 +112,8 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
       "[quality-gate] the turn-end quality gate did not pass ({command}, root {root}):\n{output}\n" +
       "Fix the problems above before ending the turn. Do not redo work that is already done — " +
       "fix only what the gate reported.",
+    teammatesEdited:
+      "These subagents also edited files under this root; review their work when fixing: {names}.",
     gateNotRun:
       "[quality-gate] the turn-end quality gate **could not run** ({command}, root {root}):\n" +
       "{reason}\nThis is not evidence of a code error: **do not change code because of it**, and " +

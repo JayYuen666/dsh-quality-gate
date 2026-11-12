@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.2-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,23 +31,25 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 目录
 
-- [它做什么](#它做什么)
-- [安装](#安装)
-- [确认它在正常工作](#确认它在正常工作)
-- [它不提供什么](#它不提供什么)
-- [在 dsh 里启用](#在-dsh-里启用)
-- [跑哪四条检查](#跑哪四条检查)
-- [设置项](#设置项)
-- [对外接口](#对外接口)
-- [数据与隐私](#数据与隐私)
-- [已知边界](#已知边界)
-- [常见问题](#常见问题)
-- [开发](#开发)
-- [许可](#许可)
+- [ 目录](#-目录)
+- [ 它做什么](#-它做什么)
+- [ 安装](#-安装)
+  - [ shared 的版本下限](#-shared-的版本下限)
+- [ 确认它在正常工作](#-确认它在正常工作)
+- [ 它不提供什么](#-它不提供什么)
+- [ 在 dsh 里启用](#-在-dsh-里启用)
+- [ 跑哪四条门禁](#-跑哪四条门禁)
+- [ 设置项](#-设置项)
+- [ 对外接口](#-对外接口)
+- [ 数据与隐私](#-数据与隐私)
+- [ 已知边界](#-已知边界)
+- [ 常见问题](#-常见问题)
+- [ 开发](#-开发)
+- [ 许可](#-许可)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
 
-- **回合统一处理，不拦过程。** 判定挂在宿主事件 `agent/turn-stopping`：读本会话**成功的**编辑 → 每个文件向上找最近清单根 → 探测门禁 → 执行。失败经 `agent.followup` 注入修复指令；宿主在统一处理之后仍会检查收件箱，于是开新回合接着修。
+- **回合统一处理，不拦过程。** 判定挂在宿主事件 `agent/turn-stopping`：读本会话**成功的**编辑（具名子代理空闲时其台账按游标并入本回合；仍有队友在执行则推迟本轮）→ 每个文件向上找最近清单根 → 探测门禁 → 执行。失败经 `agent.followup` 注入修复指令；宿主在统一处理之后仍会检查收件箱，于是开新回合接着修。`workspace-write` 下门禁根若在会话 cwd 之上，会为这一批临时登记该根的写权限，批次结束即释放。
 - **一次检查只有三种结论**：`pass`（真的跑完且 exit 0）、`code-failure`（跑了且报代码错）、`not-run`（没跑成）。一条没真正跑完的检查绝不会被记成通过；"没跑成"和"代码错"也绝不混在一起说——前者注入的是"请手动确认"，不写记忆、也不以 `gate-failure` 报给教训总线。
 - **只跑项目自己声明的命令。** 四条白名单命令按项目根探测后择一，拿不到声明时宁可不给检查命令，也不替项目编一条每次都会失败的命令（判据见「跑哪四条检查」）。
 - **防止无限循环。** 修复注入按会话跨回合计次数，用完就注入一次用户可见的放行说明并停止自动修复；所有检查的总时长有上限，超时按"未执行"注入说明，静默放行是不会发生的。
@@ -62,8 +64,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 24.9`。** 产物用到 `AbortSignal.any` 这类较新的运行时能力。
-- **要求宿主 `dsh` 在 `0.2.1-rc.5` 或 `0.2.2-alpha.3` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`），兼容性**只由它决定**；预发布版本参与范围比较，`0.3.0` 及以后要走明确承担风险的授权命令 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
-- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须已在同一 registry 上**，否则整组 404。
+- **要求宿主 `dsh` 在 `0.2.2-rc.2` 或更新的 `0.2.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.2-rc.2`），兼容性**只由它决定**；预发布版本参与范围比较，`0.3.0` 及以后要走明确承担风险的授权命令 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.6`**（工具失败身份读取它新增的 `ToolResultRecord.error`），否则整组 404 或该特性静默退回旧语义。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 这条门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行时不联网，从不走 `npx` 的自动下载。
 - **`zod` 也是真实的 `dependencies`**：编辑台账的投影状态和设置卡的值、草稿都用它校验形状；版本走伞根 catalog。client 产物按宿主的 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
 - **`@deepseek-ai/schemastery` 由宿主解析、不由本包安装**：只有宿主 fork 的那一枚能把 `.volatile()` 字段解析成活的引用，换成公共的 schemastery 就变成改设置要重启才生效。`@deepseek-ai/dsh-credentials` 的两个校验函数是值导入，因此落在 `peerDependencies`——`dependencies` 里不放任何 `@deepseek-ai/*` 是发布契约（`test/publish-manifest.test.ts` 固定这一点：写在 `dependencies` 里的宿主包会在使用者自己的 profile 里再装一份，和正在运行的宿主并存）。
@@ -158,8 +160,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
 - **白名单只有四条命令，不能经设置扩展。** 用别的检查器（`go test`、`mypy`、`eslint`…）的根得不到门禁。
-- **只记成功的编辑**，而且只认 `edit` / `write` / `str_replace_editor` / `apply_patch` 的写入（`view` 是只读，不算）。多文件的 `apply_patch` 按每个操作的目标分别记录，move 的源和目的都算。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计——没有一条门禁命令能校验它们，而 `.sh` 会把项目根解析到别的地方，跑出假失败。
-- **out-of-process 子代理（ACP / claude-code / codex）不发 dsh 事件**，天然不在检查范围内；in-process 子代理的回合也跳过检查，而且它们的编辑记在各自会话的记录里，不进入父会话的编辑记录——当前不保证由父会话核验（可能漏检）。
+- **只记成功的编辑**，而且只认 `edit` / `write` / `str_replace_editor` / `apply_patch` 的写入（`view` 是只读，不算）。多文件的 `apply_patch` 按每个操作的目标分别记录，move 的源和目的都算。结算身份为审批被拒或派发前取消的调用不记录（工具没执行，文件一定没变）；已派发后中止的调用保守记录（写可能已落盘，宁可多检查一次）。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计——没有一条门禁命令能校验它们，而 `.sh` 会把项目根解析到别的地方，跑出假失败。
+- **同树的具名子代理会被纳入检查**：空闲/冷子代理的编辑台账经 `sessionQuery.inspectSession` 并入父会话这一轮，失败文案会点名改过该根的子代理；有队友仍在执行回合时本轮**推迟**（工作树正被并发写），等队友完成开启的下一回合再检查。out-of-process 子代理（ACP / claude-code / codex）不发 dsh 事件、也不共享这棵工作树，仍在检查范围之外。
 - **不抢话**：收件箱已经有待处理消息、回合信号已取消，或者插件已卸载时不注入。plan mode 不豁免——规划回合改了代码，回合结束时同样检查。
 - **证据被截断且磁盘上没有那份文件时，第一条错误可能已经随截断丢掉了**；文案会如实说明证据不完整，不假装完整。
 - **沙箱策略解析失败时一条都不执行**（按未执行注入），绝不退到部署级策略——那会让检查写到沙箱外面被拒绝，产出一条假的失败指令。

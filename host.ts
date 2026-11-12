@@ -108,6 +108,9 @@ import {
   editPathsOf as sharedEditPathsOf,
 } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type { SessionEvent, ToolCallRecord } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+// 编辑语义（成功/被拒绝/已派发中止/普通失败）只有一处实现：投影与回合扫描共用。
+import { countsAsEdit, editOutcomeOf } from "./lib/edit-ledger.ts";
+import type { EditLedgerEntry, EditOutcome } from "./lib/edit-ledger.ts";
 // lesson bus 的失败处理：lesson-loop 的 report 是异步写库的（返回 Promise），只包一层同步
 // try/catch 抓不到 rejection——失败既没有任何记录，又给宿主进程留下一个未处理的拒绝。
 // 同步抛错和异步拒绝共用这一个返回点（三个包调用它时的失败处理做法一致）。
@@ -182,6 +185,20 @@ interface SessionQueryFace {
     sessionId: SessionId,
     options: { readonly projectionMode: "none" },
   ) => Promise<SessionObservationFace>;
+  /**
+   * 官方 rc.2 的 `inspectSession(sessionId, read, signal?)`：准备冷会话（不发布、不恢复），
+   * 在当次截面上**同步**调用领域读取函数，返回后立即释放观察。
+   *
+   * 本包只用它读**自己拥有的投影**（编辑台账）与 header——这正是官方文档给它的用途
+   * （"typically an owned projection or policy resolver"）。读取函数里不碰任意历史事件：
+   * 官方的 Agent Note 同时把 `snapshotEvents` / `eventAt` / `ownEvents` 标成"new calls are
+   * prohibited"，所以子代理的事件窗仍然走 `observeSession`，只有台账/header 走这里。
+   * `session` 在本地按 unknown 收（测试替身不是真实的 Session 类），读取函数内部逐字段校验。
+   */
+  inspectSession: <Result>(
+    sessionId: SessionId,
+    read: (session: unknown) => Result,
+  ) => Promise<Result>;
 }
 
 /** 本插件 followup 注入消息的 producer-owned source.kind（和 session-rescue 的
@@ -279,8 +296,11 @@ type SandboxExecutionPolicy = NonNullable<ShellExecRequest["sandboxPolicy"]>;
  *  Session 类**（本包在 resolvePolicy 处交的是 `TurnAgent.session`，也就是官方 Session 本身，
  *  不是那个只服务于已退役读取接口的 SessionRef 视图——视图传不进去，见 resolvePolicy 的注释），
  *  `mode?: SandboxMode` 的意思是"已批准的显式模式覆盖，优先级高于会话策略"（:53），本包从不传。
- *  返回值就是上面的 SandboxExecutionPolicy，两侧的字段都不再由本包重写。 */
-type SandboxPolicyService = Pick<HostSandboxPolicyService, "resolve">;
+ *  返回值就是上面的 SandboxExecutionPolicy，两侧的字段都不再由本包重写。
+ *  rc.2 新增的 `registerWritableRoot(session, directory)` 也在这里：门禁根可能落在会话
+ *  工作区**之上**（会话开在 monorepo 子包，检查要在仓库根跑），`workspace-write` 下它
+ *  不在本会话的可写边界内——不登记的话构建产物写不出去，命令非零退出，变成假失败。 */
+type SandboxPolicyService = Pick<HostSandboxPolicyService, "resolve" | "registerWritableRoot">;
 
 /** 一次沙箱化执行的实际情况 = 官方 `ShellSandboxInfo`（@deepseek-ai/dsh-shell/lib/types/
  *  types.d.ts:31-40，与退出码**各自独立**上报：denied/runnerFailed/enforcement）。本包旧的本地声明
@@ -325,7 +345,13 @@ type GateOutcome = { kind: "pass" } | GateProblem;
  * 产出一条假的"修这些错"指令。
  */
 type PolicyResolution =
-  | { kind: "ok"; policy: SandboxExecutionPolicy | undefined }
+  | {
+      kind: "ok";
+      /** 可用的沙箱绑定；组合里没有 `sandboxPolicy` 服务时为 undefined（非沙箱 executor）。 */
+      binding:
+        | { readonly service: SandboxPolicyService; readonly policy: SandboxExecutionPolicy }
+        | undefined;
+    }
   | { kind: "unavailable"; reason: string };
 
 /**
@@ -1093,7 +1119,8 @@ interface EditRecord {
 
 interface PendingEdits {
   records: EditRecord[];
-  failed: Set<string>;
+  /** callId → 结算状态（成功、审批被拒、已派发中止、普通失败）。 */
+  outcomes: Map<string, EditOutcome>;
 }
 
 /**
@@ -1120,7 +1147,7 @@ function editPathsFor(call: ToolCallRecord): readonly (string | undefined)[] {
 
 function collectEdits(events: readonly SessionEvent[]): PendingEdits {
   const records: EditRecord[] = [];
-  const failed = new Set<string>();
+  const outcomes = new Map<string, EditOutcome>();
   const { calls, results } = scanToolEvents(events);
   for (const call of calls) {
     // read-view（str_replace_editor 的 view）是只读，不算编辑；参数不合法（JSON 不合法）与
@@ -1132,11 +1159,11 @@ function collectEdits(events: readonly SessionEvent[]): PendingEdits {
     }
   }
   for (const result of results) {
-    if (result.isError && result.callId !== undefined) {
-      failed.add(result.callId);
+    if (result.callId !== undefined) {
+      outcomes.set(result.callId, editOutcomeOf(result));
     }
   }
-  return { records, failed };
+  return { records, outcomes };
 }
 
 /** 单个文件向上找最近的、含清单文件的目录；hitDepthLimit 标记是否因为太深而没找到根（供可观察到的 warn）。
@@ -1556,6 +1583,9 @@ interface GateRuntime {
   /** 事件读取接口不存在、读取失败，各只警告一次（整套门禁静默失效必须能看见，但别每回合刷屏）。 */
   queryMissingWarned: boolean;
   queryReadWarned: boolean;
+  /** 子代理目录列不出来、个别子代理台账读不出来，各只警告一次（聚合退场不能刷屏）。 */
+  teamListWarned: boolean;
+  teamReadWarned: boolean;
   /** 编辑台账投影的读取函数：`sessionProjections` 可用时由 inject 回调装上（没有 ⇒ 退回全量扫描）。 */
   editLedger: { value: EditLedgerReader | undefined };
   /** 插件已卸载（disposer 已执行）：新到的回合结束事件整体放弃——不读事件、不跑门禁、不注入。 */
@@ -1601,10 +1631,13 @@ function resolvePolicy(
   if (policy === undefined) {
     // 没有策略服务 = 组合里用的是**不带沙箱**的本地 executor（沙箱版必须 inject sandboxPolicy），
     // 这时候不传策略才是对的：让执行器按它自己不受约束的语义跑。
-    result = { kind: "ok", policy: undefined };
+    result = { kind: "ok", binding: undefined };
   } else {
     try {
-      result = { kind: "ok", policy: policy.resolve({ session }) };
+      result = {
+        kind: "ok",
+        binding: { service: policy, policy: policy.resolve({ session }) },
+      };
     } catch (error) {
       // 解析失败**绝不**退回到"不传策略"：那会让 harness 用部署级策略（根 = 宿主
       // process.cwd()，并且忽略本会话的 sandbox/mode 覆盖）跑门禁→ 写到沙箱外被拒 →
@@ -1616,6 +1649,68 @@ function resolvePolicy(
     }
   }
   return result;
+}
+
+/** 一个绝对路径是否落在某个目录之下（等于该目录也算；`..` 前缀与跨盘符都不算）。 */
+function isUnderDirectory(directory: string, candidate: string): boolean {
+  const relative = path.relative(directory, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * 为这一批门禁临时登记额外可写根（rc.2 的 `sandboxPolicy.registerWritableRoot`）。
+ *
+ * 触发条件是"`workspace-write` + 门禁根不在本会话的可写边界内"：典型形态是会话开在 monorepo
+ * 子包里，而 `pnpm check` / `cargo check` / `tsc` 必须回到仓库根执行——构建产物（`target/`、
+ * `.tsbuildinfo`、缓存）写在根下，不在会话 cwd 里。不登记时沙箱拒绝写入 → 命令非零退出 →
+ * 假的"修这些错"注入。`read-only` 不登记（那是用户明确选择的只读边界，插件不得提权），
+ * `danger-full-access` 不需要登记。Windows 上额外授权只作用于文件工具、不扩大进程权限，
+ * 所以那里的登记不会改变门禁进程的结果（宿主语义，不是本包的降级）。
+ *
+ * 登记返回的是 sandboxPolicy 服务自己的 effect disposer（授权随该服务卸载一起回收）；
+ * 本包在批次结束时显式调用它，即使释放失败也只是警告——把已完成的检查结论丢掉才是更糟的结果。
+ * @param rt - 装载期运行时
+ * @param session - 本次门禁所属的会话（授权只影响这个会话）
+ * @param gates - 本回合要跑的门禁（按根去重后登记）
+ * @param binding - 解析出来的沙箱绑定；没有沙箱服务时为 undefined
+ * @returns 登记得到的释放函数（按登记顺序）
+ */
+function grantGateRoots(
+  rt: GateRuntime,
+  session: Session,
+  gates: readonly Gate[],
+  binding:
+    | { readonly service: SandboxPolicyService; readonly policy: SandboxExecutionPolicy }
+    | undefined,
+): readonly (() => void)[] {
+  const releases: (() => void)[] = [];
+  if (binding === undefined) {
+    return releases;
+  }
+  const { service, policy } = binding;
+  if (policy.mode !== "workspace-write") {
+    return releases;
+  }
+  const covered = [policy.workspaceRoot, ...(policy.additionalWritableRoots ?? [])];
+  const registered = new Set<string>();
+  for (const gate of gates) {
+    if (
+      !registered.has(gate.root) &&
+      !covered.some((grant) => isUnderDirectory(grant, gate.root))
+    ) {
+      registered.add(gate.root);
+      try {
+        releases.push(service.registerWritableRoot(session, gate.root));
+      } catch (error) {
+        // 登记失败不阻断门禁：命令仍会跑，最坏情况是产物写不出去而报成失败——但这条警告
+        // 让人能区分"代码有问题"和"授权没登记上"。
+        rt.log.warn(
+          `[quality-gate] writable-root registration failed for ${gate.root}: ${messageOf(error)}`,
+        );
+      }
+    }
+  }
+  return releases;
 }
 
 /**
@@ -1631,6 +1726,21 @@ function accumulatorOf(rt: GateRuntime, sessionId: string): EditAccumulator {
     pruneToSessionBudget(rt.accumulators, sessionId);
   }
   return acc;
+}
+
+/** 把一条编辑并入累加器：相对路径按**该编辑所属会话**的 cwd 解析（edit 常常给相对路径；
+ *  不按宿主进程的 CWD）。根会话与子代理共用这一处，避免两套解析规则各改各的。 */
+function noteEdit(
+  acc: EditAccumulator,
+  cwd: string | undefined,
+  name: string,
+  pathValue: string | undefined,
+): void {
+  let resolvedPath = pathValue;
+  if (resolvedPath !== undefined && cwd !== undefined && !path.isAbsolute(resolvedPath)) {
+    resolvedPath = path.resolve(cwd, resolvedPath);
+  }
+  acc.note(name, resolvedPath);
 }
 
 /**
@@ -1661,7 +1771,7 @@ function noteLedgerEdits(
   let covered = from;
   for (const entry of ledger) {
     covered = Math.max(covered, entry.seq + 1);
-    if (entry.seq >= from && !entry.failed) {
+    if (entry.seq >= from && countsAsEdit(entry.outcome)) {
       note(entry.name, entry.path === "" ? undefined : entry.path);
     }
   }
@@ -1704,12 +1814,7 @@ async function readEditedFiles(
   }
   const { cwd } = session.header;
   const note = (name: string, pathValue: string | undefined): void => {
-    // 相对路径按会话的 cwd 解析（edit 常常给相对路径；不按 host 进程的 CWD）
-    let resolvedPath = pathValue;
-    if (resolvedPath !== undefined && cwd !== undefined && !path.isAbsolute(resolvedPath)) {
-      resolvedPath = path.resolve(cwd, resolvedPath);
-    }
-    acc.note(name, resolvedPath);
+    noteEdit(acc, cwd, name, pathValue);
   };
   if (noteLedgerEdits(rt, session, note)) {
     return;
@@ -1730,11 +1835,332 @@ async function readEditedFiles(
   pruneToSessionBudget(rt.lastSeqBySession, sessionId);
   const edits = collectEdits(window.events);
   for (const entry of edits.records) {
-    // 被拒绝或失败的编辑不记录（以 tool/result 为准）；没有 callId 的条目没有关联依据，保守地直接记录。
-    if (entry.callId === undefined || !edits.failed.has(entry.callId)) {
+    // 审批被拒、派发前取消与普通失败不记录（以 tool/result 的结算身份为准）；
+    // 没有 callId 的条目没有关联依据，保守地直接记录。
+    const outcome = entry.callId === undefined ? undefined : edits.outcomes.get(entry.callId);
+    if (outcome === undefined || countsAsEdit(outcome)) {
       note(entry.name, entry.path);
     }
   }
+}
+
+/** inspectSession 的读取函数交出的子代理台账快照：台账本体、继承前缀长度、cwd 与日志末尾。
+ *  全部在同步 getter 里读完，出参是脱离 Session 的普通值（官方要求 getter 不得保留 Session）。 */
+interface ChildLedgerSnapshot {
+  readonly entries: readonly EditLedgerEntry[] | undefined;
+  readonly inherited: number;
+  readonly cwd: string | undefined;
+  readonly end: number | undefined;
+}
+
+/**
+ * 在 inspectSession 的同步 getter 里读一次子代理的编辑台账与解析相对路径要用的 header。
+ * 字段逐个校验：`inspectSession` 的 Session 在本地按 unknown 收（测试替身不是真实类），
+ * 而投影读取函数自己已经对状态做过 schema 校验。
+ * @param reader - 本包的编辑台账读取函数
+ * @param session - inspectSession 交来的 Session（不保留、不修改）
+ * @returns 脱离 Session 的快照
+ */
+function childLedgerSnapshot(reader: EditLedgerReader, session: unknown): ChildLedgerSnapshot {
+  const inherited = fieldOf(session, "inheritedEventCount");
+  const end = fieldOf(session, "seq");
+  const header = fieldOf(session, "header");
+  const cwd = isRecord(header) ? header["cwd"] : undefined;
+  return {
+    entries: reader(session),
+    inherited: typeof inherited === "number" ? inherited : 0,
+    cwd: typeof cwd === "string" ? cwd : undefined,
+    end: typeof end === "number" ? end : undefined,
+  };
+}
+
+/** 子代理台账聚合的结果：是否因为队友在跑而推迟本轮门禁，以及"文件 → 改过它的子代理名"。 */
+interface TeamEdits {
+  readonly deferred: boolean;
+  readonly namesByPath: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+/** 没有队友台账可聚合时的结果（subagents/agents/sessionQuery 缺失、列不出目录）。 */
+const NO_TEAM_EDITS: TeamEdits = { deferred: false, namesByPath: new Map() };
+
+/** 从一行 catalog 条目里读出的子代理信息（`{ kind: 'child', id, path?, activity }`）。 */
+interface TeamMember {
+  readonly id: SessionId;
+  readonly name: string;
+}
+
+/** catalog 行的 id 在官方契约里就是 `SessionId`（phantom brand，运行期是非空字符串）。
+ *  这里把"非空字符串"的校验结果直接收窄成官方标识类型——不再引入 dsh-brand 的值导入。 */
+function isSessionId(value: string): value is SessionId {
+  return value !== "";
+}
+
+/**
+ * 子代理行的坏形状一律跳过：官方 `listDescendants` 交回 `kind: 'diagnostic'` 的诊断行
+ * （catalog 损坏/不可读/模式未知），以及跨版本可能缺位的字段。诊断行不代表没有这个子代理，
+ * 但也不足以读它的台账——跳过比猜一个 id 更安全。
+ * @param row - `listDescendants` 的一行
+ * @returns 子代理的 id 与展示名；不是可用的 child 行时 undefined
+ */
+function teamMemberOf(row: unknown): TeamMember | undefined {
+  let member: TeamMember | undefined;
+  if (isRecord(row) && row["kind"] === "child") {
+    const { id, path: name } = row;
+    if (typeof id === "string" && isSessionId(id)) {
+      member = { id, name: typeof name === "string" && name !== "" ? name : id };
+    }
+  }
+  return member;
+}
+
+/** `ctx.subagents` 里本包用到的方法（服务由 @deepseek-ai/dsh-subagent 提供，本包不依赖它，
+ *  所以按运行时形状读取：`listDescendants(rootId, signal)` 递归列出本树子代理）。 */
+interface SubagentFace {
+  readonly listDescendants: (
+    rootSessionId: SessionId,
+    signal?: AbortSignal,
+  ) => Promise<readonly unknown[]>;
+}
+
+/**
+ * 取 `ctx.subagents` 的结构视图。本包的 Context 里没有这个服务的类型（没装 subagent 包），
+ * `get` 的字符串重载因此返回 any；直接使用会踩 `no-unsafe-*` 系列规则，而且会在服务形态
+ * 变化时静默出错。这里按"对象 + 可调用的 listDescendants"校验一次，之后只经这个窄视图调用。
+ * @param rt - 装载期运行时
+ * @returns 可用的服务视图，或 null（组合里没有、形态不符）
+ */
+function subagentsOf(rt: GateRuntime): SubagentFace | null {
+  const service: unknown = rt.svc.get("subagents");
+  if (!isRecord(service)) {
+    return null;
+  }
+  const { listDescendants } = service;
+  if (typeof listDescendants !== "function") {
+    return null;
+  }
+  return {
+    listDescendants: async (rootSessionId, signal) => {
+      const rows: unknown = await Reflect.apply(listDescendants, service, [rootSessionId, signal]);
+      // Array.isArray 收窄出来的是 any[]：逐项搬进 unknown[]，避免把 any 扩散给调用方。
+      const parsed: unknown[] = [];
+      if (Array.isArray(rows)) {
+        for (const row of rows) {
+          parsed.push(row);
+        }
+      }
+      return parsed;
+    },
+  };
+}
+
+/** live agent 的 id → status 表；没有 agents 服务或形态不符时 null。 */
+function agentStatusesOf(rt: GateRuntime): ReadonlyMap<string, unknown> | null {
+  const service: unknown = rt.svc.get("agents");
+  if (!isRecord(service)) {
+    return null;
+  }
+  const { list } = service;
+  if (typeof list !== "function") {
+    return null;
+  }
+  const rows: unknown = Reflect.apply(list, service, []);
+  if (!Array.isArray(rows)) {
+    return null;
+  }
+  const statuses = new Map<string, unknown>();
+  for (const agent of rows) {
+    if (isRecord(agent) && typeof agent["id"] === "string") {
+      statuses.set(agent["id"], agent["status"]);
+    }
+  }
+  return statuses;
+}
+
+/** 本树里正在执行回合的子代理（`activity` 只说明是否驻留，真正要看 Agent 的 status）。
+ *  没有 agents 服务时返回 null——调用方据此整体放弃聚合：读不到运行状态就分不清
+ *  "队友正在改这棵树"和"队友已经停手"，此时跑门禁会产出假失败。 */
+function runningTeammates(
+  rt: GateRuntime,
+  members: readonly TeamMember[],
+): readonly TeamMember[] | null {
+  const statuses = agentStatusesOf(rt);
+  return statuses === null
+    ? null
+    : members.filter((member) => statuses.get(member.id) === "running");
+}
+
+/** 子代理台账里本回合新增的编辑 → 会话累加器，并记下"哪个文件被哪个子代理改过"。 */
+function absorbChildLedger(
+  rt: GateRuntime,
+  member: TeamMember,
+  snapshot: ChildLedgerSnapshot,
+  note: (name: string, pathValue: string | undefined) => void,
+  namesByPath: Map<string, Set<string>>,
+): void {
+  const from = Math.max(
+    snapshot.inherited,
+    rt.lastSeqBySession.get(member.id) ?? snapshot.inherited,
+  );
+  let covered = from;
+  for (const entry of snapshot.entries ?? []) {
+    covered = Math.max(covered, entry.seq + 1);
+    if (entry.seq >= from && countsAsEdit(entry.outcome) && entry.path !== "") {
+      // 相对路径按**子代理自己的 cwd** 解析（团队不建隔离工作区，但成员的 cwd 仍可能更深）。
+      const resolved =
+        snapshot.cwd !== undefined && !path.isAbsolute(entry.path)
+          ? path.resolve(snapshot.cwd, entry.path)
+          : entry.path;
+      note(entry.name, resolved);
+      const names = namesByPath.get(resolved) ?? new Set<string>();
+      names.add(member.name);
+      namesByPath.set(resolved, names);
+    }
+  }
+  const next = snapshot.end === undefined ? covered : Math.min(snapshot.end, covered);
+  rt.lastSeqBySession.set(member.id, next);
+  pruneToSessionBudget(rt.lastSeqBySession, member.id);
+}
+
+/**
+ * 列出本树的具名子代理（经 {@link subagentsOf} 的运行时视图）。
+ * @returns 可用的成员；服务缺失时为 null（调用方直接退场），列目录失败时为 null 并警告一次
+ */
+async function listTeamMembers(
+  rt: GateRuntime,
+  session: TurnAgent["session"],
+  signal: AbortSignal | undefined,
+): Promise<readonly TeamMember[] | null> {
+  const subagents = subagentsOf(rt);
+  if (subagents === null) {
+    return null;
+  }
+  let rows: readonly unknown[];
+  try {
+    rows = await subagents.listDescendants(session.id, signal);
+  } catch (error) {
+    if (!rt.teamListWarned) {
+      rt.teamListWarned = true;
+      rt.log.warn(
+        `[quality-gate] subagent listing unavailable; teammate edits are not aggregated: ${messageOf(error)}`,
+      );
+    }
+    return null;
+  }
+  const members: TeamMember[] = [];
+  for (const row of rows) {
+    const member = teamMemberOf(row);
+    if (member !== undefined) {
+      members.push(member);
+    }
+  }
+  return members;
+}
+
+/**
+ * 决定本轮门禁是推迟还是聚合队友台账：队友在跑 → 推迟；否则经 `inspectSession` 读各自的
+ * 编辑台账投影（按游标增量）并记下归因。任何一次读失败只让那一份退场。
+ */
+async function mergeTeamLedgers(
+  rt: GateRuntime,
+  session: TurnAgent["session"],
+  members: readonly TeamMember[],
+  note: (name: string, pathValue: string | undefined) => void,
+): Promise<TeamEdits> {
+  const running = runningTeammates(rt, members);
+  if (running === null) {
+    // 读不到运行状态就不聚合，也不推迟：两者的前提都是"能区分队友是否还在写"。
+    if (!rt.teamListWarned) {
+      rt.teamListWarned = true;
+      rt.log.warn(
+        "[quality-gate] agents service unavailable; teammate edits are not aggregated and the gate is not deferred",
+      );
+    }
+    return NO_TEAM_EDITS;
+  }
+  if (running.length > 0) {
+    rt.log.info(
+      `[quality-gate] ${session.id}: gate deferred; teammate(s) still running: ${running.map((member) => member.name).join(", ")}`,
+    );
+    return { deferred: true, namesByPath: new Map() };
+  }
+  const query = rt.svc.get("sessionQuery");
+  const reader = rt.editLedger.value;
+  if (query === undefined || reader === undefined) {
+    // 没有可读的台账就不聚合：`observeSession` 能给事件窗，但子代理的事件窗不是本包的
+    // 领域状态（见 SessionQueryFace 的说明），退回全量扫描会让根会话的游标语义分叉。
+    return NO_TEAM_EDITS;
+  }
+  const namesByPath = new Map<string, Set<string>>();
+  await Promise.all(
+    members.map(async (member) => {
+      try {
+        const snapshot = await query.inspectSession(member.id, (childSession) =>
+          childLedgerSnapshot(reader, childSession),
+        );
+        absorbChildLedger(rt, member, snapshot, note, namesByPath);
+      } catch (error) {
+        if (!rt.teamReadWarned) {
+          rt.teamReadWarned = true;
+          rt.log.warn(
+            `[quality-gate] teammate edit read failed; its files are not aggregated: ${messageOf(error)}`,
+          );
+        }
+      }
+    }),
+  );
+  return { deferred: false, namesByPath };
+}
+
+/**
+ * 把**具名子代理**的编辑纳入本轮门禁（rc.2 的 AgentTeam 让这件事成为必要）：
+ *  1. `ctx.subagents.listDescendants(rootId)` 递归列出本树的子代理（不加载、不恢复 Agent）；
+ *  2. 有队友正在执行回合 → **推迟**本轮门禁，不 drain 累加器：工作树正被并发写，此时检查
+ *     只会产出假失败，注入的修复指令还会和队友的改动赛跑；队友完成后会给根会话发消息、
+ *     开新回合，那时再检查；
+ *  3. 其余（空闲/冷）子代理：经 `sessionQuery.inspectSession` 读**本包自己的编辑台账投影**，
+ *     按各自的游标增量并入累加器。`inspectSession` 只准备冷会话、读取后立即释放，不 attach、
+ *     不恢复 Agent——这正是 rc.2 为"读领域自有状态"给出的入口；
+ *  4. 记下文件 → 子代理名的归因，供门禁失败时在注入文案里点名（见 handleGateFailure）。
+ *
+ * 任何一步不可用都只让"聚合子代理编辑"这一项退场，根会话自己的门禁照旧：
+ * 列目录失败、没有 agents/sessionQuery/台账投影、个别冷会话读不出来，都只警告一次。
+ * @param rt - 装载期运行时
+ * @param session - 根会话（turn-stopping 载荷里的真实 Session）
+ * @param note - 把一条编辑并入会话累加器（相对路径已按子代理 cwd 解析成绝对路径）
+ * @param signal - 本回合的取消信号
+ * @returns 是否推迟，以及文件 → 子代理名
+ */
+async function collectTeamEdits(
+  rt: GateRuntime,
+  session: TurnAgent["session"],
+  note: (name: string, pathValue: string | undefined) => void,
+  signal: AbortSignal | undefined,
+): Promise<TeamEdits> {
+  const members = await listTeamMembers(rt, session, signal);
+  if (members === null || members.length === 0) {
+    return NO_TEAM_EDITS;
+  }
+  return mergeTeamLedgers(rt, session, members, note);
+}
+
+/** 把"文件 → 子代理名"折叠成"门禁根 → 子代理名"（只保留真正有门禁的根，名字排序后去重）。 */
+function teammatesByRoot(
+  gates: readonly Gate[],
+  namesByPath: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlyMap<string, readonly string[]> {
+  const byRoot = new Map<string, Set<string>>();
+  for (const [file, names] of namesByPath) {
+    for (const gate of gates) {
+      if (isUnderDirectory(gate.root, file)) {
+        const collected = byRoot.get(gate.root) ?? new Set<string>();
+        for (const name of names) {
+          collected.add(name);
+        }
+        byRoot.set(gate.root, collected);
+      }
+    }
+  }
+  return new Map(Array.from(byRoot, ([root, names]) => [root, [...names].toSorted()] as const));
 }
 
 /**
@@ -1763,11 +2189,21 @@ interface TurnScope {
  * 回滚一次已经成功的注入，更不能拖住回合），把它 await 进来会改变语义。留着 `async` 只会给
  * 调用点多塞一个微任务，所以按实际的形状改成同步（eslint/typescript require-await 同样是这个判断）。
  */
-function handleGateFailure(scope: TurnScope, target: Gate, problem: GateProblem): boolean {
+function handleGateFailure(
+  scope: TurnScope,
+  target: Gate,
+  problem: GateProblem,
+  teammates: readonly string[] = [],
+): boolean {
   const { rt, agent, cfg, messages, sessionId, turn, cwd } = scope;
   const { log, injectState, memoryNotice } = rt;
   const maxInjects = cfg.maxInjectsPerTurn;
   const isCodeFailure = problem.kind === GATE_KIND_CODE_FAILURE;
+  // 归因只进"给模型的修复指令"：总线/记忆记的是失败事实本身，不能掺入会随队友变化的描述。
+  const injectText =
+    isCodeFailure && teammates.length > 0
+      ? `${problem.text}\n${renderTemplate(messages.teammatesEdited, { names: teammates.join(", ") })}`
+      : problem.text;
   reportProblemToBus(rt.svc.get, { sessionId, turn, cwd }, target, problem, log);
   // 注入之前的第二次确认：被拦下时打日志，方便排查"门禁失败却没有注入"
   const check = preInjectCheck(agent, scope.signal);
@@ -1800,7 +2236,7 @@ function handleGateFailure(scope: TurnScope, target: Gate, problem: GateProblem)
     agent.followup(
       injectMessage(
         isCodeFailure
-          ? gateText(messages, target, problem.text)
+          ? gateText(messages, target, injectText)
           : notRunText(messages, target, problem.text),
       ),
     );
@@ -1847,6 +2283,10 @@ interface GateBatchInput {
   signal: AbortSignal;
   /** 所有门禁的总时长预算（Config 的 `gateBudgetMs`，本回合读定的值）。 */
   budget: number;
+  /** 本批临时登记的额外可写根释放函数（`grantGateRoots`；没有登记时为空）。 */
+  grants: readonly (() => void)[];
+  /** 门禁根 → 也改过该根下文件的具名子代理（注入失败说明时归因用）。 */
+  collaborators: ReadonlyMap<string, readonly string[]>;
 }
 
 /** 批次开始之后的派生值与可变状态：`perGate` 和 `started` 在进入异步段时算定，`batch` 见它的注释。 */
@@ -1861,7 +2301,7 @@ interface GateBatchState extends GateBatchInput {
  * 用尾递归往下走代替 for+await（避开 no-await-in-loop，语义不变）。
  */
 async function processGate(state: GateBatchState, left: readonly Gate[]): Promise<void> {
-  const { scope, shell, resolved, signal, budget, perGate, started, batch } = state;
+  const { scope, shell, resolved, signal, budget, perGate, started, batch, collaborators } = state;
   const { rt } = scope;
   const [gate] = left;
   if (gate === undefined) {
@@ -1881,7 +2321,7 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
     resolved.kind === "unavailable"
       ? { kind: "not-run", text: resolved.reason }
       : await runGate(scope.messages, shell, gate, Math.min(perGate, remaining), {
-          policy: resolved.policy,
+          policy: resolved.binding?.policy,
           signal,
           stdoutMaxBytes: rt.stdoutMaxBytes,
           log: rt.log,
@@ -1897,9 +2337,20 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
     return;
   }
   batch.blocked = true;
-  const mustStop = handleGateFailure(scope, gate, outcome);
+  const mustStop = handleGateFailure(scope, gate, outcome, collaborators.get(gate.root) ?? []);
   if (!mustStop) {
     await processGate(state, left.slice(1));
+  }
+}
+
+/** 释放本批登记的额外可写根；单个释放失败只警告，不能把已完成的门禁结论丢掉。 */
+function releaseGrants(rt: GateRuntime, grants: readonly (() => void)[]): void {
+  for (const release of grants) {
+    try {
+      release();
+    } catch (error) {
+      rt.log.warn(`[quality-gate] writable-root release failed: ${messageOf(error)}`);
+    }
   }
 }
 
@@ -1910,7 +2361,8 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
  *
  * 两处防御：①整段最外层 try/catch——批次自己出问题只记一条 error，绝不产生
  * unhandledRejection；②批次的 promise 由调用方登记到"正在跑"的集合里，disposer abort 之后 await
- * 到全部结束（卸载必须终止并等待正在跑的工作）。
+ * 到全部结束（卸载必须终止并等待正在跑的工作）。临时登记的可写根在 finally 里释放：无论通过、
+ * 失败、被跳过还是批次自己抛错，授权都不会留到下一回合。
  */
 async function runGateBatch(input: GateBatchInput): Promise<void> {
   const { scope } = input;
@@ -1934,7 +2386,73 @@ async function runGateBatch(input: GateBatchInput): Promise<void> {
     // 批次的最后一层保护：门禁调度自己出错（比如宿主的行为在执行期间突变）不能往外传——
     // 这一层没有 catch 的话，rejection 会直接变成 unhandledRejection。
     rt.log.error(`[quality-gate] ${sessionId}: gate batch failed: ${messageOf(error)}`);
+  } finally {
+    releaseGrants(rt, input.grants);
   }
+}
+
+/** 探测项目根、解析沙箱策略、调度一批门禁（同步段完成探测与解析，批次本身放后台）。 */
+function scheduleTurnGates(
+  scope: TurnScope,
+  shell: ShellService,
+  acc: EditAccumulator,
+  team: TeamEdits,
+): void {
+  const { rt, agent, cfg, messages, sessionId, signal: turnSignal } = scope;
+  const dropped = acc.droppedCount();
+  const files = acc.drain();
+  // 累加器到了容量上限而淘汰掉的内容要能看见（drain 已经把计数清零，所以先读再排空）
+  if (dropped > 0) {
+    rt.log.warn(
+      `[quality-gate] ${sessionId}: ${dropped} edited file(s) evicted from accumulator cap; gate may miss their roots`,
+    );
+  }
+  if (files.length === 0) {
+    return;
+  }
+  // 汇总项目根并探测要跑的门禁（一条门禁都没有就直接返回，不动配额）
+  const gates = detectGate(projectRootsOf(files, rt.maxRootDepth, rt.log));
+  if (gates.length === 0) {
+    return;
+  }
+  const { session } = agent;
+  // 沙箱策略在**同步段**按会话解析一次（进入异步段之后不再碰 agent.session）。
+  const resolved = resolvePolicy(rt, messages, session);
+  // workspace-write 下，门禁根可能落在会话可写边界之外（monorepo 子包 → 仓库根）：
+  // 先按 rc.2 的 registerWritableRoot 临时登记，再重新解析一次，让额外可写根进入策略快照。
+  const grants = resolved.kind === "ok" ? grantGateRoots(rt, session, gates, resolved.binding) : [];
+  const effective = grants.length === 0 ? resolved : resolvePolicy(rt, messages, session);
+
+  // 门禁批次的执行信号 = turn signal（回合取消时一起终止）加上 dispose abort（卸载时终止）。
+  // AbortSignal.any 不接受 undefined（Node 26 实测抛 TypeError），两种情况先合并——
+  // 因此传给 runGate 的 signal 一定有值。
+  const gateSignal =
+    turnSignal === undefined
+      ? rt.gateAbort.signal
+      : AbortSignal.any([turnSignal, rt.gateAbort.signal]);
+
+  // 把门禁放到后台执行（shell.execute 返回 Promise；turn-stopping 是串行事件，不能占用太久）。
+  // 配额按 sessionId 跨回合累计——门禁通过就重置，达到上限时注入一次"放行说明"之后保持静默，
+  // 直到出现一次干净通过。这样"失败→注入→新回合又失败"的循环才被 maxInjects 真正约束住。
+  const flight = runGateBatch({
+    scope,
+    gates,
+    shell,
+    resolved: effective,
+    signal: gateSignal,
+    budget: cfg.gateBudgetMs,
+    grants,
+    collaborators: teammatesByRoot(gates, team.namesByPath),
+  });
+  rt.inFlightGates.add(flight);
+  // 结束之后自动从集合里移除：disposer 那次 await 拿到的快照因此总是"还没结束的全部批次"。
+  // 用 await 而不是 `.finally()`（promise/prefer-await-to-then）：runGateBatch 的整个函数体已经在
+  // 自己的 try/catch 里（批次的最后一层保护，永远不会 reject），所以结束之后删掉这一项和 .finally 等价；
+  // 仍然放后台（不 await 这个跟踪任务，回合不会被它拖住）和原来的语义一致。
+  void (async (): Promise<void> => {
+    await flight;
+    rt.inFlightGates.delete(flight);
+  })();
 }
 
 /**
@@ -2003,60 +2521,22 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   if (runtimeDisposed(rt)) {
     return;
   }
-  const dropped = acc.droppedCount();
-  const files = acc.drain();
-  // 累加器到了容量上限而淘汰掉的内容要能看见（drain 已经把计数清零，所以先读再排空）
-  if (dropped > 0) {
-    rt.log.warn(
-      `[quality-gate] ${sessionId}: ${dropped} edited file(s) evicted from accumulator cap; gate may miss their roots`,
-    );
-  }
-  if (files.length === 0) {
-    return;
-  }
-
-  const { gateBudgetMs: budget } = cfg;
-
-  // 汇总项目根并探测要跑的门禁（一条门禁都没有就直接返回，不动配额）
-  const gates = detectGate(projectRootsOf(files, rt.maxRootDepth, rt.log));
-  if (gates.length === 0) {
-    return;
-  }
-  // 沙箱策略在**同步段**按会话解析一次（进入异步段之后不再碰 agent.session）。
-  const resolved = resolvePolicy(rt, messages, session);
-
-  // 门禁批次的执行信号 = turn signal（回合取消时一起终止）加上 dispose abort（卸载时终止）。
-  // AbortSignal.any 不接受 undefined（Node 26 实测抛 TypeError），两种情况先合并——
-  // 因此传给 runGate 的 signal 一定有值。
-  const gateSignal =
-    payload.signal === undefined
-      ? rt.gateAbort.signal
-      : AbortSignal.any([payload.signal, rt.gateAbort.signal]);
-
-  const scope: TurnScope = {
-    rt,
-    agent,
-    cfg,
-    messages,
-    sessionId,
-    turn,
-    cwd,
-    signal: payload.signal,
+  // 具名子代理的编辑也属于这棵工作树（Team 不建隔离工作区）：队友还在跑就推迟本轮门禁，
+  // 否则检查的是正在被并发改写的树；空闲/冷队友的台账经 inspectSession 增量并入。
+  const note = (name: string, pathValue: string | undefined): void => {
+    noteEdit(acc, cwd, name, pathValue);
   };
-
-  // 把门禁放到后台执行（shell.execute 返回 Promise；turn-stopping 是串行事件，不能占用太久）。
-  // 配额按 sessionId 跨回合累计——门禁通过就重置，达到上限时注入一次"放行说明"之后保持静默，
-  // 直到出现一次干净通过。这样"失败→注入→新回合又失败"的循环才被 maxInjects 真正约束住。
-  const flight = runGateBatch({ scope, gates, shell, resolved, signal: gateSignal, budget });
-  rt.inFlightGates.add(flight);
-  // 结束之后自动从集合里移除：disposer 那次 await 拿到的快照因此总是"还没结束的全部批次"。
-  // 用 await 而不是 `.finally()`（promise/prefer-await-to-then）：runGateBatch 的整个函数体已经在
-  // 自己的 try/catch 里（批次的最后一层保护，永远不会 reject），所以结束之后删掉这一项和 .finally 等价；
-  // 仍然放后台（不 await 这个跟踪任务，回合不会被它拖住）和原来的语义一致。
-  void (async (): Promise<void> => {
-    await flight;
-    rt.inFlightGates.delete(flight);
-  })();
+  const team = await collectTeamEdits(rt, session, note, payload.signal);
+  if (runtimeDisposed(rt) || team.deferred) {
+    // 推迟时**不 drain**：本轮的文件留在累加器里，等队友完成后开启的下一个回合一起检查。
+    return;
+  }
+  scheduleTurnGates(
+    { rt, agent, cfg, messages, sessionId, turn, cwd, signal: payload.signal },
+    shell,
+    acc,
+    team,
+  );
 }
 
 export function apply(ctx: Context, config: ConfigShape): void {
@@ -2123,6 +2603,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
     shellWarned: false,
     queryMissingWarned: false,
     queryReadWarned: false,
+    teamListWarned: false,
+    teamReadWarned: false,
     editLedger: { value: undefined },
     disposed: false,
   };
