@@ -20,8 +20,10 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
  *  这一档的上一次实测是 75,036 B；rc.2 集成的四条行为路径（可写根登记、具名子代理聚合、
  *  inspectSession 台账读取、工具失败身份）连同它们的证据注释一起进入产物，预算按同一规则重定。 */
 const HOST_BUDGET_BYTES = 114_000;
-/** client 半产物体积预算（定这一档时实测 34,895 B）：浏览器侧加载，按平台计账。 */
-const CLIENT_BUDGET_BYTES = 40_500;
+/** client 半产物体积预算（定这一档时实测 40,886 B）：浏览器侧加载，按平台计账。
+ *  上一档 40,500 B 对应内联 shared 0.2.6 的产物（已发布 0.1.8 的 client.js 实测 39,845 B）；
+ *  shared 0.2.8 的浮层几何自检与修正后的 CSS 进来后实测 40,886 B，按同一规则重定。 */
+const CLIENT_BUDGET_BYTES = 47_500;
 
 /** 产物文件名与预算的对照。 */
 const BUDGETS: readonly (readonly [string, number])[] = [
