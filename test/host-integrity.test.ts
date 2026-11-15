@@ -133,6 +133,8 @@ function observationOfFiredSession(): {
 }
 
 interface MockCtx {
+  /** `reflect.provide` 写、`get` 读的同一张服务表（单实例锁就落在它里面）。 */
+  provided: Record<string, unknown>;
   value: Record<string, unknown>;
   handlers: Record<string, (payload: unknown) => void>;
   followupCalls: { id: string; content: { text: string }[] }[];
@@ -161,6 +163,9 @@ interface MockCtx {
   /** ctx.inject(deps, fn)：cordis 立即用带齐依赖的子上下文回调一次。 */
   inject: (deps: readonly string[], attach: (child: unknown) => void) => void;
   get: (name: string) => unknown;
+  /** cordis 的注册口：单实例锁走它。替身复刻真语义——写进**同一张服务表**（`get` 读的就是它）
+   *  且重复注册抛错；只写不读的替身会让"第二份让路"这条判据在单测里永远看不见。 */
+  reflect?: { provide: (name: string, value?: unknown) => unknown };
   /**
    * 官方事件读取接口（ctx.sessionQuery.observeSession）的测试替身。返回 fired session 那份日志切片，
    * 游标由生产侧自己切；模拟"未装配"就 delete ctx.sessionQuery，模拟"拒绝/非数组交付"
@@ -214,6 +219,7 @@ function makeCtx(): MockCtx {
         return { value: "tok-from-credentials" };
       },
     },
+    provided: {},
     reports: [],
     effects: [],
     fiber: { id: "quality-gate-fiber" },
@@ -235,8 +241,24 @@ function makeCtx(): MockCtx {
     sessionQuery: {
       observeSession: async () => observationOfFiredSession(),
     },
+    reflect: {
+      provide: (name: string, value?: unknown): unknown => {
+        const slot = ctx as unknown as Record<string, unknown>;
+        if (Object.hasOwn(ctx.provided, name)) {
+          throw new Error(`service "${name}" has been registered`);
+        }
+        ctx.provided[name] = value;
+        void slot;
+        return (): void => {
+          ctx.provided[name] = undefined;
+        };
+      },
+    },
     get(name) {
       // 单一 return（consistent-return）：默认取属性即覆盖 shell / 未注册服务的 undefined。
+      if (Object.hasOwn(ctx.provided, name)) {
+        return ctx.provided[name];
+      }
       let service: unknown = (ctx as unknown as Record<string, unknown>)[name];
       if (name === "sandboxPolicy" && ctx.sandboxPolicy !== undefined) {
         const resolve = ctx.sandboxPolicy;
@@ -979,9 +1001,9 @@ describe("quality-gate门禁的完整性", () => {
       applyGate(ctx, schemaDefaults());
       assert.deepEqual(
         guardCalls,
-        ["inject", "effect", "configure", "inject", "on", "effect"],
-        "装载只走 inject→(子上下文)effect→configure、on 注册监听、effect 挂卸载封口；" +
-          "既不注入也不跑门禁（describe 只在回合里读语言时才走到）",
+        ["get", "inject", "effect", "configure", "inject", "on", "effect"],
+        "装载只走 get（单实例锁读锁名）→inject→(子上下文)effect→configure、on 注册监听、" +
+          "effect 挂卸载封口；既不注入也不跑门禁（describe 只在回合里读语言时才走到）",
       );
     });
 
@@ -996,6 +1018,39 @@ describe("quality-gate门禁的完整性", () => {
         "装载路径不得再调 settings.register（它已不存在）",
       );
       assert.ok(guardCalls.includes("configure"), "改走 configure 登记页面策略");
+    });
+
+    it("同一作用域第二次装配让路：不重复注册、不抛错（market 热挂 + bundle 层双路径）", () => {
+      // 双路径：market 的热挂子树与本包的 bundle 层解析到同一份模块，却各起一个 fiber、
+      // 各跑一次 apply。本包的注册面（事件监听、两处 svc.inject 挂的投影与设置页策略）都既不
+      // 去重也不抛错，第二份会静默各挂一份——门禁判定与台账写入都会跑两遍。
+      const ctx = makeCtx();
+      applyWith(ctx);
+      const providedAfterFirst = { ...ctx.provided };
+      const effectsAfterFirst = ctx.effects.length;
+      const handlersAfterFirst = Object.keys(ctx.handlers).toSorted();
+      let printed: string[];
+      const warnings = vi.spyOn(console, "warn").mockImplementation(() => {
+        // 断言在下方
+      });
+      try {
+        assert.doesNotThrow(() => {
+          applyWith(ctx);
+        });
+      } finally {
+        // `mockRestore()` 连调用记录一起清掉，所以必须在它之前把实参抄出来。
+        printed = warnings.mock.calls.map(([line]) => String(line));
+        warnings.mockRestore();
+      }
+      assert.deepEqual(ctx.provided, providedAfterFirst, "第二份不该再注册任何服务");
+      assert.equal(ctx.effects.length, effectsAfterFirst, "第二份不该再挂任何 effect");
+      assert.deepEqual(
+        Object.keys(ctx.handlers).toSorted(),
+        handlersAfterFirst,
+        "第二份不该再登记监听",
+      );
+      assert.equal(printed.length, 1, "让路时大声说明一次");
+      assert.match(printed[0] ?? "", /检测到本插件已在同一作用域内装载/u);
     });
 
     it("服务齐备时门禁照常工作（这条回归断言固定的是：不要把真实的 ctx 拦掉）", async () => {

@@ -5,6 +5,30 @@
 版本标题不写发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需
 增设标准六类之外的小节（如 `Tests`、`Not changed, deliberately`）。
 
+## 0.1.10
+
+market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（本包的注册面不去重也不抛错，第二遍会静默各挂一份，同一个回合的门禁判定与台账写入都会跑两遍）；设置卡接「有字段越界就不许保存」那道门禁；卡片样式改用 shared 的共享 `<style>`；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距。门禁判据与默认配置不变。
+
+### Added
+
+- **单实例锁**：`apply` 最前面用 shared 的 `claimInstance` 抢 `"@jayyuen66/dsh-quality-gate/instance"`，抢不到就 `log.warn` 一行「本次装配让路，门禁与台账由在册的那一份提供」并直接返回。本包的事件监听与两处 `svc.inject` 挂的投影/设置页策略**都不去重、也不抛错**，所以重复是静默的；锁随在册那一份的 fiber 卸载自动释放。
+- **回归测试**：`test/host-integrity.test.ts` 新增「同一作用域第二次装配让路：不重复注册、不抛错」，判据含 `warn` 恰好一次。
+
+### Changed
+
+- **`lib/messages.ts` 的 `renderTemplate()` 换成 shared 的 `fillPlaceholders`**：宽匹配（`{gate.command}` 这类带点的名字照样查表）与「只取自有属性」两条契约不变；**缺值语义从「替空串」改成「保留原文」**——漏传参数时花括号留在正文里一眼可见，不再悄悄少一段说明。多条既有断言随之改判。
+- **卡片样式改用 shared 的 `ensureCardUiCss()`**：不再把 `CARD_UI_CSS` 整段拼进本仓的 `<style>`，改为固定 id `dsh-card-ui-css` 的幂等注入 + 引用计数。
+- **运行时依赖 shared 抬到 `^0.2.9`**；两份 README 里的 shared 版本下限同步从 0.2.6 改成 0.2.9（单实例锁、占位符插值、样式注入与越界保存门禁都从那一版导入）。
+- **文档跟到当前行为**：「已知边界」补上单实例让路；常见问题里「子代理的编辑不进入父会话、可能漏检」与 `isRootSession` 注释里「本插件不做聚合」都跟到具名子代理台账聚合的实际行为（空闲/冷子代理的台账按游标并入父会话本轮，队友仍在执行则推迟）。
+
+### Fixed
+
+- **越界数字草稿会被静默丢掉**：`NumberField` 对越界草稿**不调 `onChange`**，于是它根本不进 `touched`。两个数字字段（`maxInjectsPerTurn` / `gateBudgetMs`）现在都接 `onInvalidChange` 上报，卡片据此灰掉保存并在保存条上点名「有字段超出范围，先修正或撤销后再保存。」（`src/ui-messages.ts` 的 `invalidFields`）；`resetToken` 在保存/撤销后把框里的非法草稿清回已提交值。
+- **越界时连撤销都点不动**：上一版把「有未保存改动」与「有越界字段」混成保存条的一个 `disabled`。现在 `SaveBar` 分开算：保存被 `blocked` 拦下，撤销保持可点——撤销正是越界状态的出路。
+- **输入控件撑出容器**（shared 侧）：`.dsu-form` 整棵子树统一 `border-box`，否则 `.dsu-input` 的 `width:100%` 会连同左右 padding 一起撑出容器 26px。
+- **总预算被按门禁条数均分，导致长门禁必然超时且报错读起来像配置没生效**：`runGateBatch` 原来算 `perGate = max(10s, budget / gates.length)`，每一条都只能用这个均分值。改到伞工作区根的文件时门禁根会升到根上，那一条 `pnpm check` 实跑 `node scripts/check-all.mjs`（十个仓串行，实测 `real 240.68s`），而 600s / 10 条 = 60s——每一条的窗口都短于一次门禁的固有耗时，于是必然全部超时，注入的却是「60s 预算内未完成」，看起来像 `gateBudgetMs` 没生效。现在改成共享池：`windowFor(remaining, laterGates)` 先从剩余里扣掉后面每条 5s 的保底，剩下的全给当前这条；后面没有门禁时它可以用掉整个剩余预算。**判据**：`test/host.test.ts` 那条回归用例断言 100s 预算下第一条拿到 95s（均分实现是 50s）、最后一条拿回 90s 以上，变异（改回均分）即红；另用官方 `LocalBashExecutor` 起两个真 pnpm 根（一条 20s、一条 5s，总预算 30s）跑了一遍对照——均分给 `[15000,15000]`、那条 20s 的门禁 `timedOut`，共享池给 `[25000,9860]`、两条都 `exit=0`。
+- **「未执行」清单里的毫秒数与事实无关**：`skippedText` 把 `MIN_USEFUL_GATE_MS`（5000）当成 `{budgetMs}` 填进「剩余预算不足 {budgetMs}ms」——那句话读的是一个固定阈值，模板要的却是当时真正还剩多少，用户无法据此判断该调多少预算。模板改成「本轮剩余预算 {budgetMs}ms」，并传入真实的剩余值（`Math.max(0, remaining)`）。
+
 ## 0.1.9
 
 设置卡的下拉候选与说明浮层不再漂到浏览器最左边；shared 抬到 `^0.2.8`（含运行时几何自检），CI 的 action 钉版升到最新。门禁判据与默认配置不变。

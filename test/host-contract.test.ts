@@ -342,6 +342,15 @@ describe("turn-stopping 批处理的顺序依赖语义", () => {
       assert.match(text, /未能执行/u, "文案是未执行说明，不是修复指令");
       assert.match(text, /不要为此修改代码/u, "不得让模型去修一个没跑成的检查");
       assert.match(text, new RegExp(path.basename(projectB), "u"), "未执行的根要列进文案");
+      // 文案里的毫秒数必须是**当时真正剩余**的预算（总 6000 减掉第一条花的 1500 ≈ 4500），不能是
+      // MIN_USEFUL_GATE_MS 那个固定阈值——那是与事实无关的数字，用户无法据此判断该调多少预算。
+      const printed = /本轮剩余预算 (?<ms>\d+)ms/u.exec(text)?.groups?.["ms"];
+      assert.ok(printed !== undefined, "文案里要印出剩余预算（曾经印的是固定阈值）");
+      const remaining = Number(printed);
+      assert.ok(
+        remaining > 0 && remaining < 5000,
+        `印出的必须是真实剩余（约 4500ms），不能是固定阈值 5000（实测 ${String(remaining)}）`,
+      );
       assert.ok(!text.includes("请修复上述问题"), "不得复用代码失败模板");
       assert.ok(
         infos.some((infoText) => infoText.includes("gate not-run")),

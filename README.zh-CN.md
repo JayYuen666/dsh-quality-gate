@@ -65,7 +65,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 - **要求 Node.js `>= 24.9`。** 产物用到 `AbortSignal.any` 这类较新的运行时能力。
 - **要求宿主 `dsh` 在 `0.2.2-rc.2` 或更新的 `0.2.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.2-rc.2`），兼容性**只由它决定**；预发布版本参与范围比较，`0.3.0` 及以后要走明确承担风险的授权命令 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
-- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.6`**（工具失败身份读取它新增的 `ToolResultRecord.error`），否则整组 404 或该特性静默退回旧语义。
+- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.9`**（单实例锁、占位符插值、卡片样式注入与越界保存门禁都从它导入，工具失败身份另读 `ToolResultRecord.error`），否则整组 404 或装载时报 `does not provide an export named ...`。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 这条门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行时不联网，从不走 `npx` 的自动下载。
 - **`zod` 也是真实的 `dependencies`**：编辑台账的投影状态和设置卡的值、草稿都用它校验形状；版本走伞根 catalog。client 产物按宿主的 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
 - **`@deepseek-ai/schemastery` 由宿主解析、不由本包安装**：只有宿主 fork 的那一枚能把 `.volatile()` 字段解析成活的引用，换成公共的 schemastery 就变成改设置要重启才生效。`@deepseek-ai/dsh-credentials` 的两个校验函数是值导入，因此落在 `peerDependencies`——`dependencies` 里不放任何 `@deepseek-ai/*` 是发布契约（`test/publish-manifest.test.ts` 固定这一点：写在 `dependencies` 里的宿主包会在使用者自己的 profile 里再装一份，和正在运行的宿主并存）。
@@ -114,7 +114,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 - `tsc` 在命令里只是个逻辑名：入口在运行时确定——工程自己装的 `typescript` 优先，其次是随包安装的那份，最后才是 PATH 上的 `tsc`（由"工具不可用"那条出口报成未执行）；绝不走 `npx` 的自动下载。
 - 项目根探测：从编辑过的文件向上最多找 `maxRootDepth`（默认 10）层，取最近的清单根；子包**自己就是** workspace 根、也能给出 `pnpm check` 时就地执行（改一个包不能把整个多仓工作区拖进来）；否则 monorepo 的子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只有在那一层**确实能给出门禁**时才升，再不行就保留子包自己的根（外层没有 `check` 脚本的 workspace 不能顶掉子包的 `tsc` 或 `ruff`门禁）。
-- 时间与并发：总时长上限 `gateBudgetMs`；每个根取 `max(10s, 预算/根数)` 与实际剩余时间中较小的那个；剩下不足 5s 的那一段不再开始新命令，按"未执行"注入清单。门禁一条接一条跑，一次只注入一个失败。
+- 时间与并发：总时长上限 `gateBudgetMs` 是**共享池**，不是按根数均分——一条门禁先拿「剩余预算 − 后面每条各留的 5s 保底」，后面没有门禁了它就能用掉剩下的全部（一条在伞工作区根上串行跑十仓的 `pnpm check` 实测 240s，均分只会把每一条都掐成假超时）；剩下不足 5s 的那一段不再开始新命令，按"未执行"注入清单（文案里的毫秒数是当时真正剩余的预算）。门禁一条接一条跑，一次只注入一个失败。
 - 证据上限：每条流在内存里留 64 KiB（截断时保留尾部，而第一条错误才是原因），被截断时从写出到磁盘的文件限量读回 4 KiB 开头；单个会话最多记录 500 个编辑文件，超出后按插入顺序淘汰并 warn。
 
 ## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
@@ -165,6 +165,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 - **不抢话**：收件箱已经有待处理消息、回合信号已取消，或者插件已卸载时不注入。plan mode 不豁免——规划回合改了代码，回合结束时同样检查。
 - **证据被截断且磁盘上没有那份文件时，第一条错误可能已经随截断丢掉了**；文案会如实说明证据不完整，不假装完整。
 - **沙箱策略解析失败时一条都不执行**（按未执行注入），绝不退到部署级策略——那会让检查写到沙箱外面被拒绝，产出一条假的失败指令。
+- **同一作用域只装配一份**：market 的热挂子树（`mkt-*`）与 profile 的 bundle 层会解析到同一份 `host.js`，第二份 `apply` 直接让路并在宿主日志里 warn 一行——门禁与台账不会跑两遍；在册那份卸载后，下一次装配重新抢到锁。
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题
 
@@ -175,7 +176,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 | 会不会无限修下去？ | 次数用完之后注入一次用户可见的放行说明并停止自动修复，直到某一次全部干净通过才重新计数 |
 | 想临时停掉？ | 在设置卡里关 `enabled`，或者 `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate` |
 | `tsc` 用哪个版本？ | 工程自己装的那份优先，其次是随包安装的 `typescript`，两份都没有才用 PATH 上的——从不通过 `npx` 下载 |
-| 子代理改的代码呢？ | in-process 子代理的回合同样跳过检查，它们的编辑记在各自会话的记录里、不进入父会话的记录——当前不保证由父会话核验（可能漏检）；out-of-process 子代理不发 dsh 事件，天然不在检查范围内 |
+| 子代理改的代码呢？ | 子代理自己的回合不做门禁（避免同一个根跑两遍、把面向用户的注入发给子代理）；in-process 的具名子代理空闲后，其台账按游标并入父会话本轮统一核验，仍有队友在执行时本轮推迟；out-of-process 子代理不发 dsh 事件，天然不在检查范围内 |
 
 ## <img src="https://api.iconify.design/lucide/wrench.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 开发
 

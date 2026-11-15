@@ -976,13 +976,15 @@ describe("quality-gate host 接线", () => {
     assert.equal(ctx.shellCommands.length, afterFirst, "没有新编辑时第二次不得再跑门禁");
   });
 
-  it("三条门禁共用很小的预算时总耗时有上限（每条取 min(perGate, remaining)，用完就停）", async () => {
+  it("总预算是共享池而不是按条数均分：第一条能用掉远超 budget/N 的窗口，最后一条能用掉剩下的全部", async () => {
+    // 根因回归。真实仓上一条 `pnpm check` 在伞工作区根上串行跑十仓实测 240s（单仓 64s）；
+    // 按条数均分（600s/10 条 = 60s）时每一条的窗口都**短于一次门禁的固有耗时**，于是一定全部
+    // 超时——报出来却是「60s 预算内未完成」，看起来像配置没生效。这里用 2 条门禁把它钉住：
+    // 均分给 100s/2 = 50s，共享池给 100s − 后面那条的保底 5s = 95s。
     ctx.gateExitCode = 1;
-    ctx.value["gateBudgetMs"] = 10_000;
-    // 3 个项目根 → 3 gates：默认 ctx mock 无 projectRootsOf 注入点，
-    // 用 3 个真实临时根各放一个 edit 事件（复用文件顶部的静态导入，别在用例里再 import 一次）
+    ctx.value["gateBudgetMs"] = 100_000;
     const roots: string[] = [];
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 2; i += 1) {
       const root = path.join(tmpdir(), `qg-test-budget-${i}-${Date.now()}-${i}`);
       mkdirSync(root, { recursive: true });
       writeFileSync(path.join(root, PKG_JSON), '{"name":"t"}');
@@ -1001,25 +1003,18 @@ describe("quality-gate host 接线", () => {
       budgets.push(spec.timeoutMs);
       return origResolve(spec);
     };
-    // shell.execute/result 睡 1s：前两门通过（循环继续）、第三门失败（注入后返回）——
-    // 这样三门的 per-gate 都被记录，可断言收缩；无界实现会跑满 3×perGate(10s+)
+    // 每条只睡 50ms：本用例判的是「窗口给多大」，不是「总时长有没有上限」。
+    // 第一条通过（循环往下走）、第二条失败（注入后收尾）。
     let runs = 0;
     ctx.shell.execute = async (_spec: ShellSpec) => {
       runs += 1;
+      const exitCode = runs < 2 ? 0 : 1;
       return {
         result: async () => {
-          await sleep(1000);
-          if (runs < 3) {
-            return {
-              exitCode: 0,
-              stdout: { text: "ok", truncated: false },
-              stderr: { text: "", truncated: false },
-              aborted: false,
-            };
-          }
+          await sleep(50);
           return {
-            exitCode: 1,
-            stdout: { text: "slow-fail", truncated: false },
+            exitCode,
+            stdout: { text: exitCode === 0 ? "ok" : "slow-fail", truncated: false },
             stderr: { text: "", truncated: false },
             aborted: false,
           };
@@ -1034,22 +1029,24 @@ describe("quality-gate host 接线", () => {
         ctx.followupCalls.push(msg);
       },
     };
-    const t0 = Date.now();
     ctx.handlers["agent/turn-stopping"]!({ agent, turn: 9 });
-    // 轮询等注入落定，而不是固定 sleep：固定等待会把「正确实现 ~3s 跑完」与「无界实现跑满」
-    // 压成同一段 14 秒，紧跟其后的耗时断言就永远成立。到了时间还没注入，正是实现没有上限时该红的那一条。
-    const settled = await waitUntil(() => ctx.followupCalls.length > 0, 14_000);
-    const elapsed = Date.now() - t0;
-    assert.ok(settled, `3 条门禁在小预算下没能在 14 秒内注入（实测 ${elapsed}ms）：总耗时没有上限`);
-    assert.ok(elapsed < 10_000, `3 gates 小预算总耗时必须有界（实测 ${elapsed}ms）`);
-    for (const budget of budgets) {
-      assert.ok((budget ?? 0) <= 10_000, `per-gate 不得超总预算（实测 ${budget}）`);
-    }
-    assert.ok(
-      budgets.length >= 2 && (budgets[1] ?? 0) < (budgets[0] ?? 0),
-      `后门 per-gate 必须随剩余预算收缩（实测 ${JSON.stringify(budgets)}），否则总时长无界`,
+    await waitUntil(() => ctx.followupCalls.length > 0, 14_000);
+    assert.equal(budgets.length, 2, "两条门禁各跑一次");
+    // 均分实现会给 50_000；共享池给「剩余 100_000 − 后面一条的保底 5_000」。
+    assert.equal(
+      budgets[0],
+      95_000,
+      `第一条门禁的窗口必须按共享池算，不能被均分压缩（实测 ${String(budgets[0])}）`,
     );
-    // 注入恰好一次：等待条件已保证“至少一次”，等值断言才真正排除了“每次都注入”。
+    // 最后一条后面没有门禁了 ⇒ 它可以用掉剩下的全部预算（扣掉第一次实际花的 50ms）。
+    assert.ok(
+      (budgets[1] ?? 0) > 90_000,
+      `最后一条门禁应当能用掉剩余全部预算，而不是被均分钉在 50s（实测 ${String(budgets[1])}）`,
+    );
+    for (const budget of budgets) {
+      assert.ok((budget ?? 0) <= 100_000, `单条窗口不得超总预算（实测 ${String(budget)}）`);
+    }
+    // 注入恰好一次：等待条件已保证"至少一次"，等值断言才真正排除了"每次都注入"。
     assert.equal(ctx.followupCalls.length, 1, "一次只注入一个失败");
   });
 

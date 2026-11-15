@@ -24,6 +24,9 @@ export interface UiMessages {
   readonly revert: string;
   /** 保存失败整行（{message} 错误摘要）。 */
   readonly saveFailed: string;
+  /** 有字段越界时的保存条提示：`NumberField` 对越界草稿不调 `onChange`，
+   *  只看草稿差异的门禁会以为什么都没改，于是照样提交其余字段。 */
+  readonly invalidFields: string;
   /** 保存被宿主拒绝（返回的受理标记是 false：校验没过，或者写入被跳过），修改没有生效。 */
   readonly saveRejected: string;
   /** 网关地址不接受：带 userinfo，或者明文 http 指向非回环地址。 */
@@ -110,6 +113,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "保存中…",
     revert: "撤销",
     saveFailed: "保存失败：{message}",
+    invalidFields: "有字段超出范围，先修正或撤销后再保存。",
     saveRejected: "保存被宿主拒绝（配置校验未通过或写入被跳过），修改未生效",
     invalidGatewayUrl:
       "网关地址不接受：不能带用户名/口令；远端地址必须是 https，明文 http 只允许本机回环",
@@ -126,7 +130,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     injectsHint: "门禁失败后最多注入几次修复指令；配额按会话累计，门禁通过后重置",
     budgetLabel: "门禁总预算",
     budgetHint:
-      "一次回合内所有门禁共享的总耗时预算（多根均分）；超时按「未能执行」注入，不静默放行",
+      "一次回合内所有门禁共享的总耗时预算：先跑的先用，只给后面每条留最小可用份额；够长的一次 `pnpm check` 因此不会被均分掐断。超时按「未能执行」注入，不静默放行",
     memoryLabel: "门禁失败沉淀记忆",
     memoryHint:
       "默认关闭。开启后：代码型门禁失败的证据（命令/根/全文报错，不截断）写入记忆网关的 L0 会话层供后续会话召回；总线 lesson-loop 的同步上报不受此开关影响。关闭后只注入不沉淀。投递要求网关地址与凭据引用都可用（见下面两项）",
@@ -144,6 +148,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "Saving…",
     revert: "Revert",
     saveFailed: "Save failed: {message}",
+    invalidFields: "Some fields are out of range; fix them or revert before saving.",
     saveRejected:
       "Save rejected by the host (validation failed or write skipped) — changes not applied",
     invalidGatewayUrl:
@@ -163,7 +168,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "How many repair instructions a failing gate may inject; the quota accumulates across turns in one session and resets after a clean gate pass",
     budgetLabel: "Gate total budget",
     budgetHint:
-      'Shared time budget for all gates in one turn (split across project roots); a timeout is injected as "could not run", never as a silent pass',
+      'Shared time budget for all gates in one turn: first gate draws first and only the minimum useful share is reserved for those after it, so one long `pnpm check` is never cut short by an even split; a timeout is injected as "could not run", never as a silent pass',
     memoryLabel: "Persist gate failures to memory",
     memoryHint:
       "Off by default. When on: the evidence of code-level gate failures (command, root, full error text, untruncated) is written into the memory gateway's L0 session layer so later sessions can recall it; synchronous reporting to the lesson-loop bus is unaffected by this switch. When off, repairs are injected but nothing is persisted. Delivery requires both the gateway URL and the credential ref to be usable (see the two fields below)",

@@ -19,6 +19,7 @@ export const LOG_TEMPLATES: readonly string[] = Object.freeze([
   "writable-root registration failed for",
   "writable-root release failed:",
   "[quality-gate] ctx is missing the settings.describe/configure + inject/fiber surface; gate not armed",
+  "[quality-gate] 检测到本插件已在同一作用域内装载：",
   "[quality-gate] gate did not run:",
   "[quality-gate] gate passed under PARTIAL sandbox enforcement (",
   "[quality-gate] gate tool unavailable (exit",

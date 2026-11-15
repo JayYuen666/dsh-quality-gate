@@ -87,9 +87,9 @@ describe("host 消息字典（中英双语）", () => {
       failure: "TS2345",
       names: "reviewer/checker",
     };
-    // 这条用例要的是「模板里的占位符名字都在 params 里」这层反查：renderTemplate 的契约是「未提供的名字留空串」，
-    // 所以只断言渲染结果里没有没替换的花括号永远成立（少给参数也照样留空）。这里逐个模板把
-    // 占位符名字拿去比 params 的键，漏一个就失败——这才是能查出"漏变量"的那条断言。
+    // 这条用例要的是「模板里的占位符名字都在 params 里」这层反查：渲染器对缺值保留原文，
+    // 所以只断言渲染结果里没有没替换的花括号根本不成立（少给参数时花括号就留在那里）。
+    // 这里逐个模板把占位符名字拿去比 params 的键，漏一个就失败——这才是能查出"漏变量"的那条断言。
     const provided = new Set(Object.keys(params));
     for (const key of keys) {
       for (const dict of [zh, en]) {
@@ -115,19 +115,19 @@ describe("renderTemplate（{name} 插值）", () => {
     assert.equal(renderTemplate("{one}+{two}={one}", { one: "x", two: 1 }), "x+1=x");
   });
 
-  it("字典里没有的名字留空串（宁可少一段说明，也不给模型留下没替换的花括号）", () => {
-    assert.equal(renderTemplate("前{missing}后", { other: "x" }), "前后");
+  it("字典里没有的名字保留原文（漏传参数时一眼可见）", () => {
+    assert.equal(renderTemplate("前{missing}后", { other: "x" }), "前{missing}后");
   });
 
   it("原型链上的名字不算「提供了」，自有的同名键照常渲染", () => {
-    // 参数摊成 Map 之后只认自有可枚举键：裸下标（params[key]）会取到 Object.prototype
-    // 上的函数对象，String() 之后把源码渲染进正文；契约是"未提供的名字留空串"。
-    assert.equal(renderTemplate("前{constructor}后", {}), "前后");
-    assert.equal(renderTemplate("前{toString}后", {}), "前后");
-    assert.equal(renderTemplate("前{valueOf}后", {}), "前后");
+    // 只取自有属性：裸下标（params[key]）会取到 Object.prototype 上的函数对象，String()
+    // 之后把源码渲染进正文；契约是"未提供的名字保留原文"。
+    assert.equal(renderTemplate("前{constructor}后", {}), "前{constructor}后");
+    assert.equal(renderTemplate("前{toString}后", {}), "前{toString}后");
+    assert.equal(renderTemplate("前{valueOf}后", {}), "前{valueOf}后");
     // __proto__ 与 hasOwnProperty 是另外两个会从原型链/访问器上漏值的名字。
-    assert.equal(renderTemplate("前{__proto__}后", {}), "前后");
-    assert.equal(renderTemplate("前{hasOwnProperty}后", {}), "前后");
+    assert.equal(renderTemplate("前{__proto__}后", {}), "前{__proto__}后");
+    assert.equal(renderTemplate("前{hasOwnProperty}后", {}), "前{hasOwnProperty}后");
     assert.equal(
       renderTemplate("{toString}", { toString: "own" }),
       "own",
@@ -141,7 +141,7 @@ describe("renderTemplate（{name} 插值）", () => {
       renderTemplate("{gate.command} 失败", { "gate.command": "pnpm check" }),
       "pnpm check 失败",
     );
-    assert.equal(renderTemplate("{gate-command}", {}), "", "未提供的名字同样留空串");
+    assert.equal(renderTemplate("{gate-command}", {}), "{gate-command}", "未提供的名字保留原文");
   });
 
   it("无占位符的文本原样返回", () => {

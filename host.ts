@@ -115,6 +115,7 @@ import type { EditLedgerEntry, EditOutcome } from "./lib/edit-ledger.ts";
 // try/catch 抓不到 rejection——失败既没有任何记录，又给宿主进程留下一个未处理的拒绝。
 // 同步抛错和异步拒绝共用这一个返回点（三个包调用它时的失败处理做法一致）。
 import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
+import { claimInstance } from "@jayyuen66/dsh-plugin-shared/lib/instance-lock";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { mountEditLedgerReader } from "./lib/edit-ledger-reader.ts";
 import type { EditLedgerReader, ProjectionsRegistry } from "./lib/edit-ledger-reader.ts";
@@ -514,6 +515,13 @@ interface HostCtx {
    *  `SyncEffect`/`Effect`（:49-52）给出，两者都**不接受 `undefined`**。本包两处挂载点返回的
    *  都是真正的 disposer（`configure` 的撤销句柄 / `ctx.on` 的退订函数），不需要空 disposer。 */
   effect: Context["effect"];
+  /** 注册口（单实例锁要用）。可选：本包其余部分从不碰它，缺了就是「能力缺席」，
+   *  锁按放行处理（见 shared 的 lib/instance-lock 头注释）。取值时**直接交对象本身**，
+   *  不要再包一层 `{ provide }` —— 包出来的箭头恒是函数，会让「没有注册口」伪装成
+   *  「有注册口但 provide 抛错」，让路判据据此误判而把整份插件关掉。 */
+  reflect?:
+    | { readonly provide?: ((name: string, value?: unknown) => unknown) | undefined }
+    | undefined;
   /** 事件接线的地方：监听器的**返回类型**这里直接取官方事件条目
    *  （`Events["agent/turn-stopping"]: (this: Scoped<Agent>, payload: {...}) =>
    *  Promise<void> | void`，installed @deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts:387-391，
@@ -654,9 +662,9 @@ function pruneToSessionBudget<Value>(map: Map<string, Value>, keep: string): voi
  * 在结算之后到达则滞留在 inbox 被丢弃（门禁没有提示地失效）。所以只在根会话上做。
  *
  * out-of-process 子代理（ACP/claude-code/codex）
- * 在独立进程运行，不发射 dsh 的 agent 事件，它们的编辑天然不在任何门禁的范围内；in-process
- * 子代理被这个判断跳过后，它们的编辑由父会话下一回合结束时的门禁在父侧统一核验（以后如果
- * 需要精确到子代理的编辑，可以在父会话里聚合子会话的 tool/call——本插件不做，避免过度设计）。
+ * 在独立进程运行，不发射 dsh 的 agent 事件，它们的编辑天然不在任何门禁的范围内。in-process
+ * 的具名子代理被这个判断跳过后，编辑并没有丢：根会话在回合结束时把这些子代理的台账按游标并入
+ * 本回合（{@link collectTeamEdits}），队友仍在执行则推迟本轮（{@link mergeTeamLedgers}）。
  */
 function isRootSession(agent: TurnAgent): boolean {
   const { header } = agent.session;
@@ -829,10 +837,16 @@ const giveUpText = (messages: QualityGateMessages, gate: Gate, attempts: number)
 const skippedGateLine = (messages: QualityGateMessages, gate: Gate): string =>
   renderTemplate(messages.skippedGateItem, { command: gateCommandText(gate), root: gate.root });
 
-/** 时间预算用完之后，剩下那些门禁的"未执行"清单：只 warn 等于静默通过，所以要注入给模型和用户。 */
-const skippedText = (messages: QualityGateMessages, gates: readonly Gate[]): string =>
+/** 时间预算用完之后，剩下那些门禁的"未执行"清单：只 warn 等于静默通过，所以要注入给模型和用户。
+ *  `remainingMs` 是**当时真的还剩多少**：文案写的是"本轮剩余预算 {budgetMs}ms"，印成最小可用阈值
+ *  （5000）就成了一个与事实无关的固定数字，用户无法据此判断该调多少预算。 */
+const skippedText = (
+  messages: QualityGateMessages,
+  gates: readonly Gate[],
+  remainingMs: number,
+): string =>
   renderTemplate(messages.gatesSkipped, {
-    budgetMs: MIN_USEFUL_GATE_MS,
+    budgetMs: Math.max(0, remainingMs),
     list: gates.map((gate) => skippedGateLine(messages, gate)).join("\n"),
   });
 
@@ -2289,11 +2303,27 @@ interface GateBatchInput {
   collaborators: ReadonlyMap<string, readonly string[]>;
 }
 
-/** 批次开始之后的派生值与可变状态：`perGate` 和 `started` 在进入异步段时算定，`batch` 见它的注释。 */
+/** 批次开始之后的派生值与可变状态：`started` 在进入异步段时算定，`batch` 见它的注释。 */
 interface GateBatchState extends GateBatchInput {
-  perGate: number;
   started: number;
   batch: { blocked: boolean };
+}
+
+/**
+ * 单条门禁这一趟能拿到的窗口：**从共享池里先到先得，但要给后面的门禁留出最小可用份额**。
+ *
+ * 均分（`budget / gates.length`）在真实仓库上是错的：一条 `pnpm check` 在伞工作区根上串行跑
+ * 十几个仓，实测 240s（`node scripts/check-all.mjs`：`real 240.68`，十个仓逐个跑完），而单仓
+ * `pnpm check` 也要 64s。按条数均分时（600s / 10 条 = 60s）每一条的窗口都**短于一次门禁的固有耗时**，
+ * 于是必然全部超时——报出来的却是「60s 预算内未完成」，看起来像配置没设置，实际是分配规则注定跑不完。
+ *
+ * 改成共享池：第一条先拿 `remaining - 后面每条的保底`。后面没有门禁时它就能用掉整个剩余预算；
+ * 有 N 条待跑时给它们各留 `MIN_USEFUL_GATE_MS`（低于这个值跑门禁只会得到假超时，`processGate`
+ * 本来就会跳过并注入"未执行"）。这样"一条长门禁 + 若干短门禁"的组合不会因为均分而被一起掐死。
+ */
+function windowFor(remaining: number, laterGates: number): number {
+  const reserved = laterGates * MIN_USEFUL_GATE_MS;
+  return Math.max(MIN_USEFUL_GATE_MS, remaining - reserved);
 }
 
 /**
@@ -2301,7 +2331,7 @@ interface GateBatchState extends GateBatchInput {
  * 用尾递归往下走代替 for+await（避开 no-await-in-loop，语义不变）。
  */
 async function processGate(state: GateBatchState, left: readonly Gate[]): Promise<void> {
-  const { scope, shell, resolved, signal, budget, perGate, started, batch, collaborators } = state;
+  const { scope, shell, resolved, signal, budget, started, batch, collaborators } = state;
   const { rt } = scope;
   const [gate] = left;
   if (gate === undefined) {
@@ -2313,14 +2343,19 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
   const remaining = budget - (Date.now() - started);
   if (remaining < MIN_USEFUL_GATE_MS) {
     batch.blocked = true;
-    handleGateFailure(scope, gate, { kind: "not-run", text: skippedText(scope.messages, left) });
+    handleGateFailure(scope, gate, {
+      kind: "not-run",
+      text: skippedText(scope.messages, left, remaining),
+    });
     return;
   }
   // 沙箱策略解析不出来 → 一条都不执行（not-run），绝不退回到部署级策略。
+  // 这一条能用多少：剩余预算扣掉后面每条的最小可用份额（见 windowFor：均分在真实仓库上注定不够）。
+  const window = windowFor(remaining, left.length - 1);
   const outcome: GateOutcome =
     resolved.kind === "unavailable"
       ? { kind: "not-run", text: resolved.reason }
-      : await runGate(scope.messages, shell, gate, Math.min(perGate, remaining), {
+      : await runGate(scope.messages, shell, gate, window, {
           policy: resolved.binding?.policy,
           signal,
           stdoutMaxBytes: rt.stdoutMaxBytes,
@@ -2355,8 +2390,8 @@ function releaseGrants(rt: GateRuntime, grants: readonly (() => void)[]): void {
 }
 
 /**
- * 一批门禁：按总预算封顶（perGate 最低 10s，可能超支）——跟踪已经花掉的时间，每条
- * 用 min(perGate, remaining)。剩下的时间不够最小可用预算时（真实的 tsc/pnpm 冷启动也要几秒，几百 ms
+ * 一批门禁：总预算封顶、按上面的共享池逐条取窗口——跟踪已经花掉的时间，每条最多用完剩余预算
+ * （扣掉后面每条的保底份额）。剩下的时间不够最小可用预算时（真实的 tsc/pnpm 冷启动也要几秒，几百 ms
  * 必然超时 → 注入一条假的"超时失败"）**注入未执行的说明**——只 console.warn 等于静默通过。
  *
  * 两处防御：①整段最外层 try/catch——批次自己出问题只记一条 error，绝不产生
@@ -2368,15 +2403,14 @@ async function runGateBatch(input: GateBatchInput): Promise<void> {
   const { scope } = input;
   const { rt, sessionId } = scope;
   try {
-    const perGate = Math.max(10_000, Math.floor(input.budget / input.gates.length));
-    // 计时的基准：每条检查可用的时间 = min(perGate, budget - 已花)。
+    // 计时的基准：每条检查可用的时间由 processGate 按「剩余预算 − 后面各条的保底」现算。
     const started = Date.now();
     /** 是否有门禁没有给出"通过"的结论（code-failure 和 not-run 都算；只有全部 pass 才重置配额）。
      *  放在可变的持有对象里而不是 `let`：赋值都发生在 `processGate` 里，控制流分析看不见那两次
      *  写，批次结束后的读取点会被钉在初始值 false 上、`!batch.blocked` 就被判成永远成立——而"有检查没给出
      *  通过结论"是真会发生的（是否重置配额就取决于它）。读属性得到的是声明的 boolean，这个判断才是有效的。 */
     const batch: { blocked: boolean } = { blocked: false };
-    await processGate({ ...input, perGate, started, batch }, input.gates);
+    await processGate({ ...input, started, batch }, input.gates);
     // 所有门禁都真的跑完并且通过 → 重置会话配额：模型已经修好，下一轮重新计数。
     // 只要有任何一条"没跑成"就不重置：那不等于代码是健康的。
     if (!batch.blocked) {
@@ -2558,6 +2592,22 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 不能改成更宽的类型，所以在唯一的读取点上把这一位按运行时的形状收回可以为空，`?.` 和 `??` 才是必要的判断。
   const loggerSlot: { readonly logger?: (name: string) => Log } = svc;
   const log: Log = loggerSlot.logger?.("quality-gate") ?? console;
+
+  // 0. 单实例锁：market 的热挂子树（`mkt-*`，走 `file://…/host.js`）与 profile 的 bundle 层
+  //    解析到同一份模块，却各起一个 fiber、各跑一次 apply。本包的注册面（事件监听、两处
+  //    `svc.inject` 挂的投影与设置页策略）都不去重也不抛错，第二份会静默各挂一份——同一个
+  //    回合的门禁判定与台账写入都会跑两遍。让路的那一份不提供任何东西。
+  if (
+    !claimInstance(
+      { get: (name: string): unknown => svc.get(name), reflect: svc.reflect },
+      "@jayyuen66/dsh-quality-gate/instance",
+    )
+  ) {
+    log.warn(
+      "[quality-gate] 检测到本插件已在同一作用域内装载：本次装配让路，门禁与台账由在册的那一份提供。",
+    );
+    return;
+  }
 
   // 非 volatile 的部署值：普通值的形态（不用 .get()），装载时读一次，改 cordis.yml 里的行 config 就能改。
   const { maxRootDepth, gateStdoutMaxBytes: stdoutMaxBytes } = config;

@@ -25,7 +25,6 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import { z } from "zod";
 import {
-  CARD_UI_CSS,
   CardForm,
   NumberField,
   SaveBar,
@@ -33,7 +32,9 @@ import {
   TextField,
   ToggleField,
   diffTouched,
+  ensureCardUiCss,
   splitHint,
+  useInvalidFields,
 } from "@jayyuen66/dsh-plugin-shared/client";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
@@ -306,11 +307,17 @@ interface SectionInputs {
   /** 渲染时用的值：touched 优先，没有就用快照里的值。 */
   eff: <Field extends CardField>(field: Field) => CardValues[Field];
   setField: (field: CardField, value: unknown) => void;
+  /** 保存/撤销后自增一次，把数字框里的越界草稿清回已提交值：父值没变时组件内
+   *  「保留输入中的草稿」那一支会把非法值一直留在框里。 */
+  resetToken: number;
+  /** 把「本字段现在越界」上报给卡片，让保存门禁拦住越界草稿：`NumberField` 对越界值
+   *  不调 `onChange`，只看草稿差异的门禁会以为什么都没改，于是照样提交其余字段。 */
+  reportInvalid: (field: CardField, invalid: boolean) => void;
 }
 
 /** 质量门禁小节：总开关 + 注入配额 + 预算（存毫秒，按秒显示）。 */
 function buildGateSection(props: SectionInputs): ReactNode {
-  const { t, writable, eff, setField } = props;
+  const { t, writable, eff, setField, resetToken, reportInvalid } = props;
   const maxInjects = eff("maxInjectsPerTurn");
   const budgetMs = eff("gateBudgetMs");
   const budgetSeconds = budgetMs === undefined ? undefined : budgetMs / 1000;
@@ -336,6 +343,10 @@ function buildGateSection(props: SectionInputs): ReactNode {
     unit: t("unitTimes"),
     invalidHint: t("outOfRange"),
     disabled: !writable,
+    resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      reportInvalid("maxInjectsPerTurn", invalid);
+    },
     onChange: (next: number | undefined): void => {
       setField("maxInjectsPerTurn", next);
     },
@@ -351,6 +362,10 @@ function buildGateSection(props: SectionInputs): ReactNode {
     unit: t("unitSeconds"),
     invalidHint: t("outOfRange"),
     disabled: !writable,
+    resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      reportInvalid("gateBudgetMs", invalid);
+    },
     onChange: (next: number | undefined): void => {
       setField("gateBudgetMs", next === undefined ? undefined : next * 1000);
     },
@@ -425,14 +440,18 @@ function DgCard(props: {
     const parsedTouched = CARD_FIELD_SCHEMAS[field].safeParse(touched[field]);
     return parsedTouched.success ? parsedTouched.data : undefined;
   };
+  // 越界字段集 / 重置信号：越界草稿压根不进 touched（`NumberField` 对它不调 `onChange`），
+  // 不单独记就与「草稿为空」在保存条上同形 —— 用户点保存，别的字段写出去、这一格静默丢掉。
+  const invalid = useInvalidFields();
+  const { blocked, resetToken, reportInvalid } = invalid;
   const dirtyKeys = diffTouched(touched, value);
-  const dirty = dirtyKeys.length > 0;
+  const dirty = dirtyKeys.length > 0 || blocked;
   const setField = (field: CardField, val: unknown): void => {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
   const save = (): void => {
     const keys = diffTouched(touched, value);
-    if (keys.length === 0) {
+    if (keys.length === 0 || blocked) {
       return;
     }
     setBusy(true);
@@ -451,19 +470,21 @@ function DgCard(props: {
   const discard = (): void => {
     setTouched({});
     setSaveError(null);
+    invalid.clear();
   };
-  const inputs: SectionInputs = { t, writable, eff, setField };
+  const inputs: SectionInputs = { t, writable, eff, setField, resetToken, reportInvalid };
   const gate = buildGateSection(inputs);
   const memory = buildMemorySection(inputs);
   const saveBar = createElement(SaveBar, {
     dirty,
+    blocked,
     busy,
     writable,
-    error: saveError,
+    error: saveError ?? (blocked ? t("invalidFields") : null),
     saveLabel: t("save"),
     savingLabel: t("saving"),
     revertLabel: t("revert"),
-    dirtyLabel: t("dirtyCount", { count: dirtyKeys.length }),
+    dirtyLabel: t("dirtyCount", { count: dirtyKeys.length + invalid.count }),
     cleanLabel: t("statusClean"),
     readOnlyLabel: t("statusReadOnly"),
     onSave: save,
@@ -564,15 +585,7 @@ function cardStore(scope: EntryForm): {
 const inject = ["slots", "configForms", "locale"];
 
 function apply(ctx: ClientCtx): void {
-  ctx.effect(() => {
-    const tag = document.createElement("style");
-    tag.id = "dsh-card-ui-css-quality-gate";
-    tag.textContent = CARD_UI_CSS;
-    document.head.append(tag);
-    return () => {
-      tag.remove();
-    };
-  }, "quality-gate-card: styles");
+  ctx.effect(() => ensureCardUiCss(), "quality-gate-card: styles");
   // 本包的共享表单：条目 id == profile/cordis.patch.yml 里的裸 id `quality-gate`
   // （0.1.7 起 settings 命名空间就是条目 id，不再有单独的 register 命名空间），
   // 和 host 侧隐式注册用的命名空间是同一个来源，所以直接复用 NS。

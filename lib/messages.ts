@@ -13,6 +13,7 @@
 // 带变量的整行放 `{name}` 占位符（和卡片侧官方 Translate 的语法相同），由本文件的
 // renderTemplate 渲染：字典仍然是一张扁平的字符串表，两种语言可以各自决定变量的先后位置。
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
+import { fillPlaceholders } from "@jayyuen66/dsh-plugin-shared/lib/placeholder";
 
 /** 本包 host 侧产出的全部给人读的文案（注入给模型的修复指令，加上门禁没跑成时的提示）。 */
 export interface QualityGateMessages {
@@ -83,7 +84,7 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
       "为避免无限消耗 token，本轮停止自动修复并放行。" +
       "请手动运行该命令确认代码健康；若确需修复，请明确告知用户需要人工介入，不要反复重试同一门禁。",
     gatesSkipped:
-      "剩余预算不足 {budgetMs}ms，以下门禁本轮未执行：\n{list}\n" +
+      "本轮剩余预算 {budgetMs}ms，不足让单条门禁跑起来的最小份额，以下门禁本轮未执行：\n{list}\n" +
       "这些根的代码健康**尚未核验**，不要把它们当已通过。",
     skippedGateItem: "- {command}（根 {root}）",
     sandboxMode: "沙箱模式={mode}",
@@ -126,7 +127,8 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
       "healthy; if a fix really is needed, tell the user explicitly that human intervention is " +
       "required instead of retrying the same gate.",
     gatesSkipped:
-      "Less than {budgetMs}ms of budget remains, so these gates did not run this turn:\n{list}\n" +
+      "Only {budgetMs}ms of the budget is left this turn — below the minimum a single gate needs — " +
+      "so these gates did not run:\n{list}\n" +
       "The code health of these roots **has not been verified** — do not treat them as passed.",
     skippedGateItem: "- {command} (root {root})",
     sandboxMode: "sandbox mode={mode}",
@@ -153,24 +155,17 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
   },
 };
 
-/** 渲染模板里的 {name} 占位符；没给值的名字替换成空串（宁可少一段说明，也不给模型留一对没替换的花括号）。
+/** 渲染模板里的 {name} 占位符。
  *  与 client 侧官方 `@deepseek-ai/dsh-client-locale` 的 Translate 插值语义相同（宿主用同一条规则）。
  *
- *  取值用 `Object.entries` 转成的 Map：只取自有可枚举键，`{constructor}` 和 `{toString}`
- *  这类原型链上的名字本来就不在这张表里，于是"没给值的名字替换成空串"由数据结构保证，不用额外判空。
+ *  实现已收进 shared 的 `@jayyuen66/dsh-plugin-shared/lib/placeholder`：占位符名按「花括号里
+ *  任何不含花括号的内容」匹配（`{gate.command}` 这类含点的名字照样查表），只认自有属性
+ *  （`{constructor}` / `{toString}` 不取原型链），**缺值保留原文** —— 漏传一个参数时原文
+ *  留着的花括号一眼可见，比悄悄少一段说明更容易发现。
  *  @param text - 字典里的整行模板。
  *  @param params - 占位符名 → 值（数字会转成字符串）。
  *  @returns 替换后的文本。
  */
 export function renderTemplate(text: string, params: Record<string, string | number>): string {
-  // 先转成 Map：`Object.entries` 只取自有可枚举键，原型链上的 `constructor` 和 `toString`
-  // 不在表里，于是"没给值的名字替换成空串"这条契约由数据结构保证，而不是靠多一次判空。
-  const provided = new Map(Object.entries(params));
-  // 占位符名按"花括号里任何不含花括号的内容"匹配：只认 \w 会把 {gate.command} 这类
-  // 名字留在正文里，和"没给值的名字替换成空串"这条契约不一致。分组必须具名（lint 的
-  // prefer-named-capture-group），回调用的是位置参数，两者指的是同一个捕获。
-  return text.replaceAll(
-    /\{(?<key>[^{}]+)\}/gu,
-    (_match: string, key: string) => provided.get(key)?.toString() ?? "",
-  );
+  return fillPlaceholders(text, params);
 }
