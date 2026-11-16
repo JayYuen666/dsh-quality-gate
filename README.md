@@ -45,6 +45,7 @@
 - [ Known boundaries](#-known-boundaries)
 - [ FAQ](#-faq)
 - [ Development](#-development)
+- [ Feedback](#feedback)
 - [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
@@ -65,7 +66,7 @@ Remove with `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`. The p
 
 - **Requires Node.js `>= 24.9`.** The artifacts use newer runtime features such as `AbortSignal.any`.
 - **Requires a host `dsh` on the `0.2.2-rc.2` line or later.** The requirement the host reads is `engines.dsh` (`^0.2.2-rc.2`), and it **decides compatibility on its own**; pre-release versions participate in range comparison, and `0.3.0` and later need the explicit risk-accepting grant `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version numbers in this bullet are not a standing promise.
-- **The runtime dependency `@jayyuen66/dsh-plugin-shared` must be on the same registry at `0.2.9` or later** (the single-instance lock, placeholder interpolation, card style injection and invalid-field save gate are imported from it, on top of `ToolResultRecord.error` for failure identity); a lower copy makes the whole set 404, or activation fails with `does not provide an export named ...`.
+- **The runtime dependency `@jayyuen66/dsh-plugin-shared` must be on the same registry at `0.2.10` or later** (the single-instance lock, placeholder interpolation, card style injection and invalid-field save gate are imported from it, on top of `ToolResultRecord.error` for failure identity); a lower copy makes the whole set 404, or activation fails with `does not provide an export named ...`.
 - **`typescript` is a real `dependencies` entry**: the backup entry point for the `tsc` check — the project's own install wins, then the copy shipped with this package; nothing touches the network at runtime, and `npx` never downloads a compiler.
 - **`zod` is also a real `dependencies` entry**: the edit-record projection state and the settings card's stored and pending values use it for shape validation, versioned through the umbrella catalog. The client artifact keeps `require("zod")` externalized through the host's `PLATFORM_MODULES`.
 - **`@deepseek-ai/schemastery` is resolved from the host, not installed by this package**: only the host's fork resolves `.volatile()` fields into live references; with a public schemastery, "edit a setting" becomes "restart to apply". Two validator functions from `@deepseek-ai/dsh-credentials` are value imports, so that package sits in `peerDependencies` — keeping `@deepseek-ai/*` out of `dependencies` is a publishing rule (`test/publish-manifest.test.ts` enforces it: a host package listed there installs a second copy inside the user's profile, next to the running host).
@@ -93,7 +94,7 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
-- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries a single `- id: quality-gate` entry with `name` set to the bare package name (the host scans `dsh.client` only on bare-name entries); `dsh plugin --profile web add/remove` maintains that line. The card components are bundled into `client.js` (only `react` / `zod` stay external to the host's module table), so the card does not depend on a second package being loaded.
+- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries a `- id: dsh-plugin-shared` supplier row (keep it enabled; disabling it removes the cards' shared component supply) plus the `- id: quality-gate` entry with `name` set to the bare package name (the host scans `dsh.client` only on bare-name entries); `dsh plugin --profile web add/remove` maintains those lines. The card components come from the shared client row, externalized as `@jayyuen66/dsh-plugin-shared/client` (declared in `dsh.client.external` so the host orders the supplier row into the boot graph); the host module table provides `react`, `zod` and that shared row.
 - The host side needs only `settings` (`default.inject = ["settings"]`); precedence is the card's runtime value > the line's `config:` > the schema's built-in defaults.
 - The client side (`dsh.client.platform = web`, `immediately: true`) injects a card into the `plugins.bundle.config` slot of the plugin page. Two identifiers, deliberately from different places: the slot key is the **bundle package name** `@jayyuen66/dsh-quality-gate`, while the settings namespace and `configForms.get()` use the **bare entry id** `quality-gate` — mix them up and the card never renders.
 - Saving on the card happens in two explicit steps: edits stay in local pending state until Save writes them **one after another**, key by key, and looks at the `Promise<boolean>` that says whether the host accepted the write — the first `false` stops the loop, shows `saveRejected` and keeps the changes that were not written; a write that rejects shows `saveFailed`. Inputs stay editable while a save is running, and edits made during it stay pending instead of being cleared by that save; Revert discards the pending edits. Clearing an input means unset, which restores that field's schema default.
@@ -185,6 +186,12 @@ pnpm run check   # typecheck (four tsconfigs) → lint → client build → host
 
 - Coverage is measured over `host.ts`, `lib/**` and `src/ui-messages.ts`, with all four thresholds at 100%. The dictionary is plain data and `test/client-card.test.ts` covers it fully without a browser, so counting it makes the threshold actually apply to it; `client-entry.ts` is excluded because most of it is rendering, which needs a DOM setup this package deliberately leaves out (`react-dom` and `jsdom` are not installed). Including it would make the thresholds fail permanently.
 - `test/publish-manifest.test.ts` pins the publishing shape: entry points resolve, no `@deepseek-ai/*` under `dependencies`, no dates or local machine paths in the artifacts, with comments and documents scanned the same way. `test/dist-size.test.ts` checks the byte size of both artifacts; `check:pack` examines a real `pnpm pack` tarball.
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-quality-gate/issues](https://github.com/JayYuen666/dsh-quality-gate/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License
 

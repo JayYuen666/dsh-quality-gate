@@ -5,6 +5,22 @@
 版本标题不写发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需
 增设标准六类之外的小节（如 `Tests`、`Not changed, deliberately`）。
 
+## 0.1.11
+
+设置卡组件不再打进 `client.js`，改回外置 shared 客户端行，由 `cordis.patch.yml` 新增的固定 id 供应行装载；`@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`，吸底保存条的旧固定 id 样式冲突与底色随 shared 修复。client 产物随外置与压缩降到实测 11,921 B，预算收紧到 12,500 B。门禁判据与默认配置不变。
+
+### Changed
+
+- **client 产物外置 `@jayyuen66/dsh-plugin-shared/client`，供应行回到补丁里**：`package.json` 的 `dsh.client.external` 声明该说明符，`cordis.patch.yml` 插入 `- id: dsh-plugin-shared` 固定 id 供应行（必须保持开启；停用后设置卡失去 shared 组件供应，多个插件共用同一 id 时宿主把开关标成「无法唯一定位」并禁用）。0.1.7 的「内联自足」取舍就此反转：内联本是 shared 未随 profile 物化时对 issue #2（`missed the module table`）的绕路，本版随 shared 0.2.10 的固定 id 契约重新外置，显式接受「shared 必须作为 client row 被宿主装载」这一前提，`build-client.mjs` 的 `CLIENT_EXTERNALS` 与两份 README 的组合包说明同步改口径；client 构建同时开启 minify。
+- **shared 运行时依赖抬到 `^0.2.10`**（catalog 由根 `sync` 投影，两份 README 的版本下限同步改 0.2.10）：保存条在宿主「设置」对话框里不再凹出一条比四周更暗的横带；上一代插件占住固定 id `dsh-card-ui-css` 时新样式改注入覆盖样式，不再被旧 bundle 压回去。
+- **client 产物预算收紧**：shared card-ui 的字节不再计入本产物，`test/dist-size.test.ts` 的 client 预算由 47,500 B 收紧到 12,500 B。
+- **README 与 DETAIL 增加反馈入口**：随 shared 0.2.10 的口径——启动失败时请附宿主版本、profile 安装形态与浏览器控制台原文，`missed the module table` 一行能直接说明 shared 客户端供应行有没有被物化。
+
+### Tests
+
+- `test/profile-bundle.ts` 改从 `src/client-entry.ts` 取槽位 key 与 `configForms.get()` 的条目 id：minify 会 mangle 局部标识符，产物里已无稳定的常量名；产物只负责证明注册存在，声明值从源码取。
+- `test/build-client.test.ts` 的产物断言反转：`client.js` 里保留 `require("@jayyuen66/dsh-plugin-shared/client")` 即外置成立，内联回流才判红。
+
 ## 0.1.10
 
 market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（本包的注册面不去重也不抛错，第二遍会静默各挂一份，同一个回合的门禁判定与台账写入都会跑两遍）；设置卡接「有字段越界就不许保存」那道门禁；卡片样式改用 shared 的共享 `<style>`；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距。门禁判据与默认配置不变。

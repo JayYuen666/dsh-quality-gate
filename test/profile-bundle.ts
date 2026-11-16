@@ -208,42 +208,42 @@ export function patchEntryId(): string {
   return entry.id;
 }
 
-/** 取产物里 `const <name> = "<字面量>"` 的值；取不到就抛（核对不许静默放过）。 */
-function constLiteral(text: string, name: string): string {
-  // 标识符可能以 `$` 开头，空白和引号风格也可能随构建工具变化：先转义再匹配，
-  // 否则 `$` 会被当成行尾锚点、其他元字符会变成正则注入。
-  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
-  const pattern = new RegExp(`const\\s+${escaped}\\s*=\\s*["'](?<value>[^"']*)["']`, "u");
-  const value = pattern.exec(text)?.groups?.["value"] ?? "";
-  assert.notEqual(value, "", `产物里找不到 const ${name} = "…" 的字面量声明`);
-  return value;
+/** `src/client-entry.ts` 去掉注释后的代码：文档注释里也会出现示例调用，不能当契约。 */
+function sourceCode(): string {
+  return readFileSync(path.join(PKG_DIR, "src", "client-entry.ts"), "utf8")
+    .replaceAll(/\/\*[\s\S]*?\*\//gu, "")
+    .replaceAll(/^\s*\/\/.*$/gmu, "");
 }
 
-/** 从槽位注册那一段往后取多长来找 `key:`（单位：字符）。产物里别处也有 `key:`（React 列表的 key），
- *  只能就近找；这个长度要够覆盖住整个注册对象，又不能长到跨过下一个注册对象。 */
-const SLOT_KEY_WINDOW_CHARS = 500;
+/** 取源码 `src/client-entry.ts` 里 `const <name>[: 类型] = "<字面量>"` 的值；取不到就抛。
+ *  压缩会 mangle 局部标识符，产物里的 `configForms.get(<mangled>)` 无法再映射回源码常量。 */
+function sourceConstLiteral(name: string): string {
+  // 标识符可能以 `$` 开头，空白和引号风格也可能随源码变化：先转义再匹配，
+  // 否则 `$` 会被当成行尾锚点、其他元字符会变成正则注入。
+  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  const source = sourceCode();
+  const pattern = new RegExp(
+    `(?:const|let|var)\\s+${escaped}\\s*(?::[^=]+)?=\\s*["'\`](?<value>[^"'\`]*)["'\`]`,
+    "u",
+  );
+  const value = pattern.exec(source)?.groups?.["value"] ?? "";
+  assert.notEqual(value, "", `src/client-entry.ts 里找不到 const ${name} = "…" 的字面量声明`);
+  return value;
+}
 
 /** bundle 包名的形状（`@scope/name` 或裸包名）：读出来的值必须像包名，否则钉到的是别的属性。 */
 const BUNDLE_NAME_SHAPE = /^(?:@[\w.-]+\/)?[\w.-]+$/u;
 
-/** 取产物里注册 `plugins.bundle.config` 那一次用的 key（写的是字面量还是常量名都能解析出来）。 */
+/** 核对产物里有 `plugins.bundle.config` 注册，并从源码取它用的 key。
+ *  压缩后 `key:` 的值可能是被内联的字面量或被 mangle 的标识符，产物里已无稳定的常量名；
+ *  所以产物只负责证明注册存在，key 的声明值从 `src/client-entry.ts` 取。 */
 function registeredSlotKey(text: string): string {
-  // 属性名和值之间的空白、单双引号都认：只认 `name: "…"` 这一种，压缩之后或者换了引号就整条读不到。
-  const marker = /name:\s*["']plugins\.bundle\.config["']/u.exec(text);
+  // 属性名和值之间的空白、单双引号/反引号都认。
+  const marker = /name:\s*["'`]plugins\.bundle\.config["'`]/u.exec(text);
   assert.ok(marker !== null, "产物里没有 plugins.bundle.config 的注册");
-  // 只看注册位置之后的一小段：产物里别处也有 `key:`（React 列表的 key），不能全文来抓。
-  const nearby = text.slice(marker.index, marker.index + SLOT_KEY_WINDOW_CHARS);
-  const groups =
-    /key:\s*(?:(?<quote>["'])(?<literal>[^"']*)\k<quote>|(?<ident>[A-Za-z_$][\w$]*))/u.exec(nearby)
-      ?.groups ?? {};
-  const literal = groups["literal"] ?? "";
-  if (literal !== "") {
-    assert.match(literal, BUNDLE_NAME_SHAPE, `slot 注册的 key 不像包名：${literal}`);
-    return literal;
-  }
-  const ident = groups["ident"] ?? "";
-  assert.notEqual(ident, "", "产物里读不到 slot 注册 desc 的 key（既不是字面量也不是标识符）");
-  const resolved = constLiteral(text, ident);
+  const source = sourceCode();
+  assert.match(source, /key:\s*BUNDLE_PKG/u, "源码的槽位注册没有用 BUNDLE_PKG 作为 key");
+  const resolved = sourceConstLiteral("BUNDLE_PKG");
   assert.match(resolved, BUNDLE_NAME_SHAPE, `slot 注册的 key 不像包名：${resolved}`);
   return resolved;
 }
@@ -252,18 +252,20 @@ function registeredSlotKey(text: string): string {
  *  不要求调用点恰好一处：共享包的辅助函数被一起打包时会出现在多处，逐处比较才能既防住写错，
  *  又不因为调用点数量变化而误报失败。 */
 function configFormsEntryIds(text: string): string[] {
-  const matches = [...text.matchAll(/configForms\.get\(/gu)];
-  assert.notEqual(matches.length, 0, "产物里没有 configForms.get(…) 调用");
-  return matches.map((hit) => {
-    // 匹配到的内容本身已经包含 `(`，从那里到第一个 `)` 之间就是参数（产物里这一处是简单的标识符或字面量）。
-    const after = text.slice(hit.index + hit[0].length);
-    const arg = (/^(?<arg>[^)]*)\)/u.exec(after)?.groups?.["arg"] ?? "").trim();
-    assert.notEqual(arg, "", "产物里 configForms.get(…) 的入参读不出来");
-    const inline = /^["'](?<value>[^"']*)["']$/u.exec(arg)?.groups?.["value"] ?? "";
-    if (inline === "") {
-      return constLiteral(text, arg);
+  assert.match(text, /configForms\.get\(/u, "产物里没有 configForms.get(…) 调用");
+  // 产物里的实参是 mangle 后的标识符，映射不回源码常量；从源码取调用点与常量声明。
+  const source = sourceCode();
+  const calls = [
+    ...source.matchAll(/configForms\.get\(\s*(?<arg>[A-Za-z_$][\w$]*|["'`][^"'`]*["'`])\s*\)/gu),
+  ];
+  assert.notEqual(calls.length, 0, "源码里没有 configForms.get(…) 调用");
+  return calls.map((call) => {
+    const arg = call.groups?.["arg"] ?? "";
+    assert.notEqual(arg, "", "源码里 configForms.get(…) 的入参读不出来");
+    if (/^["'`]/u.test(arg)) {
+      return arg.slice(1, -1);
     }
-    return inline;
+    return sourceConstLiteral(arg);
   });
 }
 

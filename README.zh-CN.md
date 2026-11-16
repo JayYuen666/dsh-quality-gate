@@ -45,6 +45,7 @@
 - [ 已知边界](#-已知边界)
 - [ 常见问题](#-常见问题)
 - [ 开发](#-开发)
+- [ 反馈](#反馈)
 - [ 许可](#-许可)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
@@ -65,7 +66,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 - **要求 Node.js `>= 24.9`。** 产物用到 `AbortSignal.any` 这类较新的运行时能力。
 - **要求宿主 `dsh` 在 `0.2.2-rc.2` 或更新的 `0.2.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.2-rc.2`），兼容性**只由它决定**；预发布版本参与范围比较，`0.3.0` 及以后要走明确承担风险的授权命令 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
-- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.9`**（单实例锁、占位符插值、卡片样式注入与越界保存门禁都从它导入，工具失败身份另读 `ToolResultRecord.error`），否则整组 404 或装载时报 `does not provide an export named ...`。
+- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.10`**（单实例锁、占位符插值、卡片样式注入与越界保存门禁都从它导入，工具失败身份另读 `ToolResultRecord.error`），否则整组 404 或装载时报 `does not provide an export named ...`。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 这条门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行时不联网，从不走 `npx` 的自动下载。
 - **`zod` 也是真实的 `dependencies`**：编辑台账的投影状态和设置卡的值、草稿都用它校验形状；版本走伞根 catalog。client 产物按宿主的 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
 - **`@deepseek-ai/schemastery` 由宿主解析、不由本包安装**：只有宿主 fork 的那一枚能把 `.volatile()` 字段解析成活的引用，换成公共的 schemastery 就变成改设置要重启才生效。`@deepseek-ai/dsh-credentials` 的两个校验函数是值导入，因此落在 `peerDependencies`——`dependencies` 里不放任何 `@deepseek-ai/*` 是发布契约（`test/publish-manifest.test.ts` 固定这一点：写在 `dependencies` 里的宿主包会在使用者自己的 profile 里再装一份，和正在运行的宿主并存）。
@@ -95,7 +96,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面只有一条 `- id: quality-gate`、`name` 为裸包名（宿主只对裸包名条目扫 `dsh.client`）；`dsh plugin --profile web add/remove` 维护这一行。卡片组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不依赖第二份包被装载。
+- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面有一条 `- id: dsh-plugin-shared` 供应行（必须保持开启；停用后卡片会失去 shared 组件供应），再加一条 `- id: quality-gate`、`name` 为裸包名（宿主只对裸包名条目扫 `dsh.client`）；`dsh plugin --profile web add/remove` 维护这些行。卡片组件来自 shared 的客户端行，以 `@jayyuen66/dsh-plugin-shared/client` 外置（`dsh.client.external` 同步声明这一条，供宿主把供应行排进启动图）；宿主模块表提供 `react`、`zod` 与这条 shared 供应。
 - Host 侧唯一必需的依赖是 `settings`（`default.inject = ["settings"]`）；取值的优先级是：设置卡里的运行时值 > 注册行的 `config:` > schema 里的内置默认。
 - Client 半（`dsh.client.platform = web`、`immediately: true`）往插件管理页的 `plugins.bundle.config` 槽注入一张卡。两枚标识刻意不同源：槽位 key 是 **bundle 包名** `@jayyuen66/dsh-quality-gate`，设置命名空间与 `configForms.get()` 用的是**裸条目 id** `quality-gate`——写混了卡片哪都不渲染。
 - 卡片的保存明确分两步：改动先留在本地暂存（状态条提示），点"保存"才逐键**串行**写入并检查返回的 `Promise<boolean>` 受理标记——第一个 `false` 就停手、显示 `saveRejected` 并保留还没写入的改动；写入 reject 显示 `saveFailed`。保存期间输入框还能编辑，这期间产生的新改动留在待保存内容里，不会被这一次保存顺带抹掉；"撤销"丢弃暂存。清空一个输入框 = unset，恢复该字段的 schema 默认值。
@@ -187,6 +188,12 @@ pnpm run check   # typecheck（四个 tsconfig）→ lint → client 构建 → 
 
 - 覆盖率统计 `host.ts`、`lib/**` 和 `src/ui-messages.ts`，四项阈值 100%。字典是纯数据、`test/client-card.test.ts` 不用浏览器就能跑满它，算进统计范围才能让阈值真的管住它；`client-entry.ts` 不算进来——它的主要内容是界面渲染，需要 DOM 环境才能测，本包刻意不引 `react-dom` 和 `jsdom`，整个算进来会让阈值一直不通过。
 - `test/publish-manifest.test.ts` 钉住发布形态：入口可解析、`@deepseek-ai/*` 不进 `dependencies`、产物内容里没有日期和本机路径，注释与文档也一起被它扫描。`test/dist-size.test.ts` 核对两个产物的体积上限；`check:pack` 对 `pnpm pack` 的真实 tarball 做核对。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-quality-gate/issues](https://github.com/JayYuen666/dsh-quality-gate/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
 

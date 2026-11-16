@@ -22,3 +22,9 @@ The check commands are decided per project root and never invented: `pnpm check`
 ## More detail
 
 The order the checks are tried in, why picking the wrong one looks like a failure that is not real, how edited files are recorded, and how output that exceeds the limit is written to disk are all in the packaged README (`README.md` / `README.zh-CN.md`).
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-quality-gate/issues](https://github.com/JayYuen666/dsh-quality-gate/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.
