@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-quality-gate/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-quality-gate/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.2-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.5-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -65,8 +65,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-quality-gate`。包在公共 npm 上，安装不需要凭据，也不需要配作用域源。
 
 - **要求 Node.js `>= 24.9`。** 产物用到 `AbortSignal.any` 这类较新的运行时能力。
-- **要求宿主 `dsh` 在 `0.2.2-rc.2` 或更新的 `0.2.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.2-rc.2`），兼容性**只由它决定**；预发布版本参与范围比较，`0.3.0` 及以后要走明确承担风险的授权命令 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
-- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.10`**（单实例锁、占位符插值、卡片样式注入与越界保存门禁都从它导入，工具失败身份另读 `ToolResultRecord.error`），否则整组 404 或装载时报 `does not provide an export named ...`。
+- **要求宿主 `dsh` 在 `0.2.2-rc.5` 或更新的 `0.2.2` 这条线上。** 宿主读取的版本要求是 `engines.dsh`（`^0.2.2-rc.5`），兼容性**只由它决定**；预发布版本参与范围比较，`0.3.0` 及以后要走明确承担风险的授权命令 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **运行时依赖 `@jayyuen66/dsh-plugin-shared` 必须在同一 registry 上且不低于 `0.2.11`**（单实例锁、占位符插值、卡片样式注入与越界保存门禁都从它导入，工具失败身份另读 `ToolResultRecord.error`），否则整组 404 或装载时报 `does not provide an export named ...`。
 - **`typescript` 是真实的 `dependencies`**：`tsc` 这条门禁的兜底入口——工程自己装的那份优先，其次随包安装的这份，运行时不联网，从不走 `npx` 的自动下载。
 - **`zod` 也是真实的 `dependencies`**：编辑台账的投影状态和设置卡的值、草稿都用它校验形状；版本走伞根 catalog。client 产物按宿主的 `PLATFORM_MODULES` 保持 `require("zod")` 外部化。
 - **`@deepseek-ai/schemastery` 由宿主解析、不由本包安装**：只有宿主 fork 的那一枚能把 `.volatile()` 字段解析成活的引用，换成公共的 schemastery 就变成改设置要重启才生效。`@deepseek-ai/dsh-credentials` 的两个校验函数是值导入，因此落在 `peerDependencies`——`dependencies` 里不放任何 `@deepseek-ai/*` 是发布契约（`test/publish-manifest.test.ts` 固定这一点：写在 `dependencies` 里的宿主包会在使用者自己的 profile 里再装一份，和正在运行的宿主并存）。

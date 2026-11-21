@@ -26,6 +26,7 @@ import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/c
 import { z } from "zod";
 import {
   CardForm,
+  FieldTwoCol,
   NumberField,
   SaveBar,
   Section,
@@ -370,7 +371,13 @@ function buildGateSection(props: SectionInputs): ReactNode {
       setField("gateBudgetMs", next === undefined ? undefined : next * 1000);
     },
   });
-  return createElement(Section, { title: t("gateSection") }, enabled, injects, budget);
+  // 注入配额与预算是两个数字，按设计稿的双列排布成一对；计数徽章随字段增减维护。
+  return createElement(
+    Section,
+    { title: t("gateSection"), count: t("fieldCount", { count: "3" }) },
+    enabled,
+    createElement(FieldTwoCol, null, injects, budget),
+  );
 }
 
 /** 记忆反馈小节：开关 + 网关地址 + 密钥引用。 */
@@ -412,7 +419,14 @@ function buildMemorySection(props: SectionInputs): ReactNode {
       setField("memoryGatewayKeyRef", next.trim() === "" ? undefined : next.trim());
     },
   });
-  return createElement(Section, { title: t("memorySection") }, memory, url, keyRefField);
+  // 计数徽章：一个开关 + 两个地址引用。
+  return createElement(
+    Section,
+    { title: t("memorySection"), count: t("fieldCount", { count: "3" }) },
+    memory,
+    url,
+    keyRefField,
+  );
 }
 
 function DgCard(props: {

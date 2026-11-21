@@ -37,6 +37,8 @@ export interface UiMessages {
   readonly outOfRange: string;
   /** 质量门禁小节的标题。 */
   readonly gateSection: string;
+  /// 表单小节标题旁的字段计数徽章（{count} 为字段数）。
+  readonly fieldCount: string;
   /** 记忆反馈小节标题。 */
   readonly memorySection: string;
   /** 配额单位。 */
@@ -120,6 +122,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     invalidKeyRef: "凭据引用名不接受：只能由字母、数字、下划线组成，且不能以数字开头",
     outOfRange: "超出允许范围，未保存",
     gateSection: "门禁",
+    fieldCount: "{count} 字段",
     memorySection: "记忆反馈",
     unitTimes: "次",
     unitSeconds: "秒",
@@ -157,6 +160,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "Credential reference rejected: use letters, digits and underscores only, and do not start with a digit",
     outOfRange: "Out of the allowed range — not saved",
     gateSection: "Gate",
+    fieldCount: "{count} fields",
     memorySection: "Memory feedback",
     unitTimes: "times",
     unitSeconds: "seconds",
