@@ -27,11 +27,13 @@ import { z } from "zod";
 import {
   CardForm,
   FieldTwoCol,
+  KpiGrid,
+  KpiTile,
   NumberField,
   SaveBar,
   Section,
+  SectionToggle,
   TextField,
-  ToggleField,
   diffTouched,
   ensureCardUiCss,
   splitHint,
@@ -324,16 +326,6 @@ function buildGateSection(props: SectionInputs): ReactNode {
   const budgetSeconds = budgetMs === undefined ? undefined : budgetMs / 1000;
   const budgetMinSeconds = (GATE_BUDGET_MS_BOUNDS.min ?? 0) / 1000;
   const budgetMaxSeconds = (GATE_BUDGET_MS_BOUNDS.max ?? 0) / 1000;
-  const enabled = createElement(ToggleField, {
-    label: t("enabledLabel"),
-    ...splitHint(t("enabledHint")),
-    field: "enabled",
-    checked: eff("enabled") ?? true,
-    disabled: !writable,
-    onChange: (next: boolean): void => {
-      setField("enabled", next);
-    },
-  });
   const injects = createElement(NumberField, {
     label: t("injectsLabel"),
     ...splitHint(t("injectsHint")),
@@ -374,8 +366,19 @@ function buildGateSection(props: SectionInputs): ReactNode {
   // 注入配额与预算是两个数字，按设计稿的双列排布成一对；计数徽章随字段增减维护。
   return createElement(
     Section,
-    { title: t("gateSection"), count: t("fieldCount", { count: "3" }) },
-    enabled,
+    {
+      title: t("gateSection"),
+      count: t("fieldCount", { count: "3" }),
+      toggle: createElement(SectionToggle, {
+        field: "enabled",
+        label: t("enabledLabel"),
+        checked: eff("enabled") ?? true,
+        disabled: !writable,
+        onChange: (next: boolean): void => {
+          setField("enabled", next);
+        },
+      }),
+    },
     createElement(FieldTwoCol, null, injects, budget),
   );
 }
@@ -385,16 +388,6 @@ function buildMemorySection(props: SectionInputs): ReactNode {
   const { t, writable, eff, setField } = props;
   const gatewayUrl = eff("memoryGatewayUrl") ?? "";
   const keyRef = eff("memoryGatewayKeyRef") ?? "";
-  const memory = createElement(ToggleField, {
-    label: t("memoryLabel"),
-    ...splitHint(t("memoryHint")),
-    field: "memoryFeedback",
-    checked: eff("memoryFeedback") === true,
-    disabled: !writable,
-    onChange: (next: boolean): void => {
-      setField("memoryFeedback", next);
-    },
-  });
   const url = createElement(TextField, {
     label: t("gatewayUrlLabel"),
     ...splitHint(t("gatewayUrlHint")),
@@ -422,8 +415,19 @@ function buildMemorySection(props: SectionInputs): ReactNode {
   // 计数徽章：一个开关 + 两个地址引用。
   return createElement(
     Section,
-    { title: t("memorySection"), count: t("fieldCount", { count: "3" }) },
-    memory,
+    {
+      title: t("memorySection"),
+      count: t("fieldCount", { count: "3" }),
+      toggle: createElement(SectionToggle, {
+        field: "memoryFeedback",
+        label: t("memoryFeedbackLabel"),
+        checked: eff("memoryFeedback") === true,
+        disabled: !writable,
+        onChange: (next: boolean): void => {
+          setField("memoryFeedback", next);
+        },
+      }),
+    },
     url,
     keyRefField,
   );
@@ -547,6 +551,53 @@ function DgCard(props: {
  *     改成 `LocaleRuntime["bind"]` 之后，测试假对象立刻报
  *     `Type 'string' is not assignable to type 'LocaleKeysOf<"quality-gate">'`。
  */
+/** 会话侧栏小节槽位名（与下面 SlotMap 声明及宿主契约逐字一致）。 */
+const SESSION_PANEL_SECTION = "conversation.session.panel.section";
+
+/**
+ * session-panel 的 SlotMap 合并来自 @deepseek-ai/dsh-client-ui-session-panel/client。
+ * 本包不声明该 UI 包作依赖（它只在宿主里提供槽位，不进本包发布面），这里按
+ * `lib/types/client/slots.d.ts` 的 list 契约就地补一条声明。
+ */
+declare module "@deepseek-ai/dsh-client-ui-slots" {
+  interface SlotMap {
+    "conversation.session.panel.section": {
+      kind: "list";
+      scope: "session";
+      owner: {
+        readonly presentation: "docked" | "overlay";
+        readonly dismissOverlay: () => void;
+      };
+    };
+  }
+}
+
+/** 会话侧栏的质量门禁小节：只读当前生效的两个开关值，不重复整张设置卡。 */
+function QgPanelSection(props: {
+  readonly t: Translate;
+  useCard: <Result>(selector: (snap: CardSnapshot) => Result) => Result;
+}): ReactNode {
+  const { t } = props;
+  const snap = props.useCard((cardSnap) => cardSnap);
+  if (snap.status !== "ready") {
+    return null;
+  }
+  const value = projectCardValues(snap.value);
+  return createElement(
+    KpiGrid,
+    null,
+    createElement(KpiTile, {
+      label: t("enabledLabel"),
+      value: value.enabled === false ? t("panelOff") : t("panelOn"),
+    }),
+    createElement(KpiTile, {
+      label: t("injectsLabel"),
+      value: value.maxInjectsPerTurn,
+      count: value.maxInjectsPerTurn,
+    }),
+  );
+}
+
 export interface ClientCtx {
   effect: Context["effect"];
   slots: Pick<SlotRegistry, "inject" | "register">;
@@ -614,6 +665,18 @@ function apply(ctx: ClientCtx): void {
   // 返回的是**一个**回收全部 pairs 的 disposer（一种语言一种语言地交，就得手工把两个 disposer 串起来）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "quality-gate-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
+  ctx.slots.inject(SESSION_PANEL_SECTION, () =>
+    ctx.slots.register(
+      {
+        name: SESSION_PANEL_SECTION,
+        id: "quality-gate-status",
+        order: 120,
+        label: () => t("gateSection"),
+        inject: () => ({ t, hooks: { card: store } }),
+      },
+      QgPanelSection,
+    ),
+  );
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {

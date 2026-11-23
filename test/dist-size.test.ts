@@ -18,11 +18,12 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
 
 /** host 半产物体积预算（本次扩充时实测 98,917 B）：宿主按包名载入它，这些字节是真实装载成本。
  *  这一档的上一次实测是 75,036 B；rc.2 集成的四条行为路径（可写根登记、具名子代理聚合、
- *  inspectSession 台账读取、工具失败身份）连同它们的证据注释一起进入产物，预算按同一规则重定。 */
+ *  observeSession 事件窗重放、工具失败身份）连同它们的证据注释一起进入产物，预算按同一规则重定。 */
 const HOST_BUDGET_BYTES = 114_000;
-/** client 半产物体积预算：shared 客户端行改为 external 并开启 minify 后实测 11,921 B，
- *  取 12,500 B。浏览器侧加载，按平台计账；shared card-ui 的字节不再计入本产物。 */
-const CLIENT_BUDGET_BYTES = 12_500;
+/** client 半产物体积预算：加入会话侧栏小节（KpiGrid/KpiTile 与状态投影）后实测 12,698 B，
+ *  按本文件「实测 + 约 15% 再向上取整到 500 B」规则取 15,000 B。浏览器侧加载，按平台计账；
+ *  shared card-ui 的字节不再计入本产物。 */
+const CLIENT_BUDGET_BYTES = 15_000;
 
 /** 产物文件名与预算的对照。 */
 const BUDGETS: readonly (readonly [string, number])[] = [

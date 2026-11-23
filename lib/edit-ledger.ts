@@ -1,12 +1,14 @@
 /** 会话编辑台账的投影：从事件累加状态与从历史重建共用 `toolEventRowsOf`，两边不会各写一套。 */
 import { z } from "zod";
 import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
+import type { SessionHeader } from "@deepseek-ai/dsh-session";
 import type { SessionEvent, ToolResultRecord } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import {
   editPathOf,
   editPathsOf,
   toolEventRowsOf,
 } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { EDIT_TOOLS } from "./accumulator.ts";
 
 export const EDIT_LEDGER_KEY = "quality-gate.edit-ledger";
@@ -66,16 +68,21 @@ export function countsAsEdit(outcome: EditOutcome): boolean {
   return outcome === "ok" || outcome === "aborted";
 }
 
-/** 一条编辑记录。`callId` 与 `path` 用空串表示"没有"，状态里不设可选字段。 */
+/** 一条编辑记录。`callId` 与 `path` 用空串表示"没有"，状态里不设可选字段。
+ *  `cwd` 是该调用发生时会话的工作目录（相对 `path` 必须按它解析）：写空串表示"当时没有
+ *  记录的目录"，读取方回落到快照级 cwd。 */
 export interface EditLedgerEntry {
   readonly seq: number;
   readonly callId: string;
   readonly name: string;
   readonly path: string;
+  readonly cwd: string;
   readonly outcome: EditOutcome;
 }
 
 export interface EditLedgerState {
+  /** 当前折叠到的最新会话工作目录；`workspace-root/change` 会更新它。 */
+  readonly cwd: string;
   readonly edits: readonly EditLedgerEntry[];
 }
 
@@ -84,6 +91,7 @@ const entrySchema = z.object({
   callId: z.string(),
   name: z.string(),
   path: z.string(),
+  cwd: z.string(),
   outcome: z.enum(["ok", "rejected", "aborted", "failed"]),
 });
 
@@ -96,6 +104,8 @@ type LedgerStateSchema = ProjectionDefinition<
 >["stateSchema"];
 // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- 两份 zod 只是类型来源不同：宿主只对这份 schema 调用 safeParse，运行期形状由本包的测试钉住。
 const editLedgerSchema = z.object({
+  // 条目级 `cwd` 是 v3 新增的承重字段；状态级值允许缺省为空串，读取方会按快照级 cwd 回落。
+  cwd: z.string().default(""),
   edits: z.array(entrySchema),
 }) as unknown as LedgerStateSchema;
 
@@ -124,13 +134,31 @@ function settleEntry(
   return state.map((entry, at) => (selected.includes(at) ? { ...entry, outcome } : entry));
 }
 
+/** `workspace-root/change` 是唯一会移动会话目录的事件；其余事件保持当前值。 */
+function workspaceCwdOf(event: SessionEvent, current: string): string {
+  let cwd = current;
+  if (fieldOf(event, "type") === "workspace-root/change") {
+    const data = fieldOf(event, "data");
+    const next: unknown = isRecord(data) ? data["cwd"] : undefined;
+    if (typeof next === "string" && next.length > 0) {
+      cwd = next;
+    }
+  }
+  return cwd;
+}
+
 export const editLedgerProjection = {
   key: EDIT_LEDGER_KEY,
-  // 字段与折叠语义变化时递增（`failed: boolean` → `outcome` 分档）；版本对不上的历史数据由官方 restore 丢弃。
-  stateVersion: 2,
+  // 字段与折叠语义变化时递增（`failed: boolean` → `outcome` 分档、条目级 `cwd`）；
+  // 版本对不上的历史数据由官方 restore 丢弃。
+  stateVersion: 3,
   stateSchema: editLedgerSchema,
-  init: (): EditLedgerState => ({ edits: [] }),
+  init: (header?: SessionHeader): EditLedgerState => ({
+    cwd: typeof header?.cwd === "string" ? header.cwd : "",
+    edits: [],
+  }),
   apply: (state: EditLedgerState, event: SessionEvent): EditLedgerState => {
+    const cwd = workspaceCwdOf(event, state.cwd);
     const { call, result } = toolEventRowsOf(event, event.seq);
     let { edits } = state;
     if (call !== undefined && EDIT_TOOLS.has(call.name) && !call.badArguments) {
@@ -146,6 +174,7 @@ export const editLedgerProjection = {
         callId: call.callId ?? "",
         name: call.name,
         path: filePath,
+        cwd,
         outcome: "ok" as const,
       }));
       edits = [...edits, ...additions];
@@ -155,6 +184,6 @@ export const editLedgerProjection = {
     }
     const bounded =
       edits.length > EDIT_LEDGER_MAX ? edits.slice(edits.length - EDIT_LEDGER_MAX) : edits;
-    return bounded === state.edits ? state : { edits: bounded };
+    return bounded === state.edits && cwd === state.cwd ? state : { cwd, edits: bounded };
   },
 } satisfies ProjectionDefinition<typeof EDIT_LEDGER_KEY, EditLedgerState>;

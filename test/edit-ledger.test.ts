@@ -79,7 +79,17 @@ describe("编辑台账投影", () => {
     const folded = fold([callEvent(1, "edit", { file_path: "/w/a.ts" }, "c1")]);
     assert.equal(editLedgerProjection.stateSchema.safeParse(folded).success, true);
     const withExtra = {
-      edits: [{ seq: 1, callId: "c1", name: "edit", path: "/w/a.ts", outcome: "ok", legacy: "x" }],
+      edits: [
+        {
+          seq: 1,
+          callId: "c1",
+          name: "edit",
+          path: "/w/a.ts",
+          outcome: "ok",
+          cwd: "",
+          legacy: "x",
+        },
+      ],
     };
     const parsed = editLedgerProjection.stateSchema.safeParse(withExtra);
     if (!parsed.success) {
@@ -166,8 +176,24 @@ describe("编辑台账投影", () => {
   it("没有 callId 的编辑记成空串（保守地直接记录）", () => {
     const state = fold([callEvent(7, "edit", { file_path: "/w/a.ts" })]);
     assert.deepEqual(state.edits, [
-      { seq: 7, callId: "", name: "edit", path: "/w/a.ts", outcome: "ok" },
+      { seq: 7, callId: "", name: "edit", path: "/w/a.ts", outcome: "ok", cwd: "" },
     ]);
+  });
+
+  it("init 用 header.cwd 作为初始目录；workspace-root/change 只在给出非空字符串时移动", () => {
+    let state = editLedgerProjection.init({
+      cwd: "/w",
+    } as unknown as Parameters<typeof editLedgerProjection.init>[0]);
+    assert.equal(state.cwd, "/w");
+    // oxlint-disable-next-line unicorn/consistent-function-scoping -- 这个构造器只在当前用例里描述 workspace-root/change 的形状，外提会让它的语义离用例太远
+    const workspace = (seq: number, data: unknown): SessionEvent =>
+      ({ type: "workspace-root/change", seq, time: seq, data }) as unknown as SessionEvent;
+    for (const bad of [null, { cwd: "" }, { cwd: 42 }]) {
+      state = editLedgerProjection.apply(state, workspace(1, bad));
+      assert.equal(state.cwd, "/w", "非对象或空串/非字符串不得移动目录");
+    }
+    state = editLedgerProjection.apply(state, workspace(2, { cwd: "/w2" }));
+    assert.equal(state.cwd, "/w2", "合法的新目录要跟上，供后续相对路径解析");
   });
 
   it("无关的事件原样返回同一份状态（投影按引用判断有没有变化）", () => {
@@ -217,7 +243,7 @@ describe("编辑台账投影", () => {
 
   it("键和版本号属于发布时对外声明的一部分", () => {
     assert.equal(editLedgerProjection.key, EDIT_LEDGER_KEY);
-    assert.equal(editLedgerProjection.stateVersion, 2);
+    assert.equal(editLedgerProjection.stateVersion, 3);
   });
 });
 

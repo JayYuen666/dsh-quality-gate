@@ -128,6 +128,8 @@ function noopDispose(): void {
 function observationOfFiredSession(ctx: MockCtx): {
   events: unknown;
   inheritedEventCount: number | undefined;
+  header: unknown;
+  cursor: number;
   [Symbol.dispose]: () => void;
 } {
   const session = ctx.firedSession as
@@ -141,7 +143,13 @@ function observationOfFiredSession(ctx: MockCtx): {
   // `observation.inheritedEventCount ?? 0` 的兜底分支真的被走到（在这里替它补默认值，就等于把
   // 那条分支从覆盖率与语义上一起抹掉）。
   const cut = session?.inheritedEventCount;
-  return { events: raw, inheritedEventCount: cut, [Symbol.dispose]: noopDispose };
+  return {
+    events: raw,
+    inheritedEventCount: cut,
+    header: (session as { header?: unknown } | undefined)?.header ?? { cwd: process.cwd() },
+    cursor: Array.isArray(raw) ? raw.length - 1 : -1,
+    [Symbol.dispose]: noopDispose,
+  };
 }
 
 interface MockCtx {
@@ -219,13 +227,17 @@ interface MockCtx {
     stateOf: (session: unknown, key: string) => unknown;
   };
   sessionQuery?: {
-    observeSession: (id: string) => Promise<{
+    observeSession: (
+      id: string,
+      options?: { readonly projectionMode?: "none" | "all" },
+    ) => Promise<{
       events: unknown;
       inheritedEventCount: number | undefined;
+      header: unknown;
+      cursor: number;
+      projections?: { values: Record<string, unknown> };
       [Symbol.dispose]: () => void;
     }>;
-    /** rc.2 的 inspectSession：同步 getter + 立即释放（测试替身直接把 fixture 交给 getter）。 */
-    inspectSession?: <Result>(id: string, read: (session: unknown) => Result) => Promise<Result>;
   };
   on: (event: string, handler: (payload: unknown) => void) => void;
   effect: (fn: () => (() => void) | undefined) => void;
@@ -1071,6 +1083,50 @@ describe("quality-gate host 接线", () => {
     await sleep(20);
     assert.equal(ctx.followupCalls.length, 1, "相对路径应按 header.cwd 解析并命中门禁");
     assert.equal(ctx.shellCommands[0]?.workdir, project, "门禁应在解析出来的项目根执行");
+  });
+
+  it("活目录覆盖 header.cwd：worktree 内相对路径与门禁根都按 workingDirectory", async () => {
+    ctx.gateExitCode = 1;
+    // header.cwd 是建会话时的旧项目；活目录已经切到 worktree。事件里的相对路径必须按活目录解析。
+    const worktree = makeProject("live-wt");
+    const events = [
+      {
+        type: "tool/call",
+        data: { name: "edit", arguments: JSON.stringify({ file_path: "a.ts" }) },
+      },
+    ];
+    const agent = {
+      ...agentWith(1, events),
+      session: {
+        id: "s1",
+        header: { cwd: project },
+        snapshotEvents: (from?: number) => (events as unknown[]).slice(from ?? 0),
+      },
+      ctx: {
+        get: (name: string): unknown =>
+          name === "workingDirectory" ? { get: (): string => worktree } : undefined,
+      },
+    };
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.followupCalls.length, 1, "相对路径应在活目录里命中门禁");
+    assert.equal(ctx.shellCommands[0]?.workdir, worktree, "门禁必须在活目录里执行，不用建会话快照");
+  });
+
+  it("工作目录服务给空串时回落 header.cwd", async () => {
+    ctx.gateExitCode = 1;
+    const agent = {
+      ...agentWith(1, gateEvt(project)),
+      session: { id: "s1", header: { cwd: project }, snapshotEvents: () => gateEvt(project) },
+      ctx: {
+        get: (name: string): unknown =>
+          name === "workingDirectory" ? { get: (): string => "" } : undefined,
+      },
+    };
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.followupCalls.length, 1, "空串不是有效活目录，应回落 header.cwd");
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
   });
 
   it("turn-stopping 的 signal 透传给 shell（回合取消时门禁同命，不跑孤儿门禁）", async () => {
@@ -2076,7 +2132,9 @@ describe("编辑台账投影的读取路径", () => {
   });
 
   const validLedger = (): unknown => ({
-    edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "ok" }],
+    edits: [
+      { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, cwd: "", outcome: "ok" },
+    ],
   });
 
   beforeEach(() => {
@@ -2096,8 +2154,22 @@ describe("编辑台账投影的读取路径", () => {
         Promise.resolve({
           stateOf: (): unknown => ({
             edits: [
-              { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "ok" },
-              { seq: 1, callId: "c2", name: "edit", path: `${project}/b.ts`, outcome: "ok" },
+              {
+                seq: 0,
+                callId: "c1",
+                name: "edit",
+                path: `${project}/a.ts`,
+                cwd: "",
+                outcome: "ok",
+              },
+              {
+                seq: 1,
+                callId: "c2",
+                name: "edit",
+                path: `${project}/b.ts`,
+                cwd: "",
+                outcome: "ok",
+              },
             ],
           }),
           dispose: (): void => {
@@ -2137,8 +2209,8 @@ describe("编辑台账投影的读取路径", () => {
     // 第二条没有路径（空串）→ 记进台账但不会被解析成项目根；门禁仍由有路径的那条触发。
     await armProjection(() => ({
       edits: [
-        { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "ok" },
-        { seq: 1, callId: "c2", name: "edit", path: "", outcome: "ok" },
+        { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, cwd: "", outcome: "ok" },
+        { seq: 1, callId: "c2", name: "edit", path: "", cwd: "", outcome: "ok" },
       ],
     }));
     ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
@@ -2150,7 +2222,9 @@ describe("编辑台账投影的读取路径", () => {
 
   it("失败的条目被跳过：只剩失败的编辑时门禁不跑", async () => {
     await armProjection(() => ({
-      edits: [{ seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, outcome: "failed" }],
+      edits: [
+        { seq: 0, callId: "c1", name: "edit", path: `${project}/a.ts`, cwd: "", outcome: "failed" },
+      ],
     }));
     ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(1), turn: 1 });
     await sleep(20);
@@ -2332,29 +2406,6 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
   let ledgers: Map<string, unknown>;
   let childSessions: Map<string, unknown>;
 
-  /** 挂 Team 相关的三个服务 + 台账投影，然后装载插件。 */
-  function arm(): void {
-    ctx.subagents = { listDescendants: async () => members };
-    ctx.agents = { list: () => live };
-    const base = ctx.sessionQuery;
-    assert.ok(base !== undefined, "默认夹具应带观察接口");
-    ctx.sessionQuery = {
-      observeSession: base.observeSession,
-      inspectSession: async <Result>(
-        id: string,
-        read: (session: unknown) => Result,
-      ): Promise<Result> => read(childSessions.get(id)),
-    };
-    ctx.sessionProjections = {
-      register: async () => ({
-        stateOf: (session: unknown) => ledgers.get((session as { id: string }).id),
-        dispose: () => Promise.resolve(),
-      }),
-      stateOf: () => null,
-    };
-    applyGate(ctx, ctx.value);
-  }
-
   beforeEach(() => {
     ctx = createMockCtx();
     project = makeProject("team");
@@ -2366,12 +2417,133 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
 
   afterEach(recycleScratchRoots);
 
+  /** 夹具里的游标：空日志给 -1，正常末条给下标；`noCursor` 模拟旧宿主整键缺席。 */
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- 只服务这一组 Team 夹具，外提会把「旧宿主没 cursor」这条语义搬离它的用例
+  function cursorOfFixture(noCursor: true | undefined, eventCount: number): number | undefined {
+    let cursor: number | undefined = eventCount === 0 ? -1 : eventCount - 1;
+    if (noCursor === true) {
+      cursor = undefined;
+    }
+    return cursor;
+  }
+
+  /** 把测试侧的 ledger 蓝图还原成 observation 的事件窗：call + result 各一条，seq 连续。
+   *  生产侧现在从事件窗重放台账，所以夹具必须交事件而不是直接交台账状态。 */
+  function childObservation(id: string): {
+    events: unknown[];
+    inheritedEventCount: number;
+    header: unknown;
+    cursor: number;
+    projections?: { values: Record<string, unknown> };
+    [Symbol.dispose]: () => void;
+  } {
+    const session = childSessions.get(id) as
+      | {
+          header: unknown;
+          inheritedEventCount: number;
+          seq: number;
+          projectedCwd?: string;
+          projectionMode?: "none";
+          noCursor?: true;
+        }
+      | undefined;
+    if (session === undefined) {
+      throw new Error(`child session ${id} not found`);
+    }
+    const ledger = ledgers.get(id) as
+      | {
+          edits: {
+            seq: number;
+            callId: string;
+            name: string;
+            path: string;
+            outcome: "ok" | "rejected" | "aborted" | "failed";
+          }[];
+          workspaceCwd?: string;
+        }
+      | undefined;
+    const events: unknown[] = [];
+    if (ledger?.workspaceCwd !== undefined) {
+      events.push({ type: "workspace-root/change", seq: 0, data: { cwd: ledger.workspaceCwd } });
+    }
+    for (const entry of ledger?.edits ?? []) {
+      events.push({
+        type: "tool/call",
+        seq: entry.seq,
+        data: {
+          name: entry.name,
+          arguments: JSON.stringify({ file_path: entry.path }),
+          callId: entry.callId,
+        },
+      });
+      let error: { name: string; code: string } | undefined;
+      if (entry.outcome === "rejected") {
+        error = { name: "ApprovalError", code: "APPROVAL_REJECTED" };
+      } else if (entry.outcome === "aborted") {
+        error = { name: "AbortError", code: "ABORTED" };
+      } else if (entry.outcome === "failed") {
+        error = { name: "Error", code: "TOOL_FAILED" };
+      }
+      events.push({
+        type: TOOL_RESULT_EVENT,
+        seq: entry.seq + 1,
+        data: {
+          message: {
+            source: { callId: entry.callId },
+            isError: entry.outcome !== "ok",
+          },
+          ...(error === undefined ? {} : { error }),
+        },
+      });
+    }
+    const header = session.header as { cwd?: string } | undefined;
+    return {
+      events,
+      inheritedEventCount: session.inheritedEventCount,
+      header: session.header,
+      // 旧宿主会整个省掉 cursor 键；官方类型却写成必填 number。夹具按运行期事实交 undefined，
+      // 并用 `!` 穿过类型——被测的正是这条「读不到游标时不推进」的回落。
+      cursor: cursorOfFixture(session.noCursor, events.length)!,
+      ...(session.projectionMode === "none"
+        ? {}
+        : { projections: { values: { workingDirectory: session.projectedCwd ?? header?.cwd } } }),
+      [Symbol.dispose]: noopDispose,
+    };
+  }
+
+  /** 挂 Team 相关的三个服务 + 台账投影，然后装载插件。 */
+  function arm(): void {
+    ctx.subagents = { listDescendants: async () => members };
+    ctx.agents = { list: () => live };
+    ctx.sessionQuery = {
+      observeSession: async (id: string) => childObservation(id),
+    };
+    ctx.sessionProjections = {
+      register: async () => ({
+        stateOf: (session: unknown) => {
+          const state = ledgers.get((session as { id: string }).id);
+          return state === undefined ? undefined : { cwd: project, ...state };
+        },
+        dispose: () => Promise.resolve(),
+      }),
+      stateOf: () => null,
+    };
+    applyGate(ctx, ctx.value);
+  }
+
   it("队友仍在执行 → 推迟本轮门禁，且不丢文件；队友停下后下一回合补跑", async () => {
     members = [{ kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: "running" }];
     live = [{ id: "s-child", status: "running" }];
     ledgers.set("s-root", {
       edits: [
-        { seq: 0, callId: "c1", name: "edit", path: path.join(project, "a.ts"), outcome: "ok" },
+        {
+          seq: 0,
+          callId: "c1",
+          name: "edit",
+          path: path.join(project, "a.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
       ],
     });
     arm();
@@ -2399,7 +2571,7 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
       seq: 1,
     });
     ledgers.set("s-child", {
-      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", cwd: "", outcome: "ok" }],
     });
     ctx.gateExitCode = 1;
     arm();
@@ -2410,6 +2582,114 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     assert.equal(ctx.shellCommands[0]?.workdir, project);
     const message = ctx.followupCalls[0] as { content: { text: string }[] };
     assert.match(message.content[0]!.text, /reviewer/u, "注入文案要点出改过该根的具名子代理");
+  });
+
+  it("子代理 header 缺 cwd：工作目录投影负责解析", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: {},
+      seq: 1,
+      projectedCwd: project,
+    });
+    ledgers.set("s-child", {
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    ledgers.set("s-root", {
+      edits: [
+        {
+          seq: 0,
+          callId: "r1",
+          name: "edit",
+          path: path.join(project, "a.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
+      ],
+    });
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+  });
+
+  it("子代理 header 缺 cwd：工作目录投影负责解析，条目 cwd 优先于快照", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 2,
+      projectedCwd: project,
+    });
+    ledgers.set("s-child", {
+      workspaceCwd: project,
+      edits: [{ seq: 1, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    ledgers.set("s-root", {
+      edits: [
+        {
+          seq: 0,
+          callId: "r1",
+          name: "edit",
+          path: path.join(project, "a.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
+      ],
+    });
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+  });
+
+  it("子代理 header 与工作目录投影都缺 cwd、cursor 也缺席：不编造目录与 end", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: null,
+      seq: 1,
+      projectionMode: "none",
+      noCursor: true,
+    });
+    ledgers.set("s-child", {
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+    });
+    ledgers.set("s-root", {
+      edits: [
+        {
+          seq: 0,
+          callId: "r1",
+          name: "edit",
+          path: path.join(project, "a.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
+      ],
+    });
+    ctx.gateExitCode = 1;
+    arm();
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "根会话自己的编辑照常触发门禁");
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
   });
 
   it("子代理被拒绝的编辑不参与门禁；已派发中止的编辑参与", async () => {
@@ -2436,10 +2716,10 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
       seq: 1,
     });
     ledgers.set(REJECTED_CHILD_ID, {
-      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "rejected" }],
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", cwd: "", outcome: "rejected" }],
     });
     ledgers.set("s-aborted", {
-      edits: [{ seq: 0, callId: "c2", name: "edit", path: "a.ts", outcome: "aborted" }],
+      edits: [{ seq: 0, callId: "c2", name: "edit", path: "a.ts", cwd: "", outcome: "aborted" }],
     });
     ctx.gateExitCode = 1;
     arm();
@@ -2465,8 +2745,8 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     });
     ledgers.set("s-child", {
       edits: [
-        { seq: 1, callId: "inherited", name: "edit", path: "inherited.ts", outcome: "ok" },
-        { seq: 3, callId: "own", name: "edit", path: "a.ts", outcome: "ok" },
+        { seq: 1, callId: "inherited", name: "edit", path: "inherited.ts", cwd: "", outcome: "ok" },
+        { seq: 3, callId: "own", name: "edit", path: "a.ts", cwd: "", outcome: "ok" },
       ],
     });
     arm();
@@ -2494,8 +2774,15 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     });
     ledgers.set("s-child", {
       edits: [
-        { seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" },
-        { seq: 1, callId: "c2", name: "edit", path: path.join(orphan, "b.ts"), outcome: "ok" },
+        { seq: 0, callId: "c1", name: "edit", path: "a.ts", cwd: "", outcome: "ok" },
+        {
+          seq: 1,
+          callId: "c2",
+          name: "edit",
+          path: path.join(orphan, "b.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
       ],
     });
     arm();
@@ -2517,7 +2804,7 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
       seq: 1,
     });
     ledgers.set("s-child", {
-      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", cwd: "", outcome: "ok" }],
     });
     ctx.gateExitCode = 1;
     arm();
@@ -2538,12 +2825,22 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     ctx.agents = { list: () => [] };
     ledgers.set("s-root", {
       edits: [
-        { seq: 0, callId: "c1", name: "edit", path: path.join(project, "a.ts"), outcome: "ok" },
+        {
+          seq: 0,
+          callId: "c1",
+          name: "edit",
+          path: path.join(project, "a.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
       ],
     });
     ctx.sessionProjections = {
       register: async () => ({
-        stateOf: (session: unknown) => ledgers.get((session as { id: string }).id),
+        stateOf: (session: unknown) => {
+          const state = ledgers.get((session as { id: string }).id);
+          return state === undefined ? undefined : { cwd: project, ...state };
+        },
         dispose: () => Promise.resolve(),
       }),
       stateOf: () => null,
@@ -2564,6 +2861,49 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     assert.equal(ctx.shellCommands.length, 1, "根会话自己的编辑仍要过门禁");
   });
 
+  it("没有 sessionQuery 服务 → 子代理台账不聚合，根会话自己的编辑照常过门禁", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [];
+    ledgers.set("s-root", {
+      edits: [
+        {
+          seq: 0,
+          callId: "r1",
+          name: "edit",
+          path: path.join(project, "a.ts"),
+          cwd: "",
+          outcome: "ok",
+        },
+      ],
+    });
+    ctx.subagents = { listDescendants: async () => members };
+    ctx.agents = { list: () => live };
+    // 根会话读取（第一次 get）还有事件窗服务；轮到聚合子代理台账时服务已退场。
+    // 这能把「query 在两步之间消失」的退场分支走到，而不是靠删掉整个服务让根读取先退。
+    const get = ctx.get.bind(ctx);
+    let queryGets = 0;
+    ctx.get = (name: string): unknown =>
+      name === "sessionQuery" && (queryGets += 1) > 1 ? undefined : get(name);
+    ctx.sessionProjections = {
+      register: async () => ({
+        stateOf: (session: unknown) => {
+          const state = ledgers.get((session as { id: string }).id);
+          return state === undefined ? undefined : { cwd: project, ...state };
+        },
+        dispose: () => Promise.resolve(),
+      }),
+      stateOf: () => null,
+    };
+    applyGate(ctx, ctx.value);
+    await sleep(0);
+    fireRootTurn(ctx, { cwd: project, seq: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "子代理聚合退场不应拖住根会话门禁");
+    assert.equal(ctx.shellCommands[0]?.workdir, project);
+  });
+
   it("没有 agents 服务 → 不聚合也不推迟，只警告一次", async () => {
     members = [
       { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
@@ -2575,12 +2915,15 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
       seq: 1,
     });
     ledgers.set("s-child", {
-      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", outcome: "ok" }],
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", cwd: "", outcome: "ok" }],
     });
     ctx.subagents = { listDescendants: async () => members };
     ctx.sessionProjections = {
       register: async () => ({
-        stateOf: (session: unknown) => ledgers.get((session as { id: string }).id),
+        stateOf: (session: unknown) => {
+          const state = ledgers.get((session as { id: string }).id);
+          return state === undefined ? undefined : { cwd: project, ...state };
+        },
         dispose: () => Promise.resolve(),
       }),
       stateOf: () => null,
@@ -2620,19 +2963,16 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
       seq: 1,
     });
     ledgers.set("s-good", {
-      edits: [{ seq: 0, callId: "c2", name: "edit", path: "a.ts", outcome: "ok" }],
+      edits: [{ seq: 0, callId: "c2", name: "edit", path: "a.ts", cwd: "", outcome: "ok" }],
     });
     arm();
     await sleep(0);
-    const original = ctx.sessionQuery!.inspectSession!;
-    ctx.sessionQuery!.inspectSession = async <Result>(
-      id: string,
-      read: (session: unknown) => Result,
-    ) => {
+    const original = ctx.sessionQuery!.observeSession;
+    ctx.sessionQuery!.observeSession = async (id: string) => {
       if (id === "s-bad") {
         throw new Error("cold read failed");
       }
-      return original(id, read);
+      return original(id);
     };
     const warns = await collectWarns(async () => {
       fireRootTurn(ctx, { cwd: project, seq: 0 });
@@ -2650,7 +2990,7 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     live = [];
     arm();
     await sleep(0);
-    ctx.sessionQuery!.inspectSession = async () => {
+    ctx.sessionQuery!.observeSession = async () => {
       throw new Error("cold read failed");
     };
     const warns = await collectWarns(async () => {

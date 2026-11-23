@@ -515,8 +515,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     expect(manifest.engines?.["dsh"], "engines.dsh 必须与 peer 同一份范围，不能各说各话").toBe(
       peer,
     );
-    // 运行时底线取宿主发布线的那一档：宿主自 0.2.2-alpha.2 起声明 `>=24.9.0`，插件声明得比宿主
-    // 还低等于承诺一个宿主起不来的执行环境。
+    // 运行时底线取宿主发布线的那一档：宿主自 0.2.3-alpha.2 起声明 `^24.22.3 || >=26.13.1`，插件
+    // 声明得比宿主还低等于承诺一个宿主起不来的执行环境。
     const node = manifest.engines?.["node"] ?? "";
     const floor = /(?<major>\d+)\.(?<minor>\d+)/u.exec(node);
     expect(
@@ -526,8 +526,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     const major = Number(floor?.groups?.["major"] ?? "0");
     const minor = Number(floor?.groups?.["minor"] ?? "0");
     expect(
-      major > 24 || (major === 24 && minor >= 9),
-      `engines.node 低于宿主发布线 24.9：${node}`,
+      major > 24 || (major === 24 && minor >= 22),
+      `engines.node 低于宿主发布线 24.22.3：${node}`,
     ).toBe(true);
   });
 });

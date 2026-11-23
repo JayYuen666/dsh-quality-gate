@@ -5,6 +5,10 @@
 版本标题不写发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需
 增设标准六类之外的小节（如 `Tests`、`Not changed, deliberately`）。
 
+## 0.1.13
+
+宿主基线切到 `dsh 0.2.3-alpha.2`（Node `^24.22.3 || >=26.13.1`），shared 经 catalog 抬到 `^0.2.13`。编辑台账升到 `stateVersion: 3`：每条记录必填 `cwd`，按条目解析；`ChildLedgerSnapshot.entries` 改为必填，新增活目录 `WorkingDirectoryFace` 与子代理 cwd 用例。设置卡随 shared v3 视觉层更新，并新增 `QgPanelSection` 会话面板段（id `quality-gate-status`，order 120）；客户端槽位与产物预算测试同步。
+
 ## 0.1.12
 
 宿主基线抬到 `0.2.2-rc.5`：devDependencies 全族精确钉 rc.5，`engines.dsh` 与 dsh 家族 peer 同一条窗口，两份 README 的支持窗口徽章同步。devDependencies 补 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/dsh-tool-executor-ptc`——shared `./lib/tool-events` 的声明（PTC 两个载荷的官方增补与失败身份的官方真源）在本包的类型检查里解析到它们。shared 经 catalog 抬到 `^0.2.12`，`pnpm-lock.yaml` 经 `pnpm install --lockfile-only` 重解到 registry 现量；devDependencies 另补 `react-dom`（`^19.3.0`，与 react 相邻）——shared 0.2.12 的 card-ui 经 `createPortal` 引 `react-dom`，本包客户端测试经 ESM 链解析到它（与 danger-guard / dir-prep / session-rescue 的既有供应同形）。规则、门禁与默认配置不变。

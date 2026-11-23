@@ -41,6 +41,8 @@ export interface UiMessages {
   readonly fieldCount: string;
   /** 记忆反馈小节标题。 */
   readonly memorySection: string;
+  /** 记忆反馈小节头右侧的开关文案。 */
+  readonly memoryFeedbackLabel: string;
   /** 配额单位。 */
   readonly unitTimes: string;
   /** 时长单位。 */
@@ -48,6 +50,9 @@ export interface UiMessages {
   /** 保存条脏状态（{count} 为改动条数）。 */
   readonly dirtyCount: string;
   readonly enabledLabel: string;
+  /** 会话侧栏小节的开关状态词。 */
+  readonly panelOn: string;
+  readonly panelOff: string;
   readonly enabledHint: string;
   readonly injectsLabel: string;
   readonly injectsHint: string;
@@ -124,10 +129,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     gateSection: "门禁",
     fieldCount: "{count} 字段",
     memorySection: "记忆反馈",
+    memoryFeedbackLabel: "启用记忆反馈",
     unitTimes: "次",
     unitSeconds: "秒",
     dirtyCount: "已修改 {count} 项",
     enabledLabel: "启用质量门禁",
+    panelOn: "已启用",
+    panelOff: "已关闭",
     enabledHint: "关闭后回合收口不再跑门禁（模型可带病收口）",
     injectsLabel: "每会话注入配额",
     injectsHint: "门禁失败后最多注入几次修复指令；配额按会话累计，门禁通过后重置",
@@ -162,10 +170,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     gateSection: "Gate",
     fieldCount: "{count} fields",
     memorySection: "Memory feedback",
+    memoryFeedbackLabel: "Enable memory feedback",
     unitTimes: "times",
     unitSeconds: "seconds",
     dirtyCount: "{count} changed",
     enabledLabel: "Enable the quality gate",
+    panelOn: "Enabled",
+    panelOff: "Off",
     enabledHint: "When off: no gate runs at turn end (the model may close a turn with broken code)",
     injectsLabel: "Repair injections per session",
     injectsHint:

@@ -400,7 +400,7 @@ describe("卡片 apply 怎么接上官方 locale", () => {
       [patchEntryId()],
       "只取本条目那张共享表单（裸条目 id），且只取一次",
     );
-    assert.deepEqual(trace.slots, ["plugins.bundle.config"]);
+    assert.deepEqual(trace.slots, ["conversation.session.panel.section", "plugins.bundle.config"]);
     // 只按 label 断言本包关心的 effect 存在，不按 effect 总数设限：新增样式或清理用的 effect 是允许的。
     const localeEffect = trace.effects.get(LOCALE_EFFECT_LABEL);
     assert.ok(localeEffect !== undefined, "locale 文案的 effect 已登记");
@@ -466,8 +466,10 @@ describe("卡片 apply 怎么接上官方 locale", () => {
     // slot 的清理回调：只注销登记，**绝不 dispose 表单**——0.1.7 的 ConfigForm 声明里没有
     // dispose（见 config-form-types.d.ts 的 ConfigForm），表单归 provider 长期持有；销毁它正是
     // 旧 settingsScope 那个「收起插件页后每次保存都被静默丢掉」的缺陷来源。
-    assert.equal(trace.slotCleanups.length, 1);
-    trace.slotCleanups[0]?.();
+    assert.equal(trace.slotCleanups.length, 2, "设置卡与会话侧栏两个槽各交回一枚 disposer");
+    for (const cleanup of trace.slotCleanups) {
+      cleanup();
+    }
     assert.deepEqual(trace.disposeCalls, [], "disposer 不得销毁 provider 持有的共享表单");
   });
 

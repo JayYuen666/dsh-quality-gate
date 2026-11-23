@@ -84,6 +84,7 @@ import type { Session, SessionId, SessionLogOffset } from "@deepseek-ai/dsh-sess
 // lib/types/index.d.ts:23-27）：type-only，运行时由 ctx 注入。见下面 SessionQueryFace。
 import type { SessionObservation } from "@deepseek-ai/dsh-session-query";
 import type { Agent } from "@deepseek-ai/dsh-agent";
+import type { WorkingDirectoryService } from "@deepseek-ai/dsh-working-directory";
 import { EDIT_TOOLS, EditAccumulator } from "./lib/accumulator.ts";
 import { detectGate } from "./lib/gate-detect.ts";
 import type { Gate, ProjectRoot } from "./lib/gate-detect.ts";
@@ -109,8 +110,14 @@ import {
 } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 import type { SessionEvent, ToolCallRecord } from "@jayyuen66/dsh-plugin-shared/lib/tool-events";
 // 编辑语义（成功/被拒绝/已派发中止/普通失败）只有一处实现：投影与回合扫描共用。
-import { countsAsEdit, editOutcomeOf } from "./lib/edit-ledger.ts";
-import type { EditLedgerEntry, EditOutcome } from "./lib/edit-ledger.ts";
+import {
+  countsAsEdit,
+  editLedgerProjection,
+  editOutcomeOf,
+  type EditLedgerEntry,
+  type EditLedgerState,
+  type EditOutcome,
+} from "./lib/edit-ledger.ts";
 // lesson bus 的失败处理：lesson-loop 的 report 是异步写库的（返回 Promise），只包一层同步
 // try/catch 抓不到 rejection——失败既没有任何记录，又给宿主进程留下一个未处理的拒绝。
 // 同步抛错和异步拒绝共用这一个返回点（三个包调用它时的失败处理做法一致）。
@@ -173,33 +180,25 @@ const MANIFESTS = [
  *  `SessionObservation extends Disposable`，冷读返回的是 prepared lease，它按引用计数固定住
  *  上游缓存条目，refs 归零之后才允许被容量驱逐。窄接口不收这个字段，就等于认定"上游不需要释放"——
  *  漏释放就是这么来的。 */
-type SessionObservationFace = Pick<SessionObservation, "events" | keyof Disposable> & {
+type SessionObservationFace = Pick<
+  SessionObservation,
+  "events" | "header" | "cursor" | "projections" | keyof Disposable
+> & {
   readonly inheritedEventCount: SessionLogOffset | undefined;
 };
 
 /** `options` 在本地接口上是**必填**的：官方的默认值是 `projectionMode: "all"`
  *  （installed @deepseek-ai/dsh-session-query/lib/index.js 的 `projectionMode = "all"`），
  *  那会让宿主为整份日志把所有投影都算一遍 snapshot，而本包只读 events 和 inheritedEventCount。
- *  写成必填，是为了不给"少传一次就白算一遍"留下可用的默认值。 */
+ *  写成必填，是为了不给"少传一次就白算一遍"留下可用的默认值。
+ *
+ *  子代理台账读取需要 `projectionMode: "all"`：`workingDirectory` 是带 `wire` 的投影，
+ *  而根会话事件窗不需要任何投影。两种读取点必须显式给出自己的选择。 */
 interface SessionQueryFace {
   observeSession: (
     sessionId: SessionId,
-    options: { readonly projectionMode: "none" },
+    options: { readonly projectionMode: "none" | "all" },
   ) => Promise<SessionObservationFace>;
-  /**
-   * 官方 rc.2 的 `inspectSession(sessionId, read, signal?)`：准备冷会话（不发布、不恢复），
-   * 在当次截面上**同步**调用领域读取函数，返回后立即释放观察。
-   *
-   * 本包只用它读**自己拥有的投影**（编辑台账）与 header——这正是官方文档给它的用途
-   * （"typically an owned projection or policy resolver"）。读取函数里不碰任意历史事件：
-   * 官方的 Agent Note 同时把 `snapshotEvents` / `eventAt` / `ownEvents` 标成"new calls are
-   * prohibited"，所以子代理的事件窗仍然走 `observeSession`，只有台账/header 走这里。
-   * `session` 在本地按 unknown 收（测试替身不是真实的 Session 类），读取函数内部逐字段校验。
-   */
-  inspectSession: <Result>(
-    sessionId: SessionId,
-    read: (session: unknown) => Result,
-  ) => Promise<Result>;
 }
 
 /** 本插件 followup 注入消息的 producer-owned source.kind（和 session-rescue 的
@@ -258,6 +257,8 @@ interface InboxQueues {
 }
 
 type TurnAgent = Pick<Agent, "session" | "status"> & {
+  /** 官方 Agent 的插件上下文：只用来读 `workingDirectory` 服务（替身可以缺席）。 */
+  ctx?: Agent["ctx"];
   inbox: InboxQueues;
   followup: (message: FollowupMessage) => void;
 };
@@ -1806,6 +1807,33 @@ function noteLedgerEdits(
  * Session.inheritedEventCount（0.1.2-rc.1 起公开的只读属性）给出 fork 的位置——首读的下限
  * 取这个位置而不是 0，父会话的前缀自然跳过；属性缺失时退回 0（和旧行为一样，保守地不漏门禁）。
  */
+/** 官方工作目录服务的最小读取形状（`WorkingDirectoryService.get(session)` 同步、无 fs I/O）。 */
+interface WorkingDirectoryFace {
+  get?: WorkingDirectoryService["get"];
+}
+
+function isWorkingDirectory(value: unknown): value is WorkingDirectoryFace {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return value["get"] === undefined || typeof value["get"] === "function";
+}
+
+/** 会话**当前**工作目录：`ctx.workingDirectory.get(session)` 优先，服务缺席或给不出非空串时
+ *  回落 `session.header.cwd`（创建期快照）。`header.cwd` 在换目录后仍是建会话时的旧值，门禁的
+ *  相对路径解析、记忆归属与总线载荷都必须用活目录。 */
+function liveSessionCwdOf(agent: TurnAgent): string | undefined {
+  const service: unknown = agent.ctx?.get("workingDirectory");
+  if (isWorkingDirectory(service)) {
+    const live: unknown = service.get?.(agent.session);
+    if (typeof live === "string" && live.length > 0) {
+      return live;
+    }
+  }
+  const raw: unknown = agent.session.header.cwd;
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
+
 async function readEditedFiles(
   rt: GateRuntime,
   agent: TurnAgent,
@@ -1826,7 +1854,7 @@ async function readEditedFiles(
     }
     return;
   }
-  const { cwd } = session.header;
+  const cwd = liveSessionCwdOf(agent);
   const note = (name: string, pathValue: string | undefined): void => {
     noteEdit(acc, cwd, name, pathValue);
   };
@@ -1858,36 +1886,53 @@ async function readEditedFiles(
   }
 }
 
-/** inspectSession 的读取函数交出的子代理台账快照：台账本体、继承前缀长度、cwd 与日志末尾。
- *  全部在同步 getter 里读完，出参是脱离 Session 的普通值（官方要求 getter 不得保留 Session）。 */
+/** 子代理台账快照：台账本体、继承前缀长度、cwd 与日志末尾。
+ *  全部从一次 observation 的不可变切面读出，出参是脱离 Session 的普通值。 */
 interface ChildLedgerSnapshot {
-  readonly entries: readonly EditLedgerEntry[] | undefined;
+  readonly entries: readonly EditLedgerEntry[];
   readonly inherited: number;
   readonly cwd: string | undefined;
   readonly end: number | undefined;
 }
 
 /**
- * 在 inspectSession 的同步 getter 里读一次子代理的编辑台账与解析相对路径要用的 header。
- * 字段逐个校验：`inspectSession` 的 Session 在本地按 unknown 收（测试替身不是真实类），
- * 而投影读取函数自己已经对状态做过 schema 校验。
- * @param reader - 本包的编辑台账读取函数
- * @param session - inspectSession 交来的 Session（不保留、不修改）
- * @returns 脱离 Session 的快照
+ * 从 observation 的不可变事件窗重放本包自己的编辑台账。
+ *
+ * `editLedgerProjection` 是 host-only 投影（没有 `wire`），`ProjectionSnapshot.snapshot()`
+ * 只收集带 `wire` 的投影，所以不能从 `projections.values[EDIT_LEDGER_KEY]` 读。这里按官方
+ * 的同一套 `init/apply` 折叠规则在本地重放：fork 前缀不重放，剩余事件逐条交给投影。
+ * `workingDirectory` 是带 `wire` 的投影，优先读它；缺失时回落 header.cwd（创建期快照）。
+ * @param observation - `observeSession(id, { projectionMode: "all" })` 的切面
+ * @returns 脱离 observation 的普通值
  */
-function childLedgerSnapshot(reader: EditLedgerReader, session: unknown): ChildLedgerSnapshot {
-  const inherited = fieldOf(session, "inheritedEventCount");
-  const end = fieldOf(session, "seq");
-  const header = fieldOf(session, "header");
-  const cwd = isRecord(header) ? header["cwd"] : undefined;
+function childLedgerSnapshot(observation: SessionObservationFace): ChildLedgerSnapshot {
+  const inherited = observation.inheritedEventCount ?? 0;
+  const headerCwd = isRecord(observation.header) ? observation.header.cwd : undefined;
+  let state: EditLedgerState = {
+    cwd: typeof headerCwd === "string" ? headerCwd : "",
+    edits: [],
+  };
+  for (const event of observation.events) {
+    const seq = fieldOf(event, "seq");
+    if (typeof seq === "number" && seq >= inherited) {
+      state = editLedgerProjection.apply(state, event);
+    }
+  }
+  const projectedCwd: unknown =
+    observation.projections === undefined
+      ? undefined
+      : Reflect.get(observation.projections.values, "workingDirectory");
+  let cwd: unknown = state.cwd;
+  if (cwd === "") {
+    cwd = typeof projectedCwd === "string" ? projectedCwd : headerCwd;
+  }
   return {
-    entries: reader(session),
-    inherited: typeof inherited === "number" ? inherited : 0,
+    entries: state.edits,
+    inherited,
     cwd: typeof cwd === "string" ? cwd : undefined,
-    end: typeof end === "number" ? end : undefined,
+    end: typeof observation.cursor === "number" ? observation.cursor + 1 : undefined,
   };
 }
-
 /** 子代理台账聚合的结果：是否因为队友在跑而推迟本轮门禁，以及"文件 → 改过它的子代理名"。 */
 interface TeamEdits {
   readonly deferred: boolean;
@@ -2016,13 +2061,15 @@ function absorbChildLedger(
     rt.lastSeqBySession.get(member.id) ?? snapshot.inherited,
   );
   let covered = from;
-  for (const entry of snapshot.entries ?? []) {
+  for (const entry of snapshot.entries) {
     covered = Math.max(covered, entry.seq + 1);
     if (entry.seq >= from && countsAsEdit(entry.outcome) && entry.path !== "") {
-      // 相对路径按**子代理自己的 cwd** 解析（团队不建隔离工作区，但成员的 cwd 仍可能更深）。
+      // 相对路径按**该编辑发生时会话的 cwd** 解析：条目自带的 cwd 比快照级 cwd 更准
+      // （子代理可能在同一回合里换过目录）；条目没有记录时回落快照级值。
+      const entryCwd = entry.cwd === "" ? snapshot.cwd : entry.cwd;
       const resolved =
-        snapshot.cwd !== undefined && !path.isAbsolute(entry.path)
-          ? path.resolve(snapshot.cwd, entry.path)
+        entryCwd !== undefined && !path.isAbsolute(entry.path)
+          ? path.resolve(entryCwd, entry.path)
           : entry.path;
       note(entry.name, resolved);
       const names = namesByPath.get(resolved) ?? new Set<string>();
@@ -2071,8 +2118,8 @@ async function listTeamMembers(
 }
 
 /**
- * 决定本轮门禁是推迟还是聚合队友台账：队友在跑 → 推迟；否则经 `inspectSession` 读各自的
- * 编辑台账投影（按游标增量）并记下归因。任何一次读失败只让那一份退场。
+ * 决定本轮门禁是推迟还是聚合队友台账：队友在跑 → 推迟；否则经 `observeSession` 读各自的
+ * 编辑台账事件窗（按游标增量重放）并记下归因。任何一次读失败只让那一份退场。
  */
 async function mergeTeamLedgers(
   rt: GateRuntime,
@@ -2098,19 +2145,18 @@ async function mergeTeamLedgers(
     return { deferred: true, namesByPath: new Map() };
   }
   const query = rt.svc.get("sessionQuery");
-  const reader = rt.editLedger.value;
-  if (query === undefined || reader === undefined) {
-    // 没有可读的台账就不聚合：`observeSession` 能给事件窗，但子代理的事件窗不是本包的
-    // 领域状态（见 SessionQueryFace 的说明），退回全量扫描会让根会话的游标语义分叉。
+  if (query === undefined) {
+    // 没有 query 服务就不聚合：子代理的事件窗不是本包的领域状态，退回全量扫描会让根会话
+    // 的游标语义分叉。
     return NO_TEAM_EDITS;
   }
   const namesByPath = new Map<string, Set<string>>();
   await Promise.all(
     members.map(async (member) => {
+      let observation: SessionObservationFace | undefined;
       try {
-        const snapshot = await query.inspectSession(member.id, (childSession) =>
-          childLedgerSnapshot(reader, childSession),
-        );
+        observation = await query.observeSession(member.id, { projectionMode: "all" });
+        const snapshot = childLedgerSnapshot(observation);
         absorbChildLedger(rt, member, snapshot, note, namesByPath);
       } catch (error) {
         if (!rt.teamReadWarned) {
@@ -2118,6 +2164,12 @@ async function mergeTeamLedgers(
           rt.log.warn(
             `[quality-gate] teammate edit read failed; its files are not aggregated: ${messageOf(error)}`,
           );
+        }
+      } finally {
+        try {
+          observation?.[Symbol.dispose]();
+        } catch {
+          // 释放失败不改变本次读取的结论。
         }
       }
     }),
@@ -2131,9 +2183,9 @@ async function mergeTeamLedgers(
  *  2. 有队友正在执行回合 → **推迟**本轮门禁，不 drain 累加器：工作树正被并发写，此时检查
  *     只会产出假失败，注入的修复指令还会和队友的改动赛跑；队友完成后会给根会话发消息、
  *     开新回合，那时再检查；
- *  3. 其余（空闲/冷）子代理：经 `sessionQuery.inspectSession` 读**本包自己的编辑台账投影**，
- *     按各自的游标增量并入累加器。`inspectSession` 只准备冷会话、读取后立即释放，不 attach、
- *     不恢复 Agent——这正是 rc.2 为"读领域自有状态"给出的入口；
+ *  3. 其余（空闲/冷）子代理：经 `sessionQuery.observeSession(id, { projectionMode: "all" })`
+ *     取得不可变事件窗与 `workingDirectory` 投影，本地重放**本包自己的编辑台账**，按各自的
+ *     游标增量并入累加器；observation 用完立即 `Symbol.dispose()`，不 attach、不恢复 Agent；
  *  4. 记下文件 → 子代理名的归因，供门禁失败时在注入文案里点名（见 handleGateFailure）。
  *
  * 任何一步不可用都只让"聚合子代理编辑"这一项退场，根会话自己的门禁照旧：
@@ -2190,7 +2242,8 @@ interface TurnScope {
   messages: QualityGateMessages;
   sessionId: string;
   turn: number;
-  /** 会话的 cwd（turn-stopping 载荷里的 header.cwd）：相对路径的解析基准，也是记忆和总线的归属信息。 */
+  /** 会话的**项目** cwd（`session.header.cwd` 的建会话快照）：只用于记忆与总线的项目归属。
+   *  相对路径解析与门禁工作目录走的是活目录，见 handleTurnGate 里的 `resolveCwd`。 */
   cwd: string | undefined;
   /** 这个 turn 自己的取消信号（载荷里可能没有，没有时门禁只随 dispose abort 终止）。 */
   signal: AbortSignal | undefined;
@@ -2517,8 +2570,13 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   const messages = rt.messages();
   const { session } = agent;
   const { id: sessionId } = session;
-  /** 会话的 cwd（turn-stopping 载荷里的 header.cwd）：相对路径的解析基准，也是记忆和总线的归属信息。 */
-  const { cwd } = session.header;
+  /** 会话的**项目** cwd：记忆与总线的归属用建会话快照，worktree 仍属于同一个原始项目。 */
+  const projectCwd =
+    typeof session.header.cwd === "string" && session.header.cwd.length > 0
+      ? session.header.cwd
+      : undefined;
+  /** 相对路径解析与门禁工作目录用**活目录**（`workingDirectory` 投影，服务缺席回落 header）。 */
+  const resolveCwd = liveSessionCwdOf(agent);
   // turn-stopping 时 agent.status 一直是 'running'（官方在 running 阶段内 serial
   // 分发 turn-stopping，转到 idle 发生在回合结束之后）。旧的 `status !== 'idle' → return`
   // 让门禁在真实宿主里永远不执行（测试 mock 了 status:'idle'，把这个 bug 盖住了）。只用数据信号判断：
@@ -2556,9 +2614,9 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
     return;
   }
   // 具名子代理的编辑也属于这棵工作树（Team 不建隔离工作区）：队友还在跑就推迟本轮门禁，
-  // 否则检查的是正在被并发改写的树；空闲/冷队友的台账经 inspectSession 增量并入。
+  // 否则检查的是正在被并发改写的树；空闲/冷队友的台账经 observeSession 事件窗增量重放并入。
   const note = (name: string, pathValue: string | undefined): void => {
-    noteEdit(acc, cwd, name, pathValue);
+    noteEdit(acc, resolveCwd, name, pathValue);
   };
   const team = await collectTeamEdits(rt, session, note, payload.signal);
   if (runtimeDisposed(rt) || team.deferred) {
@@ -2566,7 +2624,7 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
     return;
   }
   scheduleTurnGates(
-    { rt, agent, cfg, messages, sessionId, turn, cwd, signal: payload.signal },
+    { rt, agent, cfg, messages, sessionId, turn, cwd: projectCwd, signal: payload.signal },
     shell,
     acc,
     team,
