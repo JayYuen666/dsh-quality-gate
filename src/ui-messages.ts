@@ -58,6 +58,23 @@ export interface UiMessages {
   readonly injectsHint: string;
   readonly budgetLabel: string;
   readonly budgetHint: string;
+  /** 额外门禁脚本（逗号分隔，只认根 package.json 真声明过的名字）。 */
+  readonly scriptsLabel: string;
+  readonly scriptsHint: string;
+  /** 可选供应链扫描开关。 */
+  readonly securityLabel: string;
+  readonly securityHint: string;
+  /** 会话侧栏：本会话最近一条门禁结果（状态 + 命令）。 */
+  readonly lastGateLabel: string;
+  readonly lastGateCommandLabel: string;
+  readonly gateNone: string;
+  readonly gatePass: string;
+  readonly gateFail: string;
+  readonly gateNotRun: string;
+  /** 右键菜单项：立即跑一次门禁。 */
+  readonly runNowLabel: string;
+  /** 右键菜单执行失败时的可见提示（忙 / 未启用 / 没有门禁都落这里）。 */
+  readonly runFailedLabel: string;
   readonly memoryLabel: string;
   readonly memoryHint: string;
   readonly gatewayUrlLabel: string;
@@ -142,6 +159,20 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     budgetLabel: "门禁总预算",
     budgetHint:
       "一次回合内所有门禁共享的总耗时预算：先跑的先用，只给后面每条留最小可用份额；够长的一次 `pnpm check` 因此不会被均分掐断。超时按「未能执行」注入，不静默放行",
+    scriptsLabel: "额外门禁脚本",
+    scriptsHint:
+      "逗号或空格分隔的脚本名（可空）。只会在根 package.json 真声明过这个名字时执行 `pnpm run <名字>`：用于 `check:all` 这类项目自己的聚合检查；未声明的名字被忽略，绝不替项目编命令",
+    securityLabel: "启用供应链扫描",
+    securityHint:
+      "默认关闭。打开后按锁文件追加依赖漏洞扫描（npm audit、pnpm audit、cargo audit、composer audit、govulncheck、pip-audit、bundler-audit），需要联网且工具已安装；缺工具按“未能执行”处理，不自动安装。项目自己的 check 不会因此跳过",
+    lastGateLabel: "最近一次门禁",
+    lastGateCommandLabel: "门禁命令",
+    gateNone: "本会话尚无记录",
+    gatePass: "通过",
+    gateFail: "代码失败",
+    gateNotRun: "未能执行",
+    runNowLabel: "立即跑一次门禁",
+    runFailedLabel: "门禁没有启动：会话正忙、门禁未启用，或当前项目没有可用门禁",
     memoryLabel: "门禁失败沉淀记忆",
     memoryHint:
       "默认关闭。开启后：代码型门禁失败的证据（命令/根/全文报错，不截断）写入记忆网关的 L0 会话层供后续会话召回；总线 lesson-loop 的同步上报不受此开关影响。关闭后只注入不沉淀。投递要求网关地址与凭据引用都可用（见下面两项）",
@@ -184,6 +215,21 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     budgetLabel: "Gate total budget",
     budgetHint:
       'Shared time budget for all gates in one turn: first gate draws first and only the minimum useful share is reserved for those after it, so one long `pnpm check` is never cut short by an even split; a timeout is injected as "could not run", never as a silent pass',
+    scriptsLabel: "Extra gate scripts",
+    scriptsHint:
+      "Comma- or space-separated script names (may be empty). `pnpm run <name>` runs only when the root package.json really declares that name — use it for project-specific aggregate checks such as `check:all`; undeclared names are ignored and no command is invented",
+    securityLabel: "Enable supply-chain audits",
+    securityHint:
+      "Off by default. When on, lockfiles add dependency-vulnerability scans (npm audit, pnpm audit, cargo audit, composer audit, govulncheck, pip-audit, bundler-audit); they need network access and the tool installed. A missing tool is reported as not-run and nothing is installed automatically. A project-declared check still runs",
+    lastGateLabel: "Last gate run",
+    lastGateCommandLabel: "Gate command",
+    gateNone: "No run recorded in this session",
+    gatePass: "Passed",
+    gateFail: "Code failure",
+    gateNotRun: "Could not run",
+    runNowLabel: "Run the gate now",
+    runFailedLabel:
+      "The gate did not start: the session is busy, the gate is disabled, or this project has no usable gate",
     memoryLabel: "Persist gate failures to memory",
     memoryHint:
       "Off by default. When on: the evidence of code-level gate failures (command, root, full error text, untruncated) is written into the memory gateway's L0 session layer so later sessions can recall it; synchronous reporting to the lesson-loop bus is unaffected by this switch. When off, repairs are injected but nothing is persisted. Delivery requires both the gateway URL and the credential ref to be usable (see the two fields below)",

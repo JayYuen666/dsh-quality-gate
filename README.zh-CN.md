@@ -38,7 +38,7 @@
 - [ 确认它在正常工作](#-确认它在正常工作)
 - [ 它不提供什么](#-它不提供什么)
 - [ 在 dsh 里启用](#-在-dsh-里启用)
-- [ 跑哪四条门禁](#-跑哪四条门禁)
+- [ 跑哪些门禁：声明优先，其次九种语言生态](#-跑哪些门禁声明优先其次九种语言生态)
 - [ 设置项](#-设置项)
 - [ 对外接口](#-对外接口)
 - [ 数据与隐私](#-数据与隐私)
@@ -52,7 +52,7 @@
 
 - **回合统一处理，不拦过程。** 判定挂在宿主事件 `agent/turn-stopping`：读本会话**成功的**编辑（具名子代理空闲时其台账按游标并入本回合；仍有队友在执行则推迟本轮）→ 每个文件向上找最近清单根 → 探测门禁 → 执行。失败经 `agent.followup` 注入修复指令；宿主在统一处理之后仍会检查收件箱，于是开新回合接着修。`workspace-write` 下门禁根若在会话活动工作目录之上，会为这一批临时登记该根的写权限，批次结束即释放。
 - **一次检查只有三种结论**：`pass`（真的跑完且 exit 0）、`code-failure`（跑了且报代码错）、`not-run`（没跑成）。一条没真正跑完的检查绝不会被记成通过；"没跑成"和"代码错"也绝不混在一起说——前者注入的是"请手动确认"，不写记忆、也不以 `gate-failure` 报给教训总线。
-- **只跑项目自己声明的命令。** 四条白名单命令按项目根探测后择一，拿不到声明时宁可不给检查命令，也不替项目编一条每次都会失败的命令（判据见「跑哪四条检查」）。
+- **项目声明优先，保守探测兜底。** 根上声明了自己的检查（`check` 脚本、`pnpmScripts` 里点名且真存在的脚本、Makefile 的 `check`/`test` 目标）时只跑那一条；没有声明才由内置探测按语言标记决定命令，同一个根可以有多条，但没有语言自己的配置标记就不发命令。漏一次检查比编一条每次都失败的命令更便宜（判据见「跑哪些门禁」）。
 - **防止无限循环。** 修复注入按会话跨回合计次数，用完就注入一次用户可见的放行说明并停止自动修复；所有检查的总时长有上限，超时按"未执行"注入说明，静默放行是不会发生的。
 - **它不改代码、不拦截危险命令（那是 danger-guard 的职责）、不写任何文件。**
 
@@ -89,7 +89,7 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 找之前先知道这几件事：
 
 - **它不注册任何模型工具。** 整套实现就是一个 `agent/turn-stopping` 事件监听；没有 `gate_status` 这类可以调用的工具。
-- **它没有 HTTP 路由，也没有 Remote 命名空间。** 设置卡直接用官方 `configForms` 表单、经宿主通道写设置——和自带数据接口的其他插件不同，本包的数据只有设置这一项。
+- **它没有 HTTP 路由。** 设置卡直接用官方 `configForms` 表单、经宿主通道写设置。唯一的 Remote 命名空间 `qualityGate` 负责读结果（`latest`、`state`）与给空闲会话手动跑一次门禁（`run`），不经它改设置。会话右键菜单里有这一项；装了 forge 面板时，结果里的行列诊断（tsc/go/cargo/ruff/rubocop/javac/dotnet/clang/PHP/eslint）会以行注解画在 diff 上。
 - **它不加 CLI 子命令。**
 - **它不写文件、不遥测**；唯一的出站请求是设置里明确开启的记忆网关（见「数据与隐私」）。
 - 它**可选**使用的东西：`lessonLoop` 总线（教训上报）、`credentials`（密钥解析）、`sandboxPolicy`（按会话解析策略）、`sessionQuery`（读事件）、`shell`（执行命令）。都用可选的 `ctx.get` 读——缺哪个只让对应的能力没有，插件照常装载。
@@ -102,21 +102,35 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 - 卡片的保存明确分两步：改动先留在本地暂存（状态条提示），点"保存"才逐键**串行**写入并检查返回的 `Promise<boolean>` 受理标记——第一个 `false` 就停手、显示 `saveRejected` 并保留还没写入的改动；写入 reject 显示 `saveFailed`。保存期间输入框还能编辑，这期间产生的新改动留在待保存内容里，不会被这一次保存顺带抹掉；"撤销"丢弃暂存。清空一个输入框 = unset，恢复该字段的 schema 默认值。
 - 有两个部署用的值卡上没有对应的行，只能写在注册行的 `config:` 上、改值要重启才生效：`maxRootDepth`（向上找项目根的层数）和 `gateStdoutMaxBytes`（证据捕获上限），默认值见设置表。
 
-## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 跑哪四条门禁
+## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 跑哪些门禁：声明优先，其次九种语言生态
 
-白名单在类型层锁死（`lib/gate-detect.ts` 的 `GateCommand` 联合），只有这四条能进入执行；每个项目根最多一条，优先级 workspace > Rust > Python > 只有 TS 的项目。
+`GateCommand` 仍是 `lib/gate-detect.ts` 里的字面量联合：能进入执行的只有表里列出的命令，设置无法注入任意 shell 字符串。探测分两层：
 
-| 命令 | 什么时候用 |
-| --- | --- |
-| `pnpm check` | 根目录同时有 `pnpm-workspace.yaml` 和 `package.json`，且根 scripts 声明了非空的 `check`。workspace 根没声明 `check` 时一条门禁都不发——它不会退到 `tsc`（见下） |
-| `cargo check` | 根目录有 `Cargo.toml` |
-| `ruff check .` | 根目录有 `ruff.toml`，或者 `pyproject.toml` 里有 `[tool.ruff]` 开头的那些段。只有 `pyproject.toml` 不算——那是 Python 的元数据文件，不是"我在用 ruff"的声明 |
-| `tsc --noEmit` | **不是 workspace** 的根目录同时有 `package.json` 和 `tsconfig.json`；没有 `tsconfig.json` 不算 TS 项目。workspace 根的 tsconfig 多是 solution-style（`files: []` 加 `references`），`tsc --noEmit` 一个子工程都不检查就退 0，所以不在这里 |
+1. **项目声明（优先）。** 根 `package.json` 声明了 `check` 脚本 → `pnpm check`；`pnpmScripts` 里点名且脚本真的存在、名字形状安全 → `pnpm run <名字>`；根 Makefile 有 `check` 目标 → `make check`。每个根最多一条声明命令，命中后不再叠加该根的内置探测。`test` 目标**不算**声明：它作为测试门禁追加，内置的 lint/format 探测照旧跑（只写了 `test` 的 Makefile 不该把内置门禁藏掉）。
+2. **内置探测（兜底）。** 只在根上没有任何声明时启用。同一个根可以产出多条（例如同时有 `package.json` 与 `Cargo.toml` 的仓）；按 `root + command` 去重后由宿主串行执行、共用总预算。
 
-- `tsc` 在命令里只是个逻辑名：入口在运行时确定——工程自己装的 `typescript` 优先，其次是随包安装的那份，最后才是 PATH 上的 `tsc`（由"工具不可用"那条出口报成未执行）；绝不走 `npx` 的自动下载。
-- 项目根探测：从编辑过的文件向上最多找 `maxRootDepth`（默认 10）层，取最近的清单根；子包**自己就是** workspace 根、也能给出 `pnpm check` 时就地执行（改一个包不能把整个多仓工作区拖进来）；否则 monorepo 的子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只有在那一层**确实能给出门禁**时才升，再不行就保留子包自己的根（外层没有 `check` 脚本的 workspace 不能顶掉子包的 `tsc` 或 `ruff`门禁）。
-- 时间与并发：总时长上限 `gateBudgetMs` 是**共享池**，不是按根数均分——一条门禁先拿「剩余预算 − 后面每条各留的 5s 保底」，后面没有门禁了它就能用掉剩下的全部（一条在伞工作区根上串行跑十仓的 `pnpm check` 实测 240s，均分只会把每一条都掐成假超时）；剩下不足 5s 的那一段不再开始新命令，按"未执行"注入清单（文案里的毫秒数是当时真正剩余的预算）。门禁一条接一条跑，一次只注入一个失败。
-- 证据上限：每条流在内存里留 64 KiB（截断时保留尾部，而第一条错误才是原因），被截断时从写出到磁盘的文件限量读回 4 KiB 开头；单个会话最多记录 500 个编辑文件，超出后按插入顺序淘汰并 warn。
+| 语言 | 根标记 | 内置命令 | 保守条件 |
+| --- | --- | --- | --- |
+| JavaScript / TypeScript | `package.json` | `oxlint .` 或 `eslint --format unix .`；`biome check .`、`oxfmt --check .` 或 `prettier --check .`；`vitest run`、`jest --ci`、`tsc --noEmit` | lint/格式化/测试只认自己的配置；oxlint 优先于 eslint，biome/oxfmt 优先于 prettier，避免重复跑；`tsc` 只给**非 workspace** 根，且 `tsconfig.json` 没有非空 `references` |
+| Rust | `Cargo.toml` | `cargo check`、`cargo clippy --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`cargo test --no-run` | clippy 只在有 `clippy.toml`/`.clippy.toml` 时；fmt 只在有 `rustfmt.toml`/`.rustfmt.toml` 时 |
+| Go | `go.mod` | `go vet ./...`、`golangci-lint run`、`staticcheck ./...`、`go test ./...` | vet/test 总是给；golangci-lint 只在有 `.golangci.*` 配置时；staticcheck 只在有 `staticcheck.conf` 时 |
+| Python | `pyproject.toml`、`ruff.toml`、`.ruff.toml`、`pytest.ini`、`tox.ini`、`setup.cfg`、`mypy.ini`、`.mypy.ini`、`pyrightconfig.json`、`.flake8`、`.pylintrc` | `ruff check .`、`ruff format --check .`、`black --check .`、`flake8`、`pyright`、`pylint .`、`pytest -q`、`mypy .` | `ruff check` 只在 `ruff.toml`/`.ruff.toml`/`[tool.ruff]` 时；`ruff format --check .` 只在显式声明 `[tool.ruff.format]`/`[format]` 时追加（声明了 `[tool.black]` 时不叠加）；black 只在 `[tool.black]` 时；flake8 只在 `.flake8` 或真实 `[flake8]` 段时；pyright 只在 `pyrightconfig.json`/`[tool.pyright]` 时；pylint 只在 `.pylintrc`/`[tool.pylint.*]` 时；pytest 只在 `pytest.ini`、真实 `[pytest]`/`[tool.pytest.ini_options]` 段时——`tests/`/`test/` 目录不是入口判据，空套件会让 `pytest -q` 退 5；mypy 只在 `mypy.ini`/`.mypy.ini`/`[tool.mypy]` 时 |
+| Ruby | `Gemfile`、`.rubocop.yml`、`.rspec`、`.standard.yml`、`Rakefile` | `rubocop`、`rspec`、`standardrb`、`rake check`/`rake test` | rubocop 只认 `.rubocop.yml`；rspec 只认 `.rspec`；standardrb 只认 `.standard.yml`/`.standard.yaml`；`Rakefile` 里声明的 `check` 任务属于项目门禁并优先于内置探测；`test` 任务作为测试门禁追加，rubocop/rspec/standardrb 仍会跑 |
+| Java / Kotlin | `pom.xml`、`build.gradle[.kts]`、`settings.gradle[.kts]`、`checkstyle.xml`、`config/checkstyle/checkstyle.xml`、`detekt.yml[.yaml]`、`config/detekt/detekt.yml[.yaml]` | `pom.xml` 声明 checkstyle/spotbugs/PMD 时 `mvn -q verify` 或 `./mvnw -q verify`，否则 `mvn -q test` / `./mvnw -q test`；`gradle check`、`./gradlew check` 或 `gradlew.bat check`；`checkstyle -c <文件> src/main/java`；`detekt --config <文件>`；`ktlint` | 有 wrapper 时 wrapper 优先；Maven `verify` 只在 POM 里真有那几种质量插件时启用；独立 Checkstyle 只在没有 Maven/Gradle 且有 `src/main/java` 源目录时跑；detekt 只认自己的配置；ktlint 只在有 `.editorconfig` 和 `src/main/kotlin` 源目录时跑 |
+| C / C++ | `CMakeLists.txt`、`Makefile`、`.clang-format` | `cmake --build build`、`ctest --test-dir build --output-on-failure`；`make format-check` / `make check-format` / `make clang-format-check`；`make check`（覆盖内置探测）或 `make test`（作为测试门禁追加） | CMake 只在 `build/CMakeCache.txt` 或 `build/CTestTestfile.cmake` 存在时；clang-format 目标只在 `.clang-format` 与该目标都显式声明时跑；Makefile 目标从实际目标表读取 |
+| Bazel | `MODULE.bazel`、`WORKSPACE`、`WORKSPACE.bazel` | `bazel test //...` | 只在根上有这三个文件之一时跑；它可能是整仓重构建，仍受 `gateBudgetMs` 限制 |
+| C# | `*.sln`、`*.csproj`、`*.fsproj`、`*.vbproj` | `dotnet format --verify-no-changes --nologo`、`dotnet test --nologo`、`dotnet build --nologo` | format 只在有 solution 或单工程且有 `.editorconfig` 时；只有工程名看起来像测试工程才 test；有 solution 或恰好一个工程文件才 build；多工程且无 solution 不发命令 |
+| PHP | `composer.json`、`phpunit.xml[.dist]`、`phpstan.neon[.dist]`、`psalm.xml[.dist]`、`.php-cs-fixer.php` | `composer run-script test`、`composer validate --no-check-publish`、`php-cs-fixer fix --dry-run --diff`、`phpstan analyse`、`psalm`、`phpunit` | composer test 脚本只在声明时跑；php-cs-fixer/phpstan/psalm 只认自己的配置；有本地 PHPUnit 可执行文件时优先用它 |
+
+- **可选的供应链扫描（`securityAudit: true`，默认关）。** 这一层不跟着项目声明的 `check` 被压掉（声明通常只覆盖 lint 与测试，不附带依赖漏洞扫描，所以即使有声明也会跑），也不参与根选择（只有锁文件不会让一个根算“有门禁”）。根上出现下列锁文件时各追加一条命令：`package-lock.json` / `npm-shrinkwrap.json` → `npm audit --audit-level=high --omit=dev`；`pnpm-lock.yaml` → `pnpm audit --audit-level=high --prod`；`Cargo.toml` 旁的 `Cargo.lock` → `cargo audit`；`go.mod` → `govulncheck ./...`；`requirements.txt` → `pip-audit -r requirements.txt`；`Gemfile.lock` → `bundler-audit check --update`；`composer.lock` → `composer audit`。这些命令要联网、要工具已安装；shell 层命令缺失（127）或 `cargo audit` / `composer audit` 子命令不存在时按 `not-run` 归因，本包不会自动安装。开关在「门禁」设置卡上；除非明确要把这些网络调用算进门禁预算，否则保持关闭。
+- **不自动安装、不猜。** 工具缺失、依赖树从未安装、exit 126/127 且点名工具时一律报 `not-run`，不报代码失败；本包不会替你执行 `npm install`、`composer install`、`go mod download`、`dotnet restore` 之类。
+- **项目自己的检查仍是权威。** 一条聚合脚本（`pnpm check`、Makefile 的 `check`）可以按项目自己的顺序跑类型检查、lint、测试、格式与安全扫描；它会压掉内置语言探测。唯一不被它压掉的是显式打开的 `securityAudit`——普通的 `check` 脚本并不隐含依赖漏洞扫描。
+- **`tsc` 只是逻辑名**：入口在运行时确定——工程自己装的 `typescript` 优先，其次随包安装的那份，最后才是 PATH 上的 `tsc`；绝不走 `npx` 的自动下载。
+- **项目根探测**：从编辑过的文件向上最多找 `maxRootDepth`（默认 10）层，取最近的标记根；子包**自己就是** workspace 根、也能给出自己的门禁时就地执行；否则 monorepo 子包升到 `pnpm-workspace.yaml` 所在的工作区根——但只有在那一层**确实能给出门禁**时才升，外层没有门禁的 workspace 不能顶掉子包自己的检查。供应链扫描只在选定根之后追加；锁文件不是这一步的门禁候选。
+- **时间与并发**：`gateBudgetMs` 是共享池。同一个根的多条门禁按顺序消耗它；当前这条先拿「剩余预算 − 后面每条各留的 5s 保底」，剩余不足 5s 时按"未执行"注入。门禁一条接一条跑，一次只注入一个失败。一个根上内置门禁很多时，优先用项目级聚合脚本。
+- **证据上限**：每条流在内存里留 64 KiB（截断时保留尾部，第一条错误通常才是原因）；被截断时从落盘文件限量读回 4 KiB 开头；单个会话最多记录 500 个编辑文件，超出按插入顺序淘汰并 warn。
+- **诊断**：门禁输出按命令分派解析（tsc、go、cargo、ruff、rubocop、javac/Maven、dotnet、clang/gcc、PHP、eslint），解析出的 `path:line` 供 forge diff 行注解使用；认不出的输出形状不产生注解，也不改变 pass/fail 结论。
+- **覆盖面边界**：内置矩阵覆盖上述九种生态的 lint/style、格式化、类型检查、编译与测试；`securityAudit` 额外补上面对应锁文件的依赖漏洞扫描。覆盖率阈值仍然不猜：写死在插件里的百分比几乎对每个项目都是错的，需要覆盖率时交给项目声明的 `check` 脚本或聚合脚本。
 
 ## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
 
@@ -130,6 +144,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 | `memoryFeedback` | boolean | `false` | 是否把代码类失败另外写进记忆网关 |
 | `memoryGatewayUrl` | string | `""`（未配置） | 网关基址；设置值优先，留空时改用环境变量 `TDAI_GATEWAY_URL` |
 | `memoryGatewayKeyRef` | string（凭据引用名） | `TDAI_GATEWAY_KEY` | 网关密钥的引用名；值走宿主凭据服务，不写进设置 |
+| `pnpmScripts` | string（逗号或空白分隔） | `""`（不启用） | 额外门禁脚本：只有根 package.json 真声明了那个名字时才执行 `pnpm run <名字>`（例如 `check:all`）；未声明或名字形状不安全的一律忽略 |
+| `securityAudit` | boolean | `false` | 可选的供应链扫描（npm/pnpm/cargo/go/pip/bundler/composer）；要联网、要工具已安装，且即使根声明了自己的 `check` 也会跑；不参与根选择 |
 | `maxRootDepth` | natural | `10` | 向上找项目根的最大层数（部署值，卡上没有这一行） |
 | `gateStdoutMaxBytes` | natural | `65536` | 每条流的证据捕获上限（部署值，卡上没有这一行） |
 
@@ -160,8 +176,8 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
-- **白名单只有四条命令，不能经设置扩展。** 用别的检查器（`go test`、`mypy`、`eslint`…）的根得不到门禁。
-- **只记成功的编辑**，而且只认 `edit` / `write` / `str_replace_editor` / `apply_patch` 的写入（`view` 是只读，不算）。多文件的 `apply_patch` 按每个操作的目标分别记录，move 的源和目的都算。结算身份为审批被拒或派发前取消的调用不记录（工具没执行，文件一定没变）；已派发后中止的调用保守记录（写可能已落盘，宁可多检查一次）。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计——没有一条门禁命令能校验它们，而 `.sh` 会把项目根解析到别的地方，跑出假失败。
+- **内置矩阵是保守基线，不是完整的多语言质量平台。** 它按上面的根标记覆盖九种生态，只有显式打开 `securityAudit` 时才追加供应链扫描；它不会替你加覆盖率门槛或项目没声明的专门类型检查器；根上没有可识别标记就不发命令。工具链与标记对不上的工程，应自己声明 `check` 脚本、`pnpmScripts` 或 Makefile 目标。
+- **只记成功的编辑**，而且只认 `edit` / `write` / `str_replace_editor` / `apply_patch` 的写入（`view` 是只读，不算）。多文件的 `apply_patch` 按每个操作的目标分别记录，move 的源和目的都算。结算身份为审批被拒或派发前取消的调用不记录（工具没执行，文件一定没变）；已派发后中止的调用保守记录（写可能已落盘，宁可多检查一次）。扩展名白名单之外的文件（md/txt/图片/`.sh`）不计。白名单覆盖上面九种语言及其清单/构建文件（`.go`、`.rb`、`.java`、`.kt`、`.c/.h/.cc/.cpp/.hpp`、`.cs`、`.php`、`.xml`、`.gradle`、`.sln`、`.csproj`、`.ini`、`.cfg`、`.mod`、`.sum`、`.neon`、`.jsonc`，以及 `Makefile`、`CMakeLists.txt`、`Gemfile`、`Rakefile`、`gradlew`、`mvnw`、`.rspec`、`.prettierrc`、`.flake8`、`.editorconfig` 这类文件名）。`.sh` 仍然排除：没有稳定的内置检查器能覆盖它，而它会把项目根解析到别处，跑出假失败。
 - **同树的具名子代理会被纳入检查**：空闲/冷子代理的编辑台账经 `sessionQuery.observeSession` 并入父会话这一轮，失败文案会点名改过该根的子代理；有队友仍在执行回合时本轮**推迟**（工作树正被并发写），等队友完成开启的下一回合再检查。out-of-process 子代理（ACP / claude-code / codex）不发 dsh 事件、也不共享这棵工作树，仍在检查范围之外。
 - **不抢话**：收件箱已经有待处理消息、回合信号已取消，或者插件已卸载时不注入。plan mode 不豁免——规划回合改了代码，回合结束时同样检查。
 - **证据被截断且磁盘上没有那份文件时，第一条错误可能已经随截断丢掉了**；文案会如实说明证据不完整，不假装完整。
@@ -172,10 +188,11 @@ dsh plugin --profile web add @jayyuen66/dsh-quality-gate
 
 | 问题 | 回答 |
 | --- | --- |
-| pnpm 工程为什么没跑 `pnpm check`？ | 根必须同时有 `pnpm-workspace.yaml` 与 `package.json`，且根 scripts 声明了非空 `check` 脚本；缺 `pnpm-workspace.yaml` 时按下一候选判（非 workspace 根可能落到 `tsc` / `ruff` / `cargo`），而 workspace 根没声明 `check` 时一条门禁都不发（solution-style tsconfig 会让 `tsc` 总是通过）。刻意取舍：假失败比漏检查更贵 |
-|门禁说"未能执行"，是代码错了吗？ | 不是。沙箱策略拒绝、runner 起不来、超时、取消、时间预算不够，以及 stderr **点到门禁命令本身**（工具没装）的 exit 126/127 都属于这一类。注入的文案明确要求**不要为此修改代码**，并以 `gate-not-run` 单独报给总线。如果 126/127 来自你自己的 `check` 脚本内部，那是代码失败，按代码失败上报 |
+| pnpm 工程为什么没跑 `pnpm check`？ | 根 `package.json` 必须声明非空的 `check` 脚本。workspace 根没声明 `check` 时不会发 `pnpm check`（solution-style tsconfig 下也不会退到 `tsc`）；此时可能落到别的项目声明或内置语言探测。刻意取舍：假失败比漏检查更贵 |
+|门禁说"未能执行"，是代码错了吗？ | 不是。沙箱策略拒绝、runner 起不来、超时、取消、时间预算不够、任何 stderr 点出"命令不存在/不可执行"的 exit 126/127（包括脚本内部的）、有 lockfile 但没有 `node_modules` 的 pnpm 根（先安装依赖）、以及 tsc 的环境错误 `TS2688 / TS6305 / TS6306 / TS6307` 都属于这一类。注入的文案明确要求**不要为此修改代码**，并以 `gate-not-run` 单独报给总线。脚本内部缺命令是环境问题，不是"代码写坏了"的证据 |
 | 会不会无限修下去？ | 次数用完之后注入一次用户可见的放行说明并停止自动修复，直到某一次全部干净通过才重新计数 |
 | 想临时停掉？ | 在设置卡里关 `enabled`，或者 `dsh plugin --profile web remove @jayyuen66/dsh-quality-gate` |
+| 覆盖哪些语言？ | JavaScript/TypeScript、Rust、Go、Python、Ruby、Java/Kotlin、C/C++、C#、PHP，各自只在有自己标记时探测。内置命令是保守基线，不是完整质量平台：项目自己声明的脚本仍是权威，供应链扫描通过 `securityAudit` 单独打开 |
 | `tsc` 用哪个版本？ | 工程自己装的那份优先，其次是随包安装的 `typescript`，两份都没有才用 PATH 上的——从不通过 `npx` 下载 |
 | 子代理改的代码呢？ | 子代理自己的回合不做门禁（避免同一个根跑两遍、把面向用户的注入发给子代理）；in-process 的具名子代理空闲后，其台账按游标并入父会话本轮统一核验，仍有队友在执行时本轮推迟；out-of-process 子代理不发 dsh 事件，天然不在检查范围内 |
 
@@ -186,7 +203,7 @@ pnpm install
 pnpm run check   # typecheck（四个 tsconfig）→ lint → client 构建 → host 构建 → 测试（含覆盖率）→ tarball 核对 → 格式
 ```
 
-- 覆盖率统计 `host.ts`、`lib/**` 和 `src/ui-messages.ts`，四项阈值 100%。字典是纯数据、`test/client-card.test.ts` 不用浏览器就能跑满它，算进统计范围才能让阈值真的管住它；`client-entry.ts` 不算进来——它的主要内容是界面渲染，需要 DOM 环境才能测，本包刻意不引 `react-dom` 和 `jsdom`，整个算进来会让阈值一直不通过。
+- 覆盖率统计 `host.ts`、`lib/**`、`src/ui-messages.ts` 和 `src/remote.ts`，四项阈值 100%。字典是纯数据、`test/client-card.test.ts` 不用浏览器就能跑满它，算进统计范围才能让阈值真的管住它；`client-entry.ts` 不算进来——它的主要内容是界面渲染，需要 DOM 环境才能测，本包刻意不引 `react-dom` 和 `jsdom`，整个算进来会让阈值一直不通过。
 - `test/publish-manifest.test.ts` 钉住发布形态：入口可解析、`@deepseek-ai/*` 不进 `dependencies`、产物内容里没有日期和本机路径，注释与文档也一起被它扫描。`test/dist-size.test.ts` 核对两个产物的体积上限；`check:pack` 对 `pnpm pack` 的真实 tarball 做核对。
 
 ## 反馈

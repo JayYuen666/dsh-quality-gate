@@ -198,9 +198,11 @@ function makeCtx(): MockCtx {
       // "地址未配置"的前置降级顺手挡掉（那种绿是假的）。
       memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
+      pnpmScripts: "",
       // 非 volatile 的部署级设置：resolve 交普通值（refsOf 按 meta.volatile 区分形状）
       maxRootDepth: 10,
       gateStdoutMaxBytes: 65_536,
+      securityAudit: false,
     },
     handlers: {},
     followupCalls: [],
@@ -1360,6 +1362,53 @@ describe("quality-gate门禁的完整性", () => {
       assert.equal(ctx.followupCalls.length, 0, "更不会注入");
     });
 
+    it("卸载落在列出队友之后 → 不再排空累加器、不开门禁", async () => {
+      const ctx = makeCtx();
+      const root = makeProject("dispose-list");
+      applyWith(ctx);
+      let unload: Promise<void> | undefined;
+      ctx.provided["subagents"] = {
+        listDescendants: async () => {
+          // 列目录期间卸载：这是串行段里**最后一个** await 点。
+          unload = ctx.effects.at(-1)!() as Promise<void>;
+          await unload;
+          return [];
+        },
+      };
+      stopEdits(ctx, "s-disp-list", [fileIn(root)]);
+      await sleep(20);
+      assert.equal(ctx.specs.length, 0, "卸载后不排空、不开门禁");
+      assert.equal(ctx.followupCalls.length, 0);
+    });
+
+    it("卸载落在冷读队友台账期间 → 后台批次在 drain 之前就收尾", async () => {
+      const ctx = makeCtx();
+      const root = makeProject("dispose-merge");
+      const cold = Promise.withResolvers<{
+        events: unknown[];
+        inheritedEventCount: number | undefined;
+        [Symbol.dispose]: () => void;
+      }>();
+      applyWith(ctx);
+      const original = ctx.sessionQuery!;
+      ctx.provided["subagents"] = {
+        listDescendants: async () => [{ kind: "child", id: "s-child", path: "reviewer" }],
+      };
+      ctx.provided["agents"] = { list: () => [{ id: "s-child", status: "idle" }] };
+      ctx.sessionQuery = {
+        observeSession: (id: string) =>
+          id === "s-child" ? cold.promise : original.observeSession(id),
+      };
+      stopEdits(ctx, "s-disp-merge", [fileIn(root)]);
+      await sleep(10);
+      const unload = ctx.effects.at(-1)!() as Promise<void>;
+      await sleep(5);
+      cold.resolve({ events: [], inheritedEventCount: undefined, [Symbol.dispose]: noopDispose });
+      await unload;
+      await sleep(20);
+      assert.equal(ctx.specs.length, 0, "卸载后后台批次不得再发门禁");
+    });
+
     it("这一批门禁自己出故障时由顶层 catch 记 error，不产生 unhandledRejection", async () => {
       const ctx = makeCtx();
       const root = makeProject("batch-fail");
@@ -1656,11 +1705,12 @@ describe("quality-gate门禁的完整性", () => {
       assert.equal(ctx.reports.at(0)?.category, BUS_CATEGORY_NOT_RUN, BUS_NOT_RUN_MESSAGE);
     });
 
-    it("exit 127 但 stderr 点名的是脚本内的命令 → 代码失败，不是工具缺失", async () => {
+    it("exit 127 且 stderr 点名脚本内的命令 → 环境不可用（not-run），不是代码失败", async () => {
       const ctx = makeCtx();
       const root = makeProject("e127-inner");
-      // 实测 `pnpm run check` 对脚本里不存在的命令回 exit 127：
-      // 这不是"门禁用的工具没装"，而是项目自己的 check 脚本坏了，必须按代码失败上报。
+      // 实测 `pnpm run check` 在 node_modules 缺失时对脚本里不存在的命令回 exit 127：
+      // 缺的是**依赖/工具**，不是这段代码的错。按旧口径会逼模型去"修"一个根本没跑起来的检查，
+      // 所以 0.1.14 起放宽为环境问题（只认 exit 126/127 + stderr 的"不可用"说法）。
       ctx.result = {
         exitCode: 127,
         stdout: { text: "", truncated: false },
@@ -1669,11 +1719,11 @@ describe("quality-gate门禁的完整性", () => {
       applyWith(ctx);
       stopEdits(ctx, "s-127", [fileIn(root)]);
       await sleep(20);
-      assert.equal(ctx.followupCalls.length, 1, "脚本坏了不能静默放过");
+      assert.equal(ctx.followupCalls.length, 1, "没跑成也不能静默放过");
       const text = injectedText(ctx);
-      assert.match(text, /请修复上述问题/u, "127 来自脚本内部 → 必须按代码失败上报");
-      assert.match(text, /exit=127/u);
-      assert.ok(!text.includes("命令不存在"), "不得报成门禁工具缺失");
+      assert.match(text, /未能执行/u, "127 是环境问题 → 按 not-run 上报");
+      assert.match(text, /命令不存在/u);
+      assert.ok(!text.includes("请修复上述问题"), "不得报成代码失败");
     });
 
     it("workspace 根的 package.json 里 scripts 不是对象 → 拿不到脚本信息 → 一条门禁都不给", async () => {

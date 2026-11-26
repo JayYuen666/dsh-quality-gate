@@ -51,6 +51,10 @@ export interface QualityGateMessages {
   readonly toolMissing: string;
   /** 原因短语：命令不可执行（exit 126）。 */
   readonly toolNotExecutable: string;
+  /** 原因短语：tsc 的类型依赖/工程引用未就绪（TS2688 / TS6305 / TS6306 / TS6307）。 */
+  readonly typeEnvironmentUnready: string;
+  /** pnpm 根有 lockfile 但没有 node_modules：门禁没有运行，需要先安装依赖。 */
+  readonly depsNotInstalled: string;
   /** 把原因短语拼成"门禁没有运行"（{cause}）。 */
   readonly toolNotRun: string;
   /** 沙箱策略读不出来（{message} 错误摘要）。 */
@@ -95,6 +99,11 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
     aborted: "门禁执行被调用方取消（aborted），结果未知。",
     toolMissing: "命令不存在（工具未安装）",
     toolNotExecutable: "命令不可执行",
+    typeEnvironmentUnready:
+      "tsc 的类型依赖或工程引用未就绪（TS2688 / TS6305 / TS6306 / TS6307：先安装依赖或先构建被引用的工程）",
+    depsNotInstalled:
+      "该 pnpm 根还没有安装依赖（存在 pnpm-lock.yaml，但没有 node_modules）：请先运行 pnpm install，" +
+      "再重新触发门禁。",
     toolNotRun: "{cause}，门禁没有运行。",
     policyUnresolvable: "沙箱策略无法解析（{message}），门禁拒绝在未确认的沙箱边界下执行。",
     sandboxUnavailable: "沙箱在本机不可用（{message}）：命令被拒绝执行，未做任何检查。",
@@ -141,6 +150,12 @@ export const MESSAGES: MessagesCatalog<QualityGateMessages> = {
     aborted: "Gate execution was cancelled by the caller (aborted); the result is unknown.",
     toolMissing: "command not found (tool not installed)",
     toolNotExecutable: "command not executable",
+    typeEnvironmentUnready:
+      "the type dependencies or project references for tsc are not ready (TS2688 / TS6305 / " +
+      "TS6306 / TS6307: install dependencies or build the referenced projects first)",
+    depsNotInstalled:
+      "dependencies are not installed in this pnpm root (pnpm-lock.yaml exists but node_modules " +
+      "does not): run pnpm install first, then trigger the gate again.",
     toolNotRun: "{cause} — the gate did not run.",
     policyUnresolvable:
       "The sandbox policy could not be resolved ({message}); the gate refuses to run under an " +

@@ -3,7 +3,7 @@
 // 参照 zvec-grep / session-rescue 的卡片写法：keyed 的 plugins.bundle.config 槽位，
 // React 由模块系统提供（rolldown external），只用 createElement。
 
-import { createElement, useState } from "react";
+import { createElement, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -34,14 +34,19 @@ import {
   Section,
   SectionToggle,
   TextField,
+  ToggleCell,
+  ToggleGrid,
   diffTouched,
   ensureCardUiCss,
+  isRecord,
   splitHint,
   useInvalidFields,
 } from "@jayyuen66/dsh-plugin-shared/client";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 import { isCredentialSafeUrl } from "../lib/credential-url.ts";
+import { createQualityGateReader } from "./remote.ts";
+import type { GateResultRow, QualityGateReader } from "./remote.ts";
 
 const NS: LocaleNs = "quality-gate";
 
@@ -181,6 +186,8 @@ const CARD_VALUES = z.object({
   memoryFeedback: optionalBoolean,
   memoryGatewayUrl: optionalHttpUrl,
   memoryGatewayKeyRef: optionalString,
+  pnpmScripts: optionalString,
+  securityAudit: optionalBoolean,
 });
 export type CardValues = z.infer<typeof CARD_VALUES>;
 type CardField = keyof CardValues;
@@ -193,6 +200,8 @@ const CARD_FIELD_SCHEMAS: { readonly [Field in CardField]: z.ZodType<CardValues[
   memoryFeedback: optionalBoolean,
   memoryGatewayUrl: optionalString,
   memoryGatewayKeyRef: optionalString,
+  pnpmScripts: optionalString,
+  securityAudit: optionalBoolean,
 };
 
 /** 读取快照里的值：逐字段解析，不合适的形状与超出范围的值只丢掉那一格，其余字段照常渲染。
@@ -364,11 +373,39 @@ function buildGateSection(props: SectionInputs): ReactNode {
     },
   });
   // 注入配额与预算是两个数字，按设计稿的双列排布成一对；计数徽章随字段增减维护。
+  const scripts = createElement(TextField, {
+    label: t("scriptsLabel"),
+    ...splitHint(t("scriptsHint")),
+    field: "pnpmScripts",
+    value: eff("pnpmScripts") ?? "",
+    placeholder: "check:all, verify",
+    monospace: true,
+    disabled: !writable,
+    onChange: (next: string): void => {
+      setField("pnpmScripts", next.trim() === "" ? undefined : next.trim());
+    },
+  });
+  // 设计稿的成组布尔项：紧凑双列单元格，开关在右，说明走 ⓘ，不单独占整行。
+  const securityHint = splitHint(t("securityHint"));
+  const security = createElement(
+    ToggleGrid,
+    null,
+    createElement(ToggleCell, {
+      field: "securityAudit",
+      label: t("securityLabel"),
+      ...securityHint,
+      checked: eff("securityAudit") === true,
+      disabled: !writable,
+      onChange: (next: boolean): void => {
+        setField("securityAudit", next);
+      },
+    }),
+  );
   return createElement(
     Section,
     {
       title: t("gateSection"),
-      count: t("fieldCount", { count: "3" }),
+      count: t("fieldCount", { count: "5" }),
       toggle: createElement(SectionToggle, {
         field: "enabled",
         label: t("enabledLabel"),
@@ -380,6 +417,8 @@ function buildGateSection(props: SectionInputs): ReactNode {
       }),
     },
     createElement(FieldTwoCol, null, injects, budget),
+    scripts,
+    security,
   );
 }
 
@@ -572,17 +611,242 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
   }
 }
 
-/** 会话侧栏的质量门禁小节：只读当前生效的两个开关值，不重复整张设置卡。 */
+/** 会话侧栏读结果用的远程读面；apply 时装上、卸载时撤下（缺席时结果格显示无记录）。 */
+let gateReader: QualityGateReader | undefined;
+
+/** 一条 diff 行注解（与 `ForgeLineAnnotation` 同形；本包不引实验包，按运行期契约声明）。 */
+interface ForgeAnnotationLike {
+  readonly key: string;
+  readonly place: { readonly side: "R"; readonly startLine: number; readonly endLine: number };
+  readonly version: number;
+}
+
+interface ForgeAnnotationObservable {
+  getSnapshot: () => ReadonlyMap<string, readonly ForgeAnnotationLike[]>;
+  subscribe: (listener: () => void) => () => void;
+}
+
+/** forge 面板暴露给其它 Client 插件的最小投影：只用到注解源注册口。 */
+interface ForgeChangesFace {
+  registerAnnotations: (source: {
+    id: string;
+    order?: number;
+    observe: (target: { sessionId: string }) => ForgeAnnotationObservable;
+  }) => () => void;
+}
+
+/** 这个值能当 forgeChanges 用吗。 */
+function isForgeChanges(value: unknown): value is ForgeChangesFace {
+  return isRecord(value) && typeof value["registerAnnotations"] === "function";
+}
+
+/** 把结果表里的行诊断按文件路径分组：每个 gate/根只取最新一条，同一行去重保留最新版本。 */
+function annotationsOf(state: {
+  rows: readonly GateResultRow[];
+}): Map<string, ForgeAnnotationLike[]> {
+  const latestByGate = new Map<string, GateResultRow>();
+  for (const row of state.rows) {
+    // 结果表按时间追加；同一个 gate/根后写覆盖先写。
+    latestByGate.set(`${row.gate}\u0000${row.root}`, row);
+  }
+  const byKey = new Map<
+    string,
+    { readonly at: number; readonly annotation: ForgeAnnotationLike }
+  >();
+  for (const row of latestByGate.values()) {
+    for (const diagnostic of row.diagnostics ?? []) {
+      const key = `${diagnostic.path}:${diagnostic.line}`;
+      const previous = byKey.get(key);
+      if (previous === undefined || row.at >= previous.at) {
+        byKey.set(key, {
+          at: row.at,
+          annotation: {
+            key,
+            place: { side: "R", startLine: diagnostic.line, endLine: diagnostic.line },
+            version: row.at,
+          },
+        });
+      }
+    }
+  }
+  const byPath = new Map<string, ForgeAnnotationLike[]>();
+  for (const { annotation } of byKey.values()) {
+    const file = annotation.key.slice(0, annotation.key.lastIndexOf(":"));
+    const list = byPath.get(file) ?? [];
+    list.push(annotation);
+    byPath.set(file, list);
+  }
+  return byPath;
+}
+
+/** 注解刷新间隔：diff 视图打开期间有新门禁结果时，旧失败必须能消失、新诊断必须能出现。 */
+const ANNOTATION_REFRESH_MS = 5000;
+
+/** 侧栏轮询间隔：门禁结果在回合结束时才落盘，只读一次会永远停在打开面板那一刻。 */
+const PANEL_REFRESH_MS = 5000;
+
+/** 把注解表折叠成可比较的串：每 5 秒重读一次时，用它判断"内容有没有变"。 */
+function annotationDigest(map: ReadonlyMap<string, readonly ForgeAnnotationLike[]>): string {
+  const lines: string[] = [];
+  for (const [file, annotations] of map) {
+    lines.push(file);
+    for (const annotation of annotations) {
+      const { place } = annotation;
+      lines.push(
+        `${annotation.key}\u0000${place.side}:${place.startLine}-${place.endLine}\u0000${annotation.version}`,
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+/** 懒加载的注解 observable：第一个订阅者开始读，之后按固定间隔重读，最后一个订阅者离开即停。 */
+class GateAnnotations implements ForgeAnnotationObservable {
+  private snapshot: ReadonlyMap<string, readonly ForgeAnnotationLike[]> = new Map();
+  private readonly listeners = new Set<() => void>();
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private loading = false;
+  private readonly load: () => Promise<ReadonlyMap<string, readonly ForgeAnnotationLike[]>>;
+
+  public constructor(load: () => Promise<ReadonlyMap<string, readonly ForgeAnnotationLike[]>>) {
+    this.load = load;
+  }
+
+  public readonly getSnapshot = (): ReadonlyMap<string, readonly ForgeAnnotationLike[]> =>
+    this.snapshot;
+
+  public readonly subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    if (this.listeners.size === 1) {
+      void this.fill();
+      this.timer = setInterval(() => {
+        void this.fill();
+      }, ANNOTATION_REFRESH_MS);
+    }
+    return () => {
+      this.listeners.delete(listener);
+      if (this.listeners.size === 0 && this.timer !== undefined) {
+        clearInterval(this.timer);
+        this.timer = undefined;
+      }
+    };
+  };
+
+  private async fill(): Promise<void> {
+    if (this.loading) {
+      return;
+    }
+    this.loading = true;
+    try {
+      const loaded = await this.load();
+      // 内容没变就保持原引用：useSyncExternalStore 每 5 秒收到一次新引用会让整张 diff 重绘。
+      if (annotationDigest(loaded) !== annotationDigest(this.snapshot)) {
+        this.snapshot = loaded;
+        this.notifyAll();
+      }
+    } catch {
+      // 读失败必须把旧注解清掉：否则一次网关抖动会把上一轮失败永久挂在 diff 上。
+      // 已经是空表时不再通知：同一场故障每 5 秒重绘一次没有意义。
+      if (this.snapshot.size > 0) {
+        this.snapshot = new Map();
+        this.notifyAll();
+      }
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private notifyAll(): void {
+    for (const notify of this.listeners) {
+      notify();
+    }
+  }
+}
+
+/** contextMenus 的最小投影：只用到 session 目标的注册口（缺席时整条右键入口不出现）。 */
+interface SessionMenusFace {
+  register: (contribution: {
+    readonly id: string;
+    readonly target: "session";
+    readonly order: number;
+    readonly resolve: (target: { readonly sessionId: string }) => readonly {
+      readonly id: string;
+      readonly label: string;
+      readonly failureLabel?: string;
+      readonly run: () => Promise<void>;
+    }[];
+  }) => () => void;
+}
+
+/** 这个值能当 contextMenus 用吗（只核 session 注册口）。 */
+function isSessionMenus(value: unknown): value is SessionMenusFace {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "register" in value &&
+    typeof value.register === "function"
+  );
+}
+
+/** 最近一次门禁的展示词（没有记录 / 通过 / 代码失败 / 未能执行）。 */
+function gateStateText(t: Translate, latest: GateResultRow | undefined): string {
+  if (latest === undefined) {
+    return t("gateNone");
+  }
+  if (latest.outcome === "pass") {
+    return t("gatePass");
+  }
+  return latest.outcome === "code-failure" ? t("gateFail") : t("gateNotRun");
+}
+
+/** 会话侧栏的质量门禁小节：两个生效开关值 + 本会话最近一条门禁结果（经官方 Remote 读）。 */
 function QgPanelSection(props: {
   readonly t: Translate;
+  readonly sessionId?: string;
   useCard: <Result>(selector: (snap: CardSnapshot) => Result) => Result;
 }): ReactNode {
-  const { t } = props;
+  const { t, sessionId } = props;
+  const [latest, setLatest] = useState<GateResultRow | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    const load = async (): Promise<void> => {
+      const reader = gateReader;
+      if (reader === undefined) {
+        return;
+      }
+      try {
+        // 会话槽位的标准 kit 会带 sessionId；有它就只读本会话，没有才退回全局最新。
+        let row: GateResultRow | undefined;
+        if (sessionId === undefined) {
+          row = await reader.latest();
+        } else {
+          const state = await reader.state(sessionId);
+          row = state.rows.at(-1);
+        }
+        if (live) {
+          setLatest(row);
+        }
+      } catch {
+        // 读失败（网关没挂上/会话还没结果）与"没有结果"在界面上同形：都不该让侧栏报错。
+      }
+    };
+    void load();
+    // 打开面板那一刻读一次，之后按间隔重读：门禁结果在回合结束时才落盘，
+    // 不轮询的话跑完门禁再看侧栏还停在旧值（用户只能在刷新页面之前看到一次）。
+    const timer = setInterval(() => {
+      void load();
+    }, PANEL_REFRESH_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [sessionId]);
   const snap = props.useCard((cardSnap) => cardSnap);
   if (snap.status !== "ready") {
     return null;
   }
   const value = projectCardValues(snap.value);
+  const lastText = gateStateText(t, latest);
   return createElement(
     KpiGrid,
     null,
@@ -595,11 +859,17 @@ function QgPanelSection(props: {
       value: value.maxInjectsPerTurn,
       count: value.maxInjectsPerTurn,
     }),
+    createElement(KpiTile, { label: t("lastGateLabel"), value: lastText }),
+    latest === undefined
+      ? null
+      : createElement(KpiTile, { label: t("lastGateCommandLabel"), value: latest.gate }),
   );
 }
 
 export interface ClientCtx {
   effect: Context["effect"];
+  /** 官方的反射接口：远端读面经 `get("remote")` 取，不建立 inject 依赖（缺席只少一栏）。 */
+  get: Context["get"];
   slots: Pick<SlotRegistry, "inject" | "register">;
   /** 0.1.7 的配置表单服务（installed
    *  `dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98` 交出
@@ -663,8 +933,58 @@ function apply(ctx: ClientCtx): void {
   // dsh-client-locale/lib/client.js:1387-1413 的 `register(ns, localeOrDicts, dict)` 在
   // 第二个参数不是字符串时走 `Object.entries(localeOrDicts)`，两份字典进同一个 `pairs`，
   // 返回的是**一个**回收全部 pairs 的 disposer（一种语言一种语言地交，就得手工把两个 disposer 串起来）。
+  const reader = createQualityGateReader(ctx);
+  gateReader = reader;
+  const forge: unknown = ctx.get("forgeChanges", false);
+  if (isForgeChanges(forge) && reader !== undefined) {
+    const readState = reader.state;
+    ctx.effect(
+      () =>
+        forge.registerAnnotations({
+          id: "quality-gate",
+          order: 80,
+          observe: (target) =>
+            new GateAnnotations(async () => annotationsOf(await readState(target.sessionId))),
+        }),
+      "quality-gate: forge diff annotations",
+    );
+  }
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "quality-gate-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
+  const menus: unknown = ctx.get("contextMenus", false);
+  if (isSessionMenus(menus) && reader !== undefined) {
+    ctx.effect(
+      () =>
+        menus.register({
+          id: "quality-gate-run",
+          target: "session",
+          order: 90,
+          resolve: (target) => [
+            {
+              id: "quality-gate-run-now",
+              label: t("runNowLabel"),
+              failureLabel: t("runFailedLabel"),
+              run: async () => {
+                const status = await reader.run(target.sessionId);
+                if (status !== "done") {
+                  // 上下文菜单把 rejection 画成 failureLabel；成功才是静默的。
+                  throw new Error(status);
+                }
+              },
+            },
+          ],
+        }),
+      "quality-gate: context menu",
+    );
+  }
+  ctx.effect(
+    () => () => {
+      if (gateReader === reader) {
+        gateReader = undefined;
+      }
+    },
+    "quality-gate: remote reader",
+  );
   ctx.slots.inject(SESSION_PANEL_SECTION, () =>
     ctx.slots.register(
       {

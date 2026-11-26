@@ -37,7 +37,7 @@
 // 一处例外：@deepseek-ai/dsh-credentials 的 `credentialRef` / `isCredentialRefName` 是值导入，
 // 因此必须进 peerDependencies（见下面 import 段的理由）。其余 @deepseek-ai/* 一律 type-only。
 
-import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -45,6 +45,8 @@ import { createRequire } from "node:module";
 // @deepseek-ai/schemastery 这一枚里存在（installed @deepseek-ai/schemastery/src/index.ts:480-482），
 // 公共的 schemastery 既没有 .volatile()、解析出来的也仍是普通值。
 import Schema from "@deepseek-ai/schemastery";
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { markRemote } from "@jayyuen66/dsh-plugin-shared/lib/remote-marker";
 import type { Context, Events, Fiber, Volatile } from "@deepseek-ai/cordis";
 import type { SettingsForms } from "@deepseek-ai/dsh-settings";
 // shell 执行的类型绑官方声明（devDependency @deepseek-ai/dsh-shell，与运行的宿主同版本）。
@@ -88,6 +90,13 @@ import type { WorkingDirectoryService } from "@deepseek-ai/dsh-working-directory
 import { EDIT_TOOLS, EditAccumulator } from "./lib/accumulator.ts";
 import { detectGate } from "./lib/gate-detect.ts";
 import type { Gate, ProjectRoot } from "./lib/gate-detect.ts";
+import { appendResultRow, RESULT_DETAIL_MAX, trimSessionResults } from "./lib/gate-results.ts";
+import type { GateResultRow } from "./lib/gate-results.ts";
+import { releaseGateRoot } from "./lib/gate-roots.ts";
+import { repoRelativeDiagnostics } from "./lib/repo-diagnostics.ts";
+import { PKG_MANIFEST } from "./lib/project-manifests.ts";
+import { findManifestRoot, probeProjectRoot, workspaceRootUpgrade } from "./lib/project-probe.ts";
+import { messageOf } from "./lib/errors.ts";
 import { MESSAGES, renderTemplate } from "./lib/messages.ts";
 import type { QualityGateMessages } from "./lib/messages.ts";
 // host 侧文案语言跟官方 locale 插件的偏好同源：读它拥有的 settings 命名空间（没注册时用中文）。
@@ -133,18 +142,6 @@ import type { EditLedgerReader, ProjectionsRegistry } from "./lib/edit-ledger-re
  * 登记，gate-detect 里的 has("ruff.toml") 就永远不会被走到——那类工程根本找不到项目根，
  * 也就永远不会有对应的门禁。
  */
-const PKG_MANIFEST = "package.json";
-const TSCONFIG_MANIFEST = "tsconfig.json";
-const PYPROJECT_MANIFEST = "pyproject.toml";
-
-const MANIFESTS = [
-  PKG_MANIFEST,
-  "Cargo.toml",
-  PYPROJECT_MANIFEST,
-  "pnpm-workspace.yaml",
-  "ruff.toml",
-  ".ruff.toml",
-];
 
 /**
  * 记录编辑时要用的事件读取接口 = 官方 `SessionQueryEngine`（installed
@@ -197,7 +194,7 @@ type SessionObservationFace = Pick<
 interface SessionQueryFace {
   observeSession: (
     sessionId: SessionId,
-    options: { readonly projectionMode: "none" | "all" },
+    options: { readonly projectionMode: "none" | "all"; readonly signal?: AbortSignal },
   ) => Promise<SessionObservationFace>;
 }
 
@@ -394,8 +391,12 @@ export interface ConfigShape {
   memoryGatewayUrl: Volatile<string>;
   /** 网关鉴权令牌的**凭据引用**（环境变量名的形态）：值走 ctx.credentials，不写进设置。 */
   memoryGatewayKeyRef: Volatile<string>;
+  /** 额外门禁脚本（逗号或空白分隔的脚本名）：只在根 package.json 真声明时执行 `pnpm run <script>`。 */
+  pnpmScripts: Volatile<string>;
   /** 向上找项目根的最大层数（不是 volatile 的部署值：普通值形态，不用 .get()，不占设置卡）。 */
   maxRootDepth: number;
+  /** 供应链扫描开关：默认关，打开后跑 npm/pnpm/cargo audit 等联网检查；设置卡可改，下一回合生效。 */
+  securityAudit: Volatile<boolean>;
   /**门禁命令 stdout 的捕获上限（字节）（不是 volatile 的部署值：普通值形态，不占设置卡）。 */
   gateStdoutMaxBytes: number;
 }
@@ -409,6 +410,10 @@ interface ResolvedSettings {
   memoryFeedback: boolean;
   memoryGatewayUrl: string;
   memoryGatewayKeyRef: string;
+  /** 用户配置的额外脚本名（已拆分、去空、去重；是否真的可用仍由 gate-detect 按 package.json 核对）。 */
+  pnpmScripts: readonly string[];
+  /** 是否追加联网的供应链扫描。 */
+  securityAudit: boolean;
 }
 
 /**
@@ -591,11 +596,17 @@ export const Config = Schema.object({
     .role("credential-ref")
     .default(DEFAULT_MEMORY_KEY_REF)
     .volatile(),
+  // 额外门禁脚本：空串 = 不启用（默认）。用户填 `check:all` 这类**项目自己声明**的脚本后，
+  // 根 package.json 里真有这一条才会发 `pnpm run <script>`；名字形状与声明两道校验都在 gate-detect。
+  pnpmScripts: Schema.string().default("").volatile(),
   // ── 不同部署可能想配不同值的，就必须是配置字段 ──
-  // 下面两项是**部署时的默认值**：不是 volatile → 不进设置卡（宿主只投影 volatile 字段），
-  // 以普通值的形态交进 apply（不用 .get()）；默认值 = 现在代码里的值，改 cordis.yml 里的行 config 就能改，不用改代码。
+  // 其中 maxRootDepth 与 gateStdoutMaxBytes 是**部署时的默认值**：不是 volatile → 不进设置卡
+  // （宿主只投影 volatile 字段），以普通值的形态交进 apply（不用 .get()）；默认值 = 现在代码里的值，
+  // 改 cordis.yml 里的行 config 就能改，不用改代码。securityAudit 是 volatile，不在此列。
   /** 向上找项目根的最大层数（深嵌套 monorepo 的查找深度）。 */
   maxRootDepth: Schema.natural().default(DEFAULT_MAX_ROOT_DEPTH),
+  /** 供应链扫描默认关：它要联网、要额外工具，不能在每个编辑回合替用户决定；设置卡可打开。 */
+  securityAudit: Schema.boolean().default(false).volatile(),
   /**门禁命令 stdout 的捕获上限（字节）：超过之后 harness 只保留尾部（见 CollectedOutput）。 */
   gateStdoutMaxBytes: Schema.natural().default(DEFAULT_GATE_STDOUT_MAX_BYTES),
 });
@@ -620,17 +631,6 @@ const SESSION_BUDGET = 50;
 
 /** 从 unknown 安全地读字段：字面量键通过参数传进去，绕开 dot-notation 与
  *  noPropertyAccessFromIndexSignature（tsc 禁止对索引签名用点号）之间的冲突。 */
-/** 取错误的摘要文本（String(error) 对非 Error 会打出 [object Object]，所以在这里分类处理）。 */
-function messageOf(error: unknown): string {
-  let message = "unknown error";
-  if (error instanceof Error) {
-    ({ message } = error);
-  } else if (typeof error === "string") {
-    message = error;
-  }
-  return message;
-}
-
 /**
  * 会话级 Map 的淘汰：把 keep 先删后插移到队尾（JS Map 的迭代顺序就是插入顺序），再淘汰队首超出
  * `SESSION_BUDGET` 的那些项 → keep 永远不会被淘汰，总大小收敛。三种 Map 复用同一个函数：注入配额
@@ -915,28 +915,104 @@ function interruptedRunOutcome(
 /** 工具不可用时，stderr 里会出现的说法。 */
 const TOOL_UNAVAILABLE_TEXT =
   /command not found|not recognised|not recognized|permission denied|not executable/u;
+const CARGO_AUDIT_MISSING = /no such command/u;
+const COMPOSER_AUDIT_MISSING = /command\s+"[^"]+"\s+is not defined/iu;
 
 /**
- * exit 126/127 只有在 stderr 点到门禁命令自己的第一个 token 时才算"工具不可用"：
- * `pnpm check` 的脚本里缺命令 pnpm 同样回 127（`[ELIFECYCLE] Command failed with exit code 127`），
- * 混在一起判会把项目自己写坏的脚本当成环境问题放掉。判断按行做：同一行里既有"不可用"的说法、
- * 又出现这个 token。
+ * exit 126/127 且 stderr 出现"不可用"这类说法时，判为**工具/环境不可用**（not-run）。
+ *
+ * 0.1.14 起不再要求同一行里出现门禁命令的首个 token。旧的合取条件漏掉了一整类真实故障：
+ * `pnpm check` 的脚本在 `node_modules` 缺失时自己回 127（`[ELIFECYCLE] ... exit code 127`
+ * 加 `sh: oxlint: command not found`），首 token 是 `pnpm` 而报错行里只有 `oxlint`，于是被判成
+ * 代码失败，模型被要求去"修"一个根本没跑起来的检查。现在任何一行命中都算环境问题：
+ * 脚本里真的缺一个命令仍是环境（依赖没装/工具没装），不是这段代码的错。
  */
-function gateToolUnavailable(gate: Gate, res: ShellRunResult): boolean {
-  if (res.exitCode !== 126 && res.exitCode !== 127) {
-    return false;
+export function gateToolUnavailable(gate: Gate, res: ShellRunResult): boolean {
+  if (res.exitCode === 126 || res.exitCode === 127) {
+    return res.stderr.text
+      .toLowerCase()
+      .split("\n")
+      .some((line) => TOOL_UNAVAILABLE_TEXT.test(line));
   }
-  const token = gate.command[0].toLowerCase();
-  return res.stderr.text
-    .toLowerCase()
-    .split("\n")
-    .some((line) => line.includes(token) && TOOL_UNAVAILABLE_TEXT.test(line));
+  // 子命令形式的工具没有 shell 层 127 可看：cargo audit 缺失是 exit 101 + "no such command"，
+  // 较老的 Composer 的 audit 缺失是 exit 1 + 'Command "audit" is not defined.'。这两种都不是代码缺陷。
+  if (gate.command[0] === "cargo" && gate.command[1] === "audit" && res.exitCode === 101) {
+    return CARGO_AUDIT_MISSING.test(res.stderr.text);
+  }
+  if (gate.command[0] === "composer" && gate.command[1] === "audit" && res.exitCode === 1) {
+    return COMPOSER_AUDIT_MISSING.test(res.stderr.text);
+  }
+  return false;
+}
+
+/** tsc 在"类型依赖/工程引用没就绪"时给出的错误码（都不是代码错误）。 */
+const TYPE_ENVIRONMENT_ERRORS = /\bTS(?:2688|6305|6306|6307)\b/u;
+
+/**
+ * tsc 门禁的**环境性失败**：`TS2688`（找不到类型定义）、`TS6305/6306/6307`（project references
+ * 的产物未构建/不在预期目录）。这些错误说明的是"这个包单独跑 tsc 的前提不成立"，而不是它写的
+ * 代码有错：宿主仓库 393/412 个包带 `references`，包级 `tsc --noEmit` 必然 TS6305（已实测）。
+ *
+ * 只在 `tsc` 门禁上判：其它门禁的输出里偶然出现这些字样不算。**stdout 与 stderr 都要看**：
+ * tsc 默认把诊断打到 stdout（本机 TS 7.0.2 实测 `--noEmit` 的 stderr 为空、TS6305 在 stdout），
+ * 只看 stderr 会把这一整类真实环境问题继续误判成代码失败。
+ */
+function environmentFailureOutcome(
+  messages: QualityGateMessages,
+  gate: Gate,
+  res: ShellRunResult,
+  log: Log,
+): GateOutcome | undefined {
+  let outcome: GateOutcome | undefined;
+  if (
+    gate.command[0] === "tsc" &&
+    res.exitCode !== 0 &&
+    TYPE_ENVIRONMENT_ERRORS.test(`${res.stdout.text}\n${res.stderr.text}`)
+  ) {
+    log.warn(
+      `[quality-gate] tsc gate hit an environment error (TS2688/63xx): ${gateCommandText(gate)} @ ${gate.root} — reported as not-run`,
+    );
+    outcome = {
+      kind: "not-run",
+      text: `${renderTemplate(messages.toolNotRun, { cause: messages.typeEnvironmentUnready })}\n${evidenceText(messages, res.stdout, "stdout")}${evidenceText(messages, res.stderr, "stderr")}`,
+    };
+  }
+  return outcome;
 }
 
 /**
- * 门禁用的工具本身不可用（exit 126/127 且 stderr 点到门禁命令）→ not-run，并 warn 给运维。
+ * pnpm 门禁的**依赖预检**：根上有 lockfile 但没有 `node_modules` 时不发命令。
+ *
+ * 理由（实测）：`pnpm run` 在缺依赖时会**先自动安装再执行**（有 lockfile 时），这会在一回合的
+ * 收尾阶段静默联网、写盘、耗时几十秒；而没有 lockfile 的树会直接 `command not found` 退 127。
+ * 两种都不是"这次改动有问题"。本插件不知道用户此刻是否想安装，所以把结论降级为 not-run
+ * 并明确提示"先安装依赖"，由人或模型显式跑一次安装。
+ */
+function dependencyPrecheckOutcome(
+  messages: QualityGateMessages,
+  gate: Gate,
+  log: Log,
+  exists: (target: string) => boolean = existsSync,
+): GateOutcome | undefined {
+  let outcome: GateOutcome | undefined;
+  if (
+    gate.command[0] === "pnpm" &&
+    // `pnpm audit` 只读 lockfile，不需要 node_modules；按脚本类门禁的预检处理它会把漏洞扫描静默跳掉。
+    gate.command[1] !== "audit" &&
+    exists(path.join(gate.root, "pnpm-lock.yaml")) &&
+    !exists(path.join(gate.root, "node_modules"))
+  ) {
+    log.warn(
+      `[quality-gate] pnpm gate skipped: dependencies not installed in ${gate.root} (pnpm install first)`,
+    );
+    outcome = { kind: "not-run", text: messages.depsNotInstalled };
+  }
+  return outcome;
+}
+
+/**
+ * 门禁用的工具本身不可用（exit 126/127 且 stderr 出现"不可用"的说法）→ not-run，并 warn 给运维。
  * 这是环境问题不是代码问题：注入失败指令会逼模型去修一个装不上的工具；但没跑成 ≠ 通过。
- * 脚本内部返回的 126/127 不走这一支（见 gateToolUnavailable），按代码失败处理。
  */
 function unavailableToolOutcome(
   messages: QualityGateMessages,
@@ -992,6 +1068,10 @@ function classifyRun(
   if (unusable !== undefined) {
     return unusable;
   }
+  const environment = environmentFailureOutcome(messages, gate, res, log);
+  if (environment !== undefined) {
+    return environment;
+  }
   if (res.exitCode === 0) {
     // 只部分生效的沙箱里，exit 0 只说明"在这个边界内没报错"——warn 给运维，判断仍然是 pass。
     if (facts?.enforcement === "partial") {
@@ -1014,64 +1094,9 @@ function isEditTool(name: string): boolean {
   return EDIT_TOOLS.has(name);
 }
 
-/**
- * 根 package.json 里已声明的 scripts 名（值是非空字符串才算"声明了这条脚本"）。
- *
- * 读不到、JSON 不合法、没有 scripts 字段 → **undefined（"没有信息"）**，由 gate-detect
- * 按保守的做法处理（不发 pnpm check）。不在这里替项目猜：猜错的代价是注入一次假失败。
- */
-function declaredScriptsOf(root: string): readonly string[] | undefined {
-  let names: readonly string[] | undefined;
-  try {
-    // JSON.parse 返回 any：先经 unknown，再用守卫取需要的部分（不写 unsafe 断言）
-    const raw: unknown = JSON.parse(readFileSync(path.join(root, PKG_MANIFEST), "utf8"));
-    const scripts = fieldOf(raw, "scripts");
-    // scripts 不是对象（缺字段，或者 `"scripts": 42`）和读失败按同一种情况处理：names 保持 undefined，
-    // 也就是"没有信息"——不替项目猜一条门禁命令。
-    if (isRecord(scripts)) {
-      names = Object.entries(scripts)
-        .filter(([, body]) => typeof body === "string" && body.length > 0)
-        .map(([name]) => name);
-    }
-  } catch {
-    // 读不到或 JSON 不合法：如实留 undefined，让 gate-detect 走"宁可不给门禁命令"的保守做法
-    names = undefined;
-  }
-  return names;
-}
-
 /** 判断交回的是不是数组（**不是** type predicate，因此不产生类型收窄；理由见 resolveEventWindow）。 */
 function isArrayDelivery(value: unknown): boolean {
   return Array.isArray(value);
-}
-
-/**
- * pyproject 里 ruff 段头的字面写法：`[tool.ruff]` 或者它的子表 `[tool.ruff.lint]` 等。
- *
- * `^` 加 `m` 旗标限定为行首；`[tool.ruff]` 和 `[tool.ruff.<子表>]` 都要认——只写子表、
- * 不写父表的 pyproject 是常见写法。数组表（`[[tool.ruff...]]`）同样命中段名，一并算声明。
- */
-const RUFF_SECTION = /^\[\[?tool\.(?:"ruff"|ruff)[\].]/mu;
-
-/**
- * 根 pyproject.toml 里是否声明了 ruff 的配置段（段头的写法见 RUFF_SECTION）。
- *
- * 只按行首段头做字面匹配，不引入 TOML 解析器：这里只需要回答"有没有这一段"，而段头在
- * TOML 里必须独占一行（行内写法 `[a.b] c = 1` 是非法的），所以行首匹配和解析器的结果一致。
- * 带引号的键写法（`[tool."ruff"]`）在 TOML 里合法且等价，也认。
- *
- * 读不到 / 解码失败 → undefined（"没有信息"），由 gate-detect 按保守的做法处理：不发 ruff
- * 门禁。这里和 declaredScriptsOf 取同一个方向，理由见 gate-detect 的 ruffGateReady。
- */
-function ruffConfiguredOf(root: string): boolean | undefined {
-  let configured: boolean | undefined;
-  try {
-    const text = readFileSync(path.join(root, PYPROJECT_MANIFEST), "utf8");
-    configured = RUFF_SECTION.test(text);
-  } catch {
-    configured = undefined;
-  }
-  return configured;
 }
 
 /**
@@ -1092,6 +1117,7 @@ async function resolveEventWindow(
   query: SessionQueryFace,
   sessionId: SessionId,
   lastSeq: ReadonlyMap<string, number>,
+  firstFrom: number,
 ): Promise<{ from: number; events: readonly SessionEvent[] } | undefined> {
   // 只有一处 return（consistent-return 与 treatUndefinedAsUnspecified：不把 undefined 和值返回混在一起）
   let window: { from: number; events: readonly SessionEvent[] } | undefined;
@@ -1100,13 +1126,13 @@ async function resolveEventWindow(
   let observation: SessionObservationFace | undefined;
   try {
     observation = await query.observeSession(sessionId, { projectionMode: "none" });
-    // 游标下限 = fork 的位置（root 会话是 0）：第一次见到的会话（包括进程重启之后）从下限开始重放
-    // 本会话自己的历史编辑——这是有意的：turn-stopping 时本回合的编辑已经在日志里，
-    // 从末尾起步会跳过正在要检查的回合。代价是重启后首轮会多跑几次门禁（预算与
-    // maxInjectsPerTurn 管住）；重放本身不会造成假失败——项目根必须是真正的 TS 项目
-    // （见 gate-detect 里 tsc 的判断条件），历史编辑所在的根都是真项目。
+    // 游标下限 = fork 的位置（root 会话是 0）；**第一次见到的会话**再用本回合起点兜底：
+    // 从 fork 位置起步会把本会话的全部历史编辑重放一遍（重启后首轮尤其多），而从回合起点起步
+    // 正好覆盖"turn-stopping 时本回合的编辑已经在日志里"这一事实，也不跳过正在要检查的回合。
+    // 两者取较大值：fork 边界永远不被越过，回合起点只在它之上收紧。
     const forkCut = observation.inheritedEventCount ?? 0;
-    const from = Math.max(forkCut, lastSeq.get(sessionId) ?? forkCut);
+    const seen = lastSeq.get(sessionId);
+    const from = Math.max(forkCut, seen ?? Math.max(forkCut, firstFrom));
     if (isArrayDelivery(observation.events)) {
       window = { from, events: observation.events.slice(from) };
     }
@@ -1179,91 +1205,6 @@ function collectEdits(events: readonly SessionEvent[]): PendingEdits {
     }
   }
   return { records, outcomes };
-}
-
-/** 单个文件向上找最近的、含清单文件的目录；hitDepthLimit 标记是否因为太深而没找到根（供可观察到的 warn）。
- *  maxDepth 来自 Config 的 maxRootDepth（不是 volatile 的部署值）。 */
-function findManifestRoot(
-  file: string,
-  maxDepth: number,
-): { root: string | undefined; hitDepthLimit: boolean } {
-  let dir = path.dirname(file);
-  let found: string | undefined;
-  let hitDepthLimit = false;
-  for (let depth = 0; depth < maxDepth; depth += 1) {
-    for (const manifest of MANIFESTS) {
-      // 拼子路径用平台实现：Win32 的路径转换把 `/` 也当分隔符，手工拼的混合写法查得到，但它会和别处
-      // 用 path.join 拼出的同一路径成为两个不同的字符串——下面要把 found 当项目根用于比较和缓存键，
-      // 两种写法会让同一个目录看起来像是两个根。
-      if (existsSync(path.join(dir, manifest))) {
-        found = dir;
-        break;
-      }
-    }
-    if (found !== undefined) {
-      break;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) {
-      break;
-    }
-    dir = parent;
-    if (depth === maxDepth - 1) {
-      hitDepthLimit = true;
-    }
-  }
-  return { root: found, hitDepthLimit };
-}
-
-/**
- * 找到最近的含清单目录之后继续向上找 pnpm-workspace.yaml —— workspace 根优先。
- * monorepo 的子包（admin/src/x.ts）应该跑整个工作区的 `pnpm check`，而不是退化成只跑子包的 `tsc`。
- */
-function workspaceRootUpgrade(root: string, maxDepth: number): string {
-  let up = path.dirname(root);
-  for (let depth = 0; depth < maxDepth; depth += 1) {
-    if (existsSync(path.join(up, "pnpm-workspace.yaml"))) {
-      return up;
-    }
-    const parent = path.dirname(up);
-    if (parent === up) {
-      break;
-    }
-    up = parent;
-  }
-  return root;
-}
-
-/**
- * 读取一个根在磁盘上的实际情况 → 转成 gate-detect 的入参形状（ProjectRoot）。
- *
- * - 清单名：MANIFESTS 里实际存在的项；
- * - tsconfig.json 不作为"根标记"（不进 MANIFESTS，避免改变向上探测根的语义），
- *   但要进清单集合——gate-detect 用它区分"真 TS 项目"和"只有一个 package.json 的空壳"；
- * - scripts：根 package.json 里已声明的脚本名，交给 gate-detect 判断 pnpm check
- *   能不能用。**这里只如实登记，不做选择**（探测策略集中在纯函数里）；
- * - ruffConfigured：根 pyproject.toml 里是不是真的有 `[tool.ruff]` 开头的那些段，交给 gate-detect
- *   判断 ruff门禁能不能用。理由同上——只登记，不选择。
- */
-function probeProjectRoot(root: string): ProjectRoot {
-  const manifests = MANIFESTS.filter((manifest) => existsSync(path.join(root, manifest)));
-  if (existsSync(path.join(root, TSCONFIG_MANIFEST))) {
-    manifests.push(TSCONFIG_MANIFEST);
-  }
-  // 没有 package.json 时不去读脚本清单（那次 IO 没有意义：pnpm 那一支要求 package.json 存在）
-  const scripts = manifests.includes("package.json") ? declaredScriptsOf(root) : undefined;
-  // 同理：没有 pyproject.toml 时不去读它（ruff 的 pyproject 那一支要求这个文件存在）
-  const ruffConfigured = manifests.includes(PYPROJECT_MANIFEST)
-    ? ruffConfiguredOf(root)
-    : undefined;
-  const entry: ProjectRoot = { root, files: manifests };
-  if (scripts !== undefined) {
-    entry.scripts = scripts;
-  }
-  if (ruffConfigured !== undefined) {
-    entry.ruffConfigured = ruffConfigured;
-  }
-  return entry;
 }
 
 /** 组装注入用的消息（id 唯一，同一毫秒内多次注入也不会撞车）。 */
@@ -1392,6 +1333,23 @@ async function pushFeedbackToMemory(
   }
 }
 
+/** `pnpmScripts` 的分隔符（逗号或空白）。 */
+const SCRIPT_SPLIT = /[\s,]+/u;
+
+/**
+ * 把 `pnpmScripts` 的原始文本拆成脚本名。
+ *
+ * @param raw - 用户填写的值（逗号或空白分隔）
+ * @returns 去空、去重后的脚本名串（顺序保留：同一优先级里先命中先执行）
+ */
+function splitScriptNames(raw: string): string[] {
+  const names = raw
+    .split(SCRIPT_SPLIT)
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  return [...new Set(names)];
+}
+
 /** 一次读全的、解析后的设置快照（`scope.get()` 的等价写法）：门禁在每次回合结束时现读，
  *  往下传的是纯值，不必让每个用到的地方都持有引用——所有 `.volatile()` 的引用一次 `.get()` 成普通值。 */
 function settingsOf(config: ConfigShape): ResolvedSettings {
@@ -1402,6 +1360,8 @@ function settingsOf(config: ConfigShape): ResolvedSettings {
     memoryFeedback: config.memoryFeedback.get(),
     memoryGatewayUrl: config.memoryGatewayUrl.get(),
     memoryGatewayKeyRef: config.memoryGatewayKeyRef.get(),
+    pnpmScripts: splitScriptNames(config.pnpmScripts.get()),
+    securityAudit: config.securityAudit.get(),
   };
 }
 
@@ -1433,12 +1393,16 @@ function isGateHost(value: unknown): value is Context & HostCtx {
 }
 
 /**
- * 子包自己就能给出 `pnpm check`（自带 `pnpm-workspace.yaml` 且声明了 check）时，它就是离
- * 文件最近、又真能跑起来的那一层门禁；继续往上找外层工作区只会把"改一个子包"放大成
- * workspace 的全套检查」——门禁的作用域应当止步于最近的 workspace 根。
+ * 子包自己就能给出 pnpm 门禁（项目声明的 `check`，或 `pnpmScripts` 里点名且真声明的脚本）
+ * 时，它就是离文件最近、又真能跑起来的那一层门禁；继续往上找外层工作区只会把"改一个子包"
+ * 放大成 workspace 的全套检查」——门禁的作用域应当止步于最近的 workspace 根。
+ *
+ * `securityAudit` 刻意**不**参与这个判断：它是选完根之后追加的独立供应链扫描层，不是项目
+ * 自己的门禁；把它算进 pnpm 命中会让一个只有 lockfile 的子包截停向上探测，或让只有 lockfile
+ * 的外层 workspace 把子包真正的 tsc 抹掉。
  */
-function hasPnpmCheckGate(root: ProjectRoot): boolean {
-  return detectGate([root]).some((gate) => gate.command[0] === "pnpm");
+function hasPnpmCheckGate(root: ProjectRoot, extraScripts: readonly string[]): boolean {
+  return detectGate([root], extraScripts).some((gate) => gate.command[0] === "pnpm");
 }
 
 /**
@@ -1451,9 +1415,13 @@ function hasPnpmCheckGate(root: ProjectRoot): boolean {
  * 反方向也一样：子包自己就是 workspace 根、也能给出门禁时不再往上——否则"本仓自己的门禁"
  * 会被外层伞工作区的全套 `pnpm check` 挤掉，改一个仓要等着跑九个仓。
  */
-function rootForFile(useRoot: string, maxDepth: number): ProjectRoot {
+function rootForFile(
+  useRoot: string,
+  maxDepth: number,
+  extraScripts: readonly string[],
+): ProjectRoot {
   const inner = probeProjectRoot(useRoot);
-  if (hasPnpmCheckGate(inner)) {
+  if (hasPnpmCheckGate(inner, extraScripts)) {
     return inner;
   }
   const upgraded = workspaceRootUpgrade(useRoot, maxDepth);
@@ -1461,11 +1429,11 @@ function rootForFile(useRoot: string, maxDepth: number): ProjectRoot {
     return inner;
   }
   const outer = probeProjectRoot(upgraded);
-  if (detectGate([outer]).length > 0) {
+  if (detectGate([outer], extraScripts).length > 0) {
     return outer;
   }
   // 外层给不出门禁：退回内层（内层也没有时两者等价，仍然返回外层，保持"没有门禁"这个结论）。
-  return detectGate([inner]).length > 0 ? inner : outer;
+  return detectGate([inner], extraScripts).length > 0 ? inner : outer;
 }
 
 /**
@@ -1473,7 +1441,12 @@ function rootForFile(useRoot: string, maxDepth: number): ProjectRoot {
  * 的部署值），每个根读一次磁盘上的实际情况（清单名 + 已声明的脚本）。找不到清单根的文件跳过
  * （没有对应的门禁）。同一个内层根只读一次盘：一轮改几百个文件时逐文件重复读盘没有意义。
  */
-function projectRootsOf(files: readonly string[], maxDepth: number, log: Log): ProjectRoot[] {
+function projectRootsOf(
+  files: readonly string[],
+  maxDepth: number,
+  log: Log,
+  extraScripts: readonly string[],
+): ProjectRoot[] {
   const roots = new Map<string, ProjectRoot>();
   const chosenByInner = new Map<string, ProjectRoot>();
   for (const file of files) {
@@ -1489,7 +1462,7 @@ function projectRootsOf(files: readonly string[], maxDepth: number, log: Log): P
     } else {
       let chosen = chosenByInner.get(useRoot);
       if (chosen === undefined) {
-        chosen = rootForFile(useRoot, maxDepth);
+        chosen = rootForFile(useRoot, maxDepth, extraScripts);
         chosenByInner.set(useRoot, chosen);
       }
       // 同一个根只登记一次：结果里一个根只出现一次。
@@ -1561,6 +1534,34 @@ async function runGate(
  *  具名函数之后，由 {@link GateRuntime} 带上这一份，交叉类型不必在多处重抄。 */
 type GateHost = Context & HostCtx;
 
+/** 记一条门禁结果。detail 压成单行并截断：这是给人看的摘要，不是完整输出。 */
+function recordGateResult(
+  rt: GateRuntime,
+  sessionId: string,
+  gate: Gate,
+  outcome: GateOutcome,
+): void {
+  const detail = (outcome.kind === "pass" ? "pass" : outcome.text)
+    .replaceAll(/\s+/gu, " ")
+    .trim()
+    .slice(0, RESULT_DETAIL_MAX);
+  const rows = rt.recentResults.get(sessionId) ?? [];
+  const diagnostics =
+    outcome.kind === GATE_KIND_CODE_FAILURE
+      ? repoRelativeDiagnostics(gate.root, gate.command, outcome.text, RESULT_DETAIL_MAX)
+      : [];
+  appendResultRow(rows, {
+    at: Date.now(),
+    gate: gateCommandText(gate),
+    root: gate.root,
+    outcome: outcome.kind,
+    detail,
+    ...(diagnostics.length === 0 ? {} : { diagnostics }),
+  });
+  rt.recentResults.set(sessionId, rows);
+  trimSessionResults(rt.recentResults);
+}
+
 /**
  * 一次装载（apply）期间的运行时记录：这些字段原本全是 apply 的闭包变量，turn-stopping 的门禁主体
  * 按 `eslint/max-lines-per-function` 的要求拆成模块作用域的具名函数之后，收成一个显式的依赖对象——
@@ -1603,8 +1604,33 @@ interface GateRuntime {
   teamReadWarned: boolean;
   /** 编辑台账投影的读取函数：`sessionProjections` 可用时由 inject 回调装上（没有 ⇒ 退回全量扫描）。 */
   editLedger: { value: EditLedgerReader | undefined };
+  /** 每个会话最近的门禁结果（环形截断；会话侧栏经官方 Remote 读它）。 */
+  recentResults: Map<string, GateResultRow[]>;
+  /** 正在跑门禁的根（引用计数）：右键手动跑时据此拒绝与自动批次在同一根上并发。 */
+  activeGateRoots: Map<string, number>;
   /** 插件已卸载（disposer 已执行）：新到的回合结束事件整体放弃——不读事件、不跑门禁、不注入。 */
   disposed: boolean;
+}
+
+/** 手动门禁从会话 cwd 起找清单根：findManifestRoot 从 dirname 起步，所以补一个不存在的文件名。 */
+const MANUAL_PROBE_FILE = "__quality_gate_probe__";
+
+/** 请求里的 sessionId；缺失或不是字符串时给空串。 */
+function sessionIdOf(request: unknown): string {
+  return isRecord(request) && typeof request["sessionId"] === "string" ? request["sessionId"] : "";
+}
+
+/** `agents.get()` 交回的是官方 Agent：只收本包 TurnAgent 要用的那几位。
+ *  `status` 与 `inbox` 也要收：手动入口直接读 `status`、注入前判 `inboxHasPending`，
+ *  只校验 session + followup 时，一个形状不全的替身会让这两处读到 undefined 而不是被拦下。 */
+function isTurnAgent(value: unknown): value is TurnAgent {
+  return (
+    isRecord(value) &&
+    isRecord(value["session"]) &&
+    typeof value["status"] === "string" &&
+    isRecord(value["inbox"]) &&
+    typeof value["followup"] === "function"
+  );
 }
 
 /** 读"是否已卸载"这个标记：包成函数是为了阻断 TS 对属性的收窄，异步段恢复后才能重新看到 dispose 之后的真实值。 */
@@ -1759,6 +1785,29 @@ function noteEdit(
 }
 
 /**
+ * 台账条目 → 可解析的路径。
+ *
+ * 承重细节（v3 台账的 `EditLedgerEntry.cwd`）：相对 `path` **必须按条目自己的 cwd 解析**，
+ * 不能一律用会话当前目录——换目录之后，历史条目记的是当时的目录，按现在的目录解析会把
+ * 文件指到别处（甚至别的项目根）。条目 cwd 为空（旧数据/事件里没有工作目录）时才回落到
+ * 调用方给的当前目录。返回绝对路径后，下游的 `noteEdit` 不会再解析一次。
+ *
+ * @param entry - 台账条目
+ * @param fallbackCwd - 条目没有 cwd 时的兜底目录
+ * @returns 绝对路径、原样绝对路径，或 undefined（路径为空）
+ */
+function ledgerPathOf(entry: EditLedgerEntry, fallbackCwd: string | undefined): string | undefined {
+  let resolved: string | undefined;
+  const rawPath = entry.path;
+  if (rawPath.length > 0) {
+    const base = entry.cwd === "" ? fallbackCwd : entry.cwd;
+    resolved =
+      base !== undefined && !path.isAbsolute(rawPath) ? path.resolve(base, rawPath) : rawPath;
+  }
+  return resolved;
+}
+
+/**
  * 只用投影出来的编辑台账来记本回合的编辑。返回 false = 走不了投影（读取函数没有、fork 会话、
  * 读到的数不可信，或者会话给不出日志长度），调用方改用观察接口。
  *
@@ -1770,6 +1819,8 @@ function noteLedgerEdits(
   rt: GateRuntime,
   session: TurnAgent["session"],
   note: (name: string, pathValue: string | undefined) => void,
+  fallbackCwd: string | undefined,
+  firstFrom: number,
 ): boolean {
   const reader = rt.editLedger.value;
   const directSeq = session.seq;
@@ -1780,14 +1831,14 @@ function noteLedgerEdits(
   if (ledger === undefined) {
     return false;
   }
-  const from = rt.lastSeqBySession.get(session.id) ?? 0;
+  const from = rt.lastSeqBySession.get(session.id) ?? firstFrom;
   // 编辑台账有条数上限（EDIT_LEDGER_MAX），超限时旧的条目被丢掉；这时候如果直接把游标推到日志末尾，
   // 被丢掉的那些 seq 就再也读不到了。所以只推进到台账实际覆盖到的末尾，下一回合还能从缺口重读。
   let covered = from;
   for (const entry of ledger) {
     covered = Math.max(covered, entry.seq + 1);
     if (entry.seq >= from && countsAsEdit(entry.outcome)) {
-      note(entry.name, entry.path === "" ? undefined : entry.path);
+      note(entry.name, ledgerPathOf(entry, fallbackCwd));
     }
   }
   rt.lastSeqBySession.set(session.id, Math.min(directSeq, covered));
@@ -1834,6 +1885,58 @@ function liveSessionCwdOf(agent: TurnAgent): string | undefined {
   return typeof raw === "string" && raw.length > 0 ? raw : undefined;
 }
 
+/** 官方 `AgentRegistry.turnBoundaryOf(session)` 里本包用到的两位。 */
+interface TurnBoundaryFace {
+  /** 当前未结束回合的起始 seq；`turn/end` 之后清空（null/undefined）。 */
+  readonly openTurnStartSeq?: number | null;
+  /** 最近一次 `turn/start` 的回合号。 */
+  readonly lastTurn?: number;
+}
+
+/**
+ * 读一次官方回合边界（`ctx.agents.turnBoundaryOf`）。
+ *
+ * 用途两处：① 首次见到某个会话时，把事件窗下限收在本回合起点，而不是盲目从 0 重放整份历史；
+ * ② 门禁批次跑完时确认"这个结果仍属于发起它的回合"，跨回合的迟到结果不能注入到新回合里。
+ * 服务缺席或形状不符时返回 undefined——两个调用点都按"没有信息就不加判据"处理，行为与未加这一判据时一致。
+ *
+ * @param rt - 装载期运行时
+ * @param session - 官方 Session
+ * @returns 边界的窄视图，或 undefined
+ */
+function turnBoundaryOf(rt: GateRuntime, session: unknown): TurnBoundaryFace | undefined {
+  let boundary: TurnBoundaryFace | undefined;
+  const service: unknown = rt.svc.get("agents");
+  if (isRecord(service) && typeof service["turnBoundaryOf"] === "function") {
+    const raw: unknown = Reflect.apply(service["turnBoundaryOf"], service, [session]);
+    if (isRecord(raw)) {
+      const open = raw["openTurnStartSeq"];
+      const last = raw["lastTurn"];
+      const openSeq = typeof open === "number" ? open : null;
+      boundary =
+        typeof last === "number"
+          ? { openTurnStartSeq: openSeq, lastTurn: last }
+          : { openTurnStartSeq: openSeq };
+    }
+  }
+  return boundary;
+}
+
+/**
+ * 门禁结果是否属于已经过去的回合：`lastTurn` 已前进时返回当前回合号（调用方据此丢弃结果）。
+ *
+ * @param rt - 装载期运行时
+ * @param session - 发起批次的会话
+ * @param turn - 发起批次的回合号
+ * @returns 当前回合号（结果过期），或 undefined（仍属于本回合 / 读不到边界）
+ */
+function staleTurnOf(rt: GateRuntime, session: unknown, turn: number): number | undefined {
+  const boundary = turnBoundaryOf(rt, session);
+  return boundary?.lastTurn !== undefined && boundary.lastTurn !== turn
+    ? boundary.lastTurn
+    : undefined;
+}
+
 async function readEditedFiles(
   rt: GateRuntime,
   agent: TurnAgent,
@@ -1858,10 +1961,11 @@ async function readEditedFiles(
   const note = (name: string, pathValue: string | undefined): void => {
     noteEdit(acc, cwd, name, pathValue);
   };
-  if (noteLedgerEdits(rt, session, note)) {
+  const firstFrom = turnBoundaryOf(rt, session)?.openTurnStartSeq ?? 0;
+  if (noteLedgerEdits(rt, session, note, cwd, firstFrom)) {
     return;
   }
-  const window = await resolveEventWindow(query, sessionId, rt.lastSeqBySession);
+  const window = await resolveEventWindow(query, sessionId, rt.lastSeqBySession, firstFrom);
   if (window === undefined) {
     if (!rt.queryReadWarned) {
       rt.queryReadWarned = true;
@@ -1933,14 +2037,14 @@ function childLedgerSnapshot(observation: SessionObservationFace): ChildLedgerSn
     end: typeof observation.cursor === "number" ? observation.cursor + 1 : undefined,
   };
 }
-/** 子代理台账聚合的结果：是否因为队友在跑而推迟本轮门禁，以及"文件 → 改过它的子代理名"。 */
+/** 子代理台账聚合的结果：`文件 → 改过它的子代理名`（推迟本轮由 `teamInputFor` 用
+ *  `undefined` 表达，不再在这个结果里带一次恒为 false 的标记）。 */
 interface TeamEdits {
-  readonly deferred: boolean;
   readonly namesByPath: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 /** 没有队友台账可聚合时的结果（subagents/agents/sessionQuery 缺失、列不出目录）。 */
-const NO_TEAM_EDITS: TeamEdits = { deferred: false, namesByPath: new Map() };
+const NO_TEAM_EDITS: TeamEdits = { namesByPath: new Map() };
 
 /** 从一行 catalog 条目里读出的子代理信息（`{ kind: 'child', id, path?, activity }`）。 */
 interface TeamMember {
@@ -1964,9 +2068,15 @@ function isSessionId(value: string): value is SessionId {
 function teamMemberOf(row: unknown): TeamMember | undefined {
   let member: TeamMember | undefined;
   if (isRecord(row) && row["kind"] === "child") {
-    const { id, path: name } = row;
+    const { id, path: rowPath, label } = row;
     if (typeof id === "string" && isSessionId(id)) {
-      member = { id, name: typeof name === "string" && name !== "" ? name : id };
+      // 展示名优先级 path > label > id：`path` 已包含 `name` 与层级（list-children 只在有 name 时
+      // 拼 path），比单取 name 更能说明"哪个子代理"；label 是 continuable 的资源标签。
+      const name =
+        (typeof rowPath === "string" && rowPath !== "" ? rowPath : undefined) ??
+        (typeof label === "string" && label !== "" ? label : undefined) ??
+        id;
+      member = { id, name };
     }
   }
   return member;
@@ -2117,33 +2227,66 @@ async function listTeamMembers(
   return members;
 }
 
+/** 冷会话读的硬上限：队友台账只是"补充归因"，不值得让一回合的收尾等它太久。 */
+const COLD_READ_TIMEOUT_MS = 15_000;
+
 /**
- * 决定本轮门禁是推迟还是聚合队友台账：队友在跑 → 推迟；否则经 `observeSession` 读各自的
- * 编辑台账事件窗（按游标增量重放）并记下归因。任何一次读失败只让那一份退场。
+ * 冷读用的组合信号：回合取消 + 超时。`sessionQuery.observeSession` 官方支持 `signal`（冷读可取消），
+ * 此前未传 signal，队友会话读得慢时整批门禁会被拖住。超时按"读不到"处理（每份台账独立退场），
+ * 不影响根会话自己的门禁。
+ *
+ * @param signal - 回合信号（可能没有）
+ * @returns 一定非空的组合信号
  */
-async function mergeTeamLedgers(
+function coldReadSignal(signal: AbortSignal | undefined): AbortSignal {
+  const timeout = AbortSignal.timeout(COLD_READ_TIMEOUT_MS);
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+}
+
+/**
+ * 队友是否仍在跑（决定本轮门禁推迟与否）。
+ *
+ * 拆出来的原因：`listDescendants` + `agents.list` 都是廉价调用，可以在 serial 的 turn-stopping 里
+ * await；而**冷会话台账重放**（observeSession）可能很慢，必须放进后台批次。两者混在一个
+ * `collectTeamEdits` 里时，串行监听器会被冷读拖到十几秒——注释里"只 await 一次本地日志读取"
+ * 的说法也就不成立了。
+ *
+ * @returns true=推迟；false=可以聚合；null=读不到运行状态（不聚合、不推迟）
+ */
+function teamGateDeferred(
   rt: GateRuntime,
   session: TurnAgent["session"],
   members: readonly TeamMember[],
-  note: (name: string, pathValue: string | undefined) => void,
-): Promise<TeamEdits> {
+): boolean | null {
   const running = runningTeammates(rt, members);
   if (running === null) {
-    // 读不到运行状态就不聚合，也不推迟：两者的前提都是"能区分队友是否还在写"。
     if (!rt.teamListWarned) {
       rt.teamListWarned = true;
       rt.log.warn(
         "[quality-gate] agents service unavailable; teammate edits are not aggregated and the gate is not deferred",
       );
     }
-    return NO_TEAM_EDITS;
+    return null;
   }
-  if (running.length > 0) {
+  const deferred = running.length > 0;
+  if (deferred) {
     rt.log.info(
       `[quality-gate] ${session.id}: gate deferred; teammate(s) still running: ${running.map((member) => member.name).join(", ")}`,
     );
-    return { deferred: true, namesByPath: new Map() };
   }
+  return deferred;
+}
+
+/**
+ * 聚合队友台账（调用方已确认没有队友在跑）：经 `observeSession` 读各自的编辑台账事件窗
+ * （按游标增量重放）并记下归因。任何一次读失败或超时只让那一份退场。
+ */
+async function mergeTeamLedgers(
+  rt: GateRuntime,
+  members: readonly TeamMember[],
+  note: (name: string, pathValue: string | undefined) => void,
+  signal: AbortSignal | undefined,
+): Promise<TeamEdits> {
   const query = rt.svc.get("sessionQuery");
   if (query === undefined) {
     // 没有 query 服务就不聚合：子代理的事件窗不是本包的领域状态，退回全量扫描会让根会话
@@ -2151,11 +2294,15 @@ async function mergeTeamLedgers(
     return NO_TEAM_EDITS;
   }
   const namesByPath = new Map<string, Set<string>>();
+  const cold = coldReadSignal(signal);
   await Promise.all(
     members.map(async (member) => {
       let observation: SessionObservationFace | undefined;
       try {
-        observation = await query.observeSession(member.id, { projectionMode: "all" });
+        observation = await query.observeSession(member.id, {
+          projectionMode: "all",
+          signal: cold,
+        });
         const snapshot = childLedgerSnapshot(observation);
         absorbChildLedger(rt, member, snapshot, note, namesByPath);
       } catch (error) {
@@ -2174,39 +2321,7 @@ async function mergeTeamLedgers(
       }
     }),
   );
-  return { deferred: false, namesByPath };
-}
-
-/**
- * 把**具名子代理**的编辑纳入本轮门禁（rc.2 的 AgentTeam 让这件事成为必要）：
- *  1. `ctx.subagents.listDescendants(rootId)` 递归列出本树的子代理（不加载、不恢复 Agent）；
- *  2. 有队友正在执行回合 → **推迟**本轮门禁，不 drain 累加器：工作树正被并发写，此时检查
- *     只会产出假失败，注入的修复指令还会和队友的改动赛跑；队友完成后会给根会话发消息、
- *     开新回合，那时再检查；
- *  3. 其余（空闲/冷）子代理：经 `sessionQuery.observeSession(id, { projectionMode: "all" })`
- *     取得不可变事件窗与 `workingDirectory` 投影，本地重放**本包自己的编辑台账**，按各自的
- *     游标增量并入累加器；observation 用完立即 `Symbol.dispose()`，不 attach、不恢复 Agent；
- *  4. 记下文件 → 子代理名的归因，供门禁失败时在注入文案里点名（见 handleGateFailure）。
- *
- * 任何一步不可用都只让"聚合子代理编辑"这一项退场，根会话自己的门禁照旧：
- * 列目录失败、没有 agents/sessionQuery/台账投影、个别冷会话读不出来，都只警告一次。
- * @param rt - 装载期运行时
- * @param session - 根会话（turn-stopping 载荷里的真实 Session）
- * @param note - 把一条编辑并入会话累加器（相对路径已按子代理 cwd 解析成绝对路径）
- * @param signal - 本回合的取消信号
- * @returns 是否推迟，以及文件 → 子代理名
- */
-async function collectTeamEdits(
-  rt: GateRuntime,
-  session: TurnAgent["session"],
-  note: (name: string, pathValue: string | undefined) => void,
-  signal: AbortSignal | undefined,
-): Promise<TeamEdits> {
-  const members = await listTeamMembers(rt, session, signal);
-  if (members === null || members.length === 0) {
-    return NO_TEAM_EDITS;
-  }
-  return mergeTeamLedgers(rt, session, members, note);
+  return { namesByPath };
 }
 
 /** 把"文件 → 子代理名"折叠成"门禁根 → 子代理名"（只保留真正有门禁的根，名字排序后去重）。 */
@@ -2264,6 +2379,16 @@ function handleGateFailure(
 ): boolean {
   const { rt, agent, cfg, messages, sessionId, turn, cwd } = scope;
   const { log, injectState, memoryNotice } = rt;
+  // 回合判据：批次是 detached 的，可能在回合已经收口之后才拿到结果。turn signal 从不 abort
+  // （宿主开下一回合只换 controller、不 abort 上一个），所以只靠 signal 拦不住"上一回合的门禁把
+  // 失败注入进下一回合"。这里以官方边界为准：`lastTurn` 已经不是发起批次的那个回合就丢弃。
+  const staleTurn = staleTurnOf(rt, agent.session, turn);
+  if (staleTurn !== undefined) {
+    log.warn(
+      `[quality-gate] ${sessionId}: stale gate result for turn ${turn} dropped (current turn ${staleTurn})`,
+    );
+    return true;
+  }
   const maxInjects = cfg.maxInjectsPerTurn;
   const isCodeFailure = problem.kind === GATE_KIND_CODE_FAILURE;
   // 归因只进"给模型的修复指令"：总线/记忆记的是失败事实本身，不能掺入会随队友变化的描述。
@@ -2396,30 +2521,35 @@ async function processGate(state: GateBatchState, left: readonly Gate[]): Promis
   const remaining = budget - (Date.now() - started);
   if (remaining < MIN_USEFUL_GATE_MS) {
     batch.blocked = true;
-    handleGateFailure(scope, gate, {
+    const skipped: GateOutcome = {
       kind: "not-run",
       text: skippedText(scope.messages, left, remaining),
-    });
+    };
+    recordGateResult(rt, scope.sessionId, gate, skipped);
+    handleGateFailure(scope, gate, skipped);
     return;
   }
   // 沙箱策略解析不出来 → 一条都不执行（not-run），绝不退回到部署级策略。
   // 这一条能用多少：剩余预算扣掉后面每条的最小可用份额（见 windowFor：均分在真实仓库上注定不够）。
   const window = windowFor(remaining, left.length - 1);
+  const precheck = dependencyPrecheckOutcome(scope.messages, gate, rt.log);
   const outcome: GateOutcome =
     resolved.kind === "unavailable"
       ? { kind: "not-run", text: resolved.reason }
-      : await runGate(scope.messages, shell, gate, window, {
+      : (precheck ??
+        (await runGate(scope.messages, shell, gate, window, {
           policy: resolved.binding?.policy,
           signal,
           stdoutMaxBytes: rt.stdoutMaxBytes,
           log: rt.log,
-        });
+        })));
   // 卸载之后：abort 才回来的迟到结果一律就地丢掉——不上报 lesson-loop（被中止的
   // 检查既不是代码失败的事实，也不是"请手动跑一次"的素材）、不注入。只靠 disposed 标记在注入前
   // 拦是不够的：门禁的子进程会活过卸载。
   if (gateAborted(rt)) {
     return;
   }
+  recordGateResult(rt, scope.sessionId, gate, outcome);
   if (outcome.kind === "pass") {
     await processGate(state, left.slice(1));
     return;
@@ -2463,6 +2593,9 @@ async function runGateBatch(input: GateBatchInput): Promise<void> {
      *  写，批次结束后的读取点会被钉在初始值 false 上、`!batch.blocked` 就被判成永远成立——而"有检查没给出
      *  通过结论"是真会发生的（是否重置配额就取决于它）。读属性得到的是声明的 boolean，这个判断才是有效的。 */
     const batch: { blocked: boolean } = { blocked: false };
+    for (const gate of input.gates) {
+      rt.activeGateRoots.set(gate.root, (rt.activeGateRoots.get(gate.root) ?? 0) + 1);
+    }
     await processGate({ ...input, started, batch }, input.gates);
     // 所有门禁都真的跑完并且通过 → 重置会话配额：模型已经修好，下一轮重新计数。
     // 只要有任何一条"没跑成"就不重置：那不等于代码是健康的。
@@ -2474,21 +2607,30 @@ async function runGateBatch(input: GateBatchInput): Promise<void> {
     // 这一层没有 catch 的话，rejection 会直接变成 unhandledRejection。
     rt.log.error(`[quality-gate] ${sessionId}: gate batch failed: ${messageOf(error)}`);
   } finally {
+    for (const gate of input.gates) {
+      releaseGateRoot(rt, gate.root);
+    }
     releaseGrants(rt, input.grants);
   }
 }
 
-/** 探测项目根、解析沙箱策略、调度一批门禁（同步段完成探测与解析，批次本身放后台）。 */
-function scheduleTurnGates(
+/** 排空累加器、探测门禁并交给 `runGateBatch`（此时队友台账已经并入）。 */
+function scheduleReadyGates(
   scope: TurnScope,
   shell: ShellService,
-  acc: EditAccumulator,
+  files: readonly string[],
+  dropped: number,
   team: TeamEdits,
 ): void {
   const { rt, agent, cfg, messages, sessionId, signal: turnSignal } = scope;
-  const dropped = acc.droppedCount();
-  const files = acc.drain();
-  // 累加器到了容量上限而淘汰掉的内容要能看见（drain 已经把计数清零，所以先读再排空）
+  /* v8 ignore next 3 —— 这道判据只兜「handleTurnGate 通过之后、后台 await 队友冷读期间卸载」的竞态：
+     两者之间没有可控的 await 插入点，单线程下测试无法确定性复现（确定性卸载由 handleTurnGate 的
+     runtimeDisposed 与每条结果后的 gateAborted 各判一次）。放在这里是为了让"卸载发生在等待途中"
+     也不把一批门禁发出去。 */
+  if (runtimeDisposed(rt)) {
+    return;
+  }
+  // 累加器到了容量上限而淘汰掉的内容要能看见（drain 已经把计数清零，所以调用方先读再排空）
   if (dropped > 0) {
     rt.log.warn(
       `[quality-gate] ${sessionId}: ${dropped} edited file(s) evicted from accumulator cap; gate may miss their roots`,
@@ -2498,7 +2640,11 @@ function scheduleTurnGates(
     return;
   }
   // 汇总项目根并探测要跑的门禁（一条门禁都没有就直接返回，不动配额）
-  const gates = detectGate(projectRootsOf(files, rt.maxRootDepth, rt.log));
+  const gates = detectGate(
+    projectRootsOf(files, rt.maxRootDepth, rt.log, cfg.pnpmScripts),
+    cfg.pnpmScripts,
+    { securityAudit: cfg.securityAudit },
+  );
   if (gates.length === 0) {
     return;
   }
@@ -2540,6 +2686,89 @@ function scheduleTurnGates(
     await flight;
     rt.inFlightGates.delete(flight);
   })();
+}
+
+/** 探测项目根、解析沙箱策略、调度一批门禁（同步段完成探测与解析，批次本身放后台）。 */
+function scheduleTurnGates(
+  scope: TurnScope,
+  shell: ShellService,
+  acc: EditAccumulator,
+  teamAcc: EditAccumulator,
+  team: () => Promise<TeamEdits>,
+): void {
+  const { rt } = scope;
+  // 根会话的文件**当场排空**：后台只等队友的冷读，不等根累加器。否则监听器返回后宿主就能开
+  // 下一回合，而下一回合的编辑会进入同一个累加器，被上一回合的后台批次 drain 走——上一批误检、
+  // 下一批漏检。队友文件放各自的累加器，等冷读完成后再并进同一次探测。
+  const dropped = acc.droppedCount();
+  const files = acc.drain();
+  const flight = (async (): Promise<void> => {
+    let mergedFiles: readonly string[];
+    let mergedDropped: number;
+    let resolvedTeam: TeamEdits;
+    try {
+      resolvedTeam = await team();
+      mergedDropped = dropped;
+      const teamDropped = teamAcc.droppedCount();
+      const teamFiles = teamAcc.drain();
+      mergedFiles = [...files, ...teamFiles];
+      mergedDropped += teamDropped;
+    } catch (error) {
+      // 冷读失败不能让根会话已经排空的编辑消失：放回累加器，等下一个回合再检查。
+      for (const file of files) {
+        acc.note("edit", file);
+      }
+      throw error;
+    }
+    scheduleReadyGates(scope, shell, mergedFiles, mergedDropped, resolvedTeam);
+  })();
+  rt.inFlightGates.add(flight);
+  // 结束之后自动从集合里移除：disposer 那次 await 拿到的快照因此总是"还没结束的全部批次"。
+  void (async (): Promise<void> => {
+    try {
+      await flight;
+    } catch (error) {
+      // 冷读/探测自己抛错时只记一条，绝不产生 unhandledRejection（disposer 仍会等这一趟结束）。
+      rt.log.error(
+        `[quality-gate] ${scope.sessionId}: gate scheduling failed: ${messageOf(error)}`,
+      );
+    } finally {
+      rt.inFlightGates.delete(flight);
+    }
+  })();
+}
+
+/** 没有队友输入时的懒加载结果（与 `teamInputFor` 的返回值同形）。 */
+const NO_TEAM_INPUT = (): Promise<TeamEdits> => Promise.resolve(NO_TEAM_EDITS);
+
+/**
+ * 决定本轮门禁的队友输入：列出队友 + 读运行状态（廉价，留在串行段），冷读台账交给后台批次。
+ *
+ * @param rt - 装载期运行时
+ * @param session - 根会话
+ * @param note - 把一条编辑并入累加器
+ * @param signal - 本回合信号（也用于冷读的组合信号）
+ * @returns 队友台账的懒加载函数；undefined = 队友仍在跑，本轮推迟
+ */
+async function teamInputFor(
+  rt: GateRuntime,
+  session: TurnAgent["session"],
+  note: (name: string, pathValue: string | undefined) => void,
+  signal: AbortSignal | undefined,
+): Promise<(() => Promise<TeamEdits>) | undefined> {
+  const members = await listTeamMembers(rt, session, signal);
+  let input: (() => Promise<TeamEdits>) | undefined = NO_TEAM_INPUT;
+  if (members !== null && members.length > 0) {
+    const deferred = teamGateDeferred(rt, session, members);
+    if (deferred === true) {
+      input = undefined;
+    } else if (deferred === false) {
+      // 只交一个 thunk：串行段不启动 observeSession，真正冷读在后台批次里发生（失败也能被
+      // scheduleTurnGates 的 catch 接住，根会话已排空的文件才放得回去）。
+      input = () => mergeTeamLedgers(rt, members, note, signal);
+    }
+  }
+  return input;
 }
 
 /**
@@ -2615,20 +2844,172 @@ async function handleTurnGate(rt: GateRuntime, payload: TurnStoppingPayload): Pr
   }
   // 具名子代理的编辑也属于这棵工作树（Team 不建隔离工作区）：队友还在跑就推迟本轮门禁，
   // 否则检查的是正在被并发改写的树；空闲/冷队友的台账经 observeSession 事件窗增量重放并入。
+  // 串行段只做两件廉价事：列出队友 + 读运行状态；冷会话重放交给下面的后台批次（teamInput 是 promise）。
+  // 队友文件单独收：根会话的累加器要在本监听器返回前排空（见 scheduleTurnGates）。
+  const teamAcc = new EditAccumulator();
   const note = (name: string, pathValue: string | undefined): void => {
-    noteEdit(acc, resolveCwd, name, pathValue);
+    noteEdit(teamAcc, resolveCwd, name, pathValue);
   };
-  const team = await collectTeamEdits(rt, session, note, payload.signal);
-  if (runtimeDisposed(rt) || team.deferred) {
-    // 推迟时**不 drain**：本轮的文件留在累加器里，等队友完成后开启的下一个回合一起检查。
+  const teamInput = await teamInputFor(rt, session, note, payload.signal);
+  if (runtimeDisposed(rt) || teamInput === undefined) {
+    // undefined = 队友仍在跑（推迟）：本轮文件留在累加器里，等队友完成开启的下一回合一起检查。
     return;
   }
   scheduleTurnGates(
     { rt, agent, cfg, messages, sessionId, turn, cwd: projectCwd, signal: payload.signal },
     shell,
     acc,
-    team,
+    teamAcc,
+    teamInput,
   );
+}
+
+/** 官方 Typert Remote 的服务键（= 线上命名空间；client 半的常量在 src/remote.ts，取值必须一致）。 */
+export const QUALITY_GATE_NAMESPACE = "qualityGate";
+
+/**
+ * 会话侧栏的宿主侧读取面（官方 Typert Remote）：按 sessionId 交出最近的门禁结果。
+ * 本包不自建 HTTP 端点，认证与分派由宿主 /api 网关负责。
+ */
+export class QualityGateRemoteService extends TypertRemoteService {
+  private readonly results: Map<string, GateResultRow[]>;
+  public constructor(ctx: Context, rt: GateRuntime) {
+    super(ctx, QUALITY_GATE_NAMESPACE);
+    this.rt = rt;
+    this.results = rt.recentResults;
+  }
+
+  private readonly rt: GateRuntime;
+
+  /** 最近一次门禁（跨会话取最新一条）：会话面板不知道自己的 sessionId 时读它。 */
+  public latest(): { readonly row: GateResultRow | undefined } {
+    let row: GateResultRow | undefined;
+    for (const rows of this.results.values()) {
+      const candidate = rows.at(-1);
+      if (candidate !== undefined && (row === undefined || candidate.at > row.at)) {
+        row = candidate;
+      }
+    }
+    return { row };
+  }
+
+  /**
+   * 立即跑一次本会话项目的门禁（右键入口）：只在 agent 空闲时执行，失败走与回合收口相同的
+   * 注入路径（配额、记忆反馈、lesson-loop 都不跳过）。返回状态给客户端做反馈，不抛错误。
+   */
+  public async run(request: unknown): Promise<{ readonly status: string }> {
+    const sessionId = sessionIdOf(request);
+    if (sessionId.length === 0) {
+      return { status: "invalid" };
+    }
+    const agents: unknown = this.rt.svc.get("agents");
+    const agent: unknown =
+      isRecord(agents) && typeof agents["get"] === "function"
+        ? Reflect.apply(agents["get"], agents, [sessionId])
+        : undefined;
+    if (!isTurnAgent(agent)) {
+      return { status: "no-agent" };
+    }
+    if (agent.status === "running") {
+      return { status: "busy" };
+    }
+    const cfg = settingsOf(this.rt.config);
+    if (!cfg.enabled) {
+      return { status: "disabled" };
+    }
+    const cwd = liveSessionCwdOf(agent);
+    if (cwd === undefined) {
+      return { status: "no-cwd" };
+    }
+    const shell = getShell(this.rt);
+    if (shell === undefined) {
+      return { status: "no-shell" };
+    }
+    const root = rootForFile(
+      findManifestRoot(path.join(cwd, MANUAL_PROBE_FILE), this.rt.maxRootDepth).root ?? cwd,
+      this.rt.maxRootDepth,
+      cfg.pnpmScripts,
+    );
+    const gates = detectGate([root], cfg.pnpmScripts, { securityAudit: cfg.securityAudit });
+    if (gates.length === 0) {
+      return { status: "no-gate" };
+    }
+    // 同一根上已经有一条门禁在跑（自动批次可能已在回合结束后 detached 运行）时不再并发一条。
+    if (gates.some((gate) => this.rt.activeGateRoots.has(gate.root))) {
+      return { status: "busy" };
+    }
+    const messages = this.rt.messages();
+    const resolved = resolvePolicy(this.rt, messages, agent.session);
+    const grants = grantGateRoots(
+      this.rt,
+      agent.session,
+      gates,
+      resolved.kind === "ok" ? resolved.binding : undefined,
+    );
+    // 与自动批次同一条理由：临时登记的可写根要进入策略快照，否则门禁在会话可写边界之外
+    // 执行时仍按旧策略裁决——手动入口会静默地跑一条注定被拒的门禁。
+    const effective =
+      grants.length === 0 ? resolved : resolvePolicy(this.rt, messages, agent.session);
+    const signal = AbortSignal.any([
+      this.rt.gateAbort.signal,
+      AbortSignal.timeout(cfg.gateBudgetMs),
+    ]);
+    const scope: TurnScope = {
+      rt: this.rt,
+      agent,
+      cfg,
+      messages,
+      sessionId,
+      turn: turnBoundaryOf(this.rt, agent.session)?.lastTurn ?? 0,
+      cwd,
+      signal,
+    };
+    // grants 归 runGateBatch 所有：它在 finally 里释放；这里再释放一次会把同一个可写根撤两遍。
+    // 批次登记进 inFlightGates：dispose 的 allSettled 要等到它结束，否则门禁子进程会活过卸载。
+    const flight = runGateBatch({
+      scope,
+      gates,
+      shell,
+      resolved: effective,
+      signal,
+      budget: cfg.gateBudgetMs,
+      grants,
+      collaborators: new Map(),
+    });
+    this.rt.inFlightGates.add(flight);
+    try {
+      await flight;
+    } finally {
+      this.rt.inFlightGates.delete(flight);
+    }
+    return { status: "done" };
+  }
+
+  /** 读某个会话最近的结果；sessionId 缺失或不是字符串时交空表（不是错误）。 */
+  public state(request: unknown): { readonly rows: readonly GateResultRow[] } {
+    return { rows: this.results.get(sessionIdOf(request)) ?? [] };
+  }
+}
+
+markRemote(QualityGateRemoteService.prototype, "latest");
+markRemote(QualityGateRemoteService.prototype, "run");
+markRemote(QualityGateRemoteService.prototype, "state");
+
+/** 注册读面（构造即注册）。替身/精简上下文没有反射口时返回 false，侧栏只少结果那一栏。 */
+/** 装上官方 Remote 服务；读面缺席（精简上下文/替身）时安静跳过。
+ *  返回值原先只有"装上/没装上"两种，调用点从未读过它——缺反射口与重复装载在行为上同义
+ *  （侧栏少一栏），所以这里只做副作用，不记账。 */
+function installQualityGateRemote(svc: GateHost, rt: GateRuntime): void {
+  if (isRecord(svc) && isRecord(svc.reflect) && typeof svc.reflect.provide === "function") {
+    try {
+      // oxlint-disable-next-line eslint/no-new -- 构造即注册；Service 构造只读 reflect/provide
+      new QualityGateRemoteService(svc, rt);
+    } catch {
+      /* v8 ignore next 1 —— 构造抛出的唯一现实成因是同一作用域里这个服务键已被另一份占用
+         （重复装载/热挂），此时"没装上"与缺反射口同义，侧栏照旧只少一栏；单测用真实
+         Context 构造的是成功分支，故意造重复实例去覆盖它只会把测试写成对 cordis 报错的断言。 */
+    }
+  }
 }
 
 export function apply(ctx: Context, config: ConfigShape): void {
@@ -2714,8 +3095,13 @@ export function apply(ctx: Context, config: ConfigShape): void {
     teamListWarned: false,
     teamReadWarned: false,
     editLedger: { value: undefined },
+    recentResults: new Map<string, GateResultRow[]>(),
+    activeGateRoots: new Map<string, number>(),
     disposed: false,
   };
+
+  // 读面缺席（精简上下文/替身）只意味着侧栏少一栏数据，不是缺陷：安静地跳过，不刷日志。
+  installQualityGateRemote(svc, rt);
 
   // 用编辑台账投影是**可选**的增强：注册表不在（精简的组合、旧宿主）时整条退回全量扫描，
   // 门禁本身不受影响。注册失败只警告一次：读不到编辑记录是性能问题，不是少了什么判断。
@@ -2769,6 +3155,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
     rt.injectState.clear();
     rt.lastSeqBySession.clear();
     rt.accumulators.clear();
+    // 侧栏读的是最近结果；卸载后不清会让下一装载周期读到上一周期的结果（同一 sessionId 可能复用）。
+    rt.recentResults.clear();
     // allSettled 会同步对 iterable 取快照（这些集合只在异步的收尾里删项，迭代期间不会变）。
     return Promise.allSettled(rt.inFlightGates);
   });

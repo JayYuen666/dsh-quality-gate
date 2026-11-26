@@ -9,11 +9,19 @@ import path from "node:path";
 /**
  * 需要过门禁的扩展名（代码与配置；md/txt/图片等免检）。
  *
- * **不含 `.sh`**：四条门禁命令（tsc / ruff / cargo / pnpm check）没有一条能校验 shell
- * 脚本，而 `.sh` 会把项目根解析到最近的 package.json——`~/.dsh/run-all-tests.sh` 因此
- * 把检查落到用户主目录那个 `npm init` 空壳上，报出一次假失败（本机实测）。
+ * **不含 `.sh`**：shell 脚本没有稳定的内置检查器，而 `.sh` 会把项目根解析到最近的
+ * package.json——`~/.dsh/run-all-tests.sh` 因此把检查落到用户主目录那个 `npm init` 空壳上，
+ * 报出一次假失败（本机实测）。项目自己的 check 脚本仍然可以通过编辑普通源码间接覆盖它。
+ *
+ * 覆盖九种内置语言：JS/TS、Rust、Python、Go、Ruby、Java/Kotlin、C/C++、PHP、C#；
+ * 以及常见的构建/配置文件。文件名标记（Makefile、CMakeLists.txt 等）由 GATED_NAME 单独认。
  */
-const GATED_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|rs|py|json|ya?ml|toml)$/iu;
+const GATED_EXT =
+  /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|vue|svelte|rs|py|go|rb|java|kt|kts|scala|c|h|cc|cpp|cxx|hh|hpp|cs|fs|vb|php|swift|json|jsonc|neon|ya?ml|toml|xml|gradle|ini|cfg|conf|mod|sum|lock|sln|csproj|fsproj|vbproj)$/iu;
+
+/** 没有扩展名或扩展名不在上面的构建清单（`makefile` 与 `GNUmakefile` 同样是 Make 的入口）。 */
+const GATED_NAME =
+  /^(?:GNUmakefile|Makefile|makefile|CMakeLists\.txt|Gemfile|Rakefile|Dockerfile|gradlew|gradlew\.bat|mvnw|mvnw\.cmd|\.rspec|\.eslintrc|\.prettierrc|\.flake8|\.editorconfig|\.clang-tidy|\.cppcheck|\.oxlintrc|\.oxfmtrc|\.pylintrc|pylintrc|checkstyle\.xml|MODULE\.bazel|WORKSPACE|WORKSPACE\.bazel|BUILD\.bazel|\.clang-format)$/u;
 
 /** 编辑类工具名。str_replace_editor 是 dsh-base 并存的另一套编辑器
  *  （host 侧只对 create/str_replace/insert 收集路径，view 是只读的，不进这里）；apply_patch 是
@@ -66,7 +74,7 @@ export class EditAccumulator {
     // 归一化同时把 `a/../b.ts`、`a//b.ts` 收成同一个键，避免重复项白占容量、把真正需要门禁的文件
     // 挤到被淘汰。
     const normalized = path.normalize(filePath.trim());
-    if (!GATED_EXT.test(normalized)) {
+    if (!GATED_EXT.test(normalized) && !GATED_NAME.test(path.basename(normalized))) {
       return;
     }
     // 重复编辑要把顺序挪到最近：`Set.add` 对已存在元素不改变顺序，否则"整回合被反复编辑、

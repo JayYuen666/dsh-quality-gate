@@ -231,6 +231,13 @@ describe("卡片取值的 zod 区间", () => {
     );
   });
 
+  it("供应链扫描开关按布尔解析：只接受 true/false，不把字符串当真", () => {
+    assert.equal(projectCardValues({ securityAudit: true }).securityAudit, true);
+    assert.equal(projectCardValues({ securityAudit: false }).securityAudit, false);
+    assert.equal(projectCardValues({ securityAudit: "true" }).securityAudit, undefined);
+    assert.equal(projectCardValues({ securityAudit: 1 }).securityAudit, undefined);
+  });
+
   it("一个字段越界不影响同一份快照里的其余字段", () => {
     const values = projectCardValues({
       maxInjectsPerTurn: 99,
@@ -335,6 +342,9 @@ describe("卡片 apply 怎么接上官方 locale", () => {
       effect: ((factory, label) => {
         trace.effects.set(label ?? "", factory);
       }) as Context["effect"],
+      get: () => {
+        // 本卡不取 remote：任何名字都当作没有这一面。
+      },
       slots: {
         inject: (slot, factory) => {
           trace.slots.push(slot);

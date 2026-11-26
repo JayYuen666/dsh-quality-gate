@@ -7,7 +7,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { tmpdir } from "node:os";
 
 import path from "node:path";
-import plugin, { shellArg } from "../host.ts";
+import plugin, { QualityGateRemoteService, gateToolUnavailable, shellArg } from "../host.ts";
+import { Context } from "@deepseek-ai/cordis";
 // 0.1.7 隐式注册共用的测试替身：Config 引用、逐字段默认值、宿主 volatileForm 的复刻。
 import {
   applyGate,
@@ -32,10 +33,24 @@ import { logged, loggedText } from "./setup-logs.ts";
 const CREDENTIAL_FIXTURE_TOKEN = "tok-from-credentials";
 /** 项目根下的 npm 清单名。 */
 const PKG_JSON = "package.json";
+const PYPROJECT_TOML = "pyproject.toml";
+const PKG_BODY = '{"name":"t"}';
 /** 项目根下的 TypeScript 配置名（给出 tsc 这条门禁的必要条件）。 */
 const TSCONFIG = "tsconfig.json";
 /** 临时项目里那个真实 TS 源文件的内容。 */
 const TS_SOURCE_BODY = "export const x = 1\n";
+/**
+ * 跨平台的 tsc 门禁命令形状：host 在运行时解析本地 typescript 入口，Windows 上会把绝对
+ * 路径加单引号（`'D:\...\bin\tsc' --noEmit`），不能把断言写死成裸 `tsc --noEmit`。
+ * 同时要求以 `--noEmit` 结尾，避免把 `pnpm audit` 之类误判成 tsc 门禁。
+ */
+const TSC_GATE_COMMAND = /(?:^|[\\/])tsc'? --noEmit$/u;
+/** 新回归夹具里的 TS 工程内容（与 makeProject 同一份，集中一处避免重复字面量规则）。 */
+const TS_PROJECT_BODY = '{"compilerOptions":{},"include":["a.ts"]}';
+/** pnpm lockfile 的最小合法内容与文件名，供根选择回归用例复用。 */
+const PNPM_LOCK_NAME = "pnpm-lock.yaml";
+const PNPM_LOCK_BODY = "lockfileVersion: '9.0'\n";
+const PNPM_WORKSPACE_NAME = "pnpm-workspace.yaml";
 /** 记忆反馈降级时那条 warn 的行内片段（用来数 warn 是不是只出现了一次）。 */
 const MEMORY_SKIP_WARN_TEXT = "memory feedback skipped";
 
@@ -189,8 +204,15 @@ interface MockCtx {
   subagents?:
     | { listDescendants: (id: string, signal?: AbortSignal) => Promise<readonly unknown[]> }
     | undefined;
-  /** ctx.agents（AgentRegistry）：live agent 的 id/status。 */
-  agents?: { list: () => readonly unknown[] } | undefined;
+  /** ctx.agents（AgentRegistry）：live agent 的 id/status + 回合边界（openTurnStartSeq/lastTurn）。 */
+  agents?:
+    | {
+        list: () => readonly unknown[];
+        turnBoundaryOf?: (
+          session: unknown,
+        ) => { openTurnStartSeq?: number | null; lastTurn?: number | undefined } | undefined;
+      }
+    | undefined;
   /** ctx.credentials 服务（undefined = 组合里没装凭据服务；记忆反馈据此降级不推送）。 */
   credentials: { resolve: (ref: string) => Promise<CredentialHit | undefined> } | undefined;
   /** resolve 的返回（undefined = 该引用未配置凭据）。 */
@@ -229,7 +251,7 @@ interface MockCtx {
   sessionQuery?: {
     observeSession: (
       id: string,
-      options?: { readonly projectionMode?: "none" | "all" },
+      options?: { readonly projectionMode?: "none" | "all"; readonly signal?: AbortSignal },
     ) => Promise<{
       events: unknown;
       inheritedEventCount: number | undefined;
@@ -271,9 +293,11 @@ function createMockCtx(): MockCtx {
       memoryFeedback: true,
       memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
+      pnpmScripts: "",
       // 非 volatile 的部署级设置：宿主 fork 的 resolve 对它们交普通值（不包 Volatile 引用）
       maxRootDepth: 10,
       gateStdoutMaxBytes: 65_536,
+      securityAudit: false,
     },
     fiber: { id: "quality-gate-fiber" },
     configureCalls: [],
@@ -393,10 +417,21 @@ function makeProject(name: string): string {
     `qg-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   );
   mkdirSync(root, { recursive: true });
-  writeFileSync(path.join(root, PKG_JSON), '{"name":"t","scripts":{"check":"tsc"}}');
+  writeFileSync(path.join(root, PKG_JSON), PKG_BODY);
   // tsconfig.json 必须存在——tsc 这条门禁要求那是真的 TS 项目（对应的回归断言见 gate.test.ts）
-  writeFileSync(path.join(root, TSCONFIG), '{"compilerOptions":{},"include":["a.ts"]}');
+  writeFileSync(path.join(root, TSCONFIG), TS_PROJECT_BODY);
   writeFileSync(path.join(root, "a.ts"), TS_SOURCE_BODY);
+  scratchRoots.push(root);
+  return root;
+}
+
+/** 造一个不带 package.json 的空项目根（多语言根探测用例用；调用方自己写清单）。 */
+function makeBareProject(name: string): string {
+  const root = path.join(
+    tmpdir(),
+    `qg-lang-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  mkdirSync(root, { recursive: true });
   scratchRoots.push(root);
   return root;
 }
@@ -451,6 +486,37 @@ async function runTurn(env: MockCtx, sessionId: string, log: unknown[]): Promise
   };
   env.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
   await sleep(30);
+}
+
+/** 装载插件并返回 mock ctx（门禁判定用例共用）。 */
+function mountedCtx(): MockCtx {
+  const ctx = createMockCtx();
+  applyGate(ctx, ctx.value);
+  return ctx;
+}
+
+/** 注入内容记进 ctx 的 agent（agentFor 的 followup 是空实现，只适合断言 shellCommands 的用例）。 */
+function agentInto(ctx: MockCtx, project: string): unknown {
+  return {
+    session: {
+      id: "s-ws",
+      header: { cwd: project },
+      snapshotEvents: () => gateEvt(project),
+    },
+    status: "idle",
+    inbox: { nextTurn: [], nextStep: [] },
+    followup(message: unknown) {
+      ctx.followupCalls.push(message);
+    },
+  };
+}
+
+/** 把一个根跑一轮 turn-stopping，返回实际执行的命令（多语言执行链的观察面）。 */
+async function runGateAt(root: string): Promise<string[]> {
+  const ctx = mountedCtx();
+  ctx.handlers["agent/turn-stopping"]!({ agent: agentInto(ctx, root), turn: 1 });
+  await sleep(20);
+  return ctx.shellCommands.map((spec) => spec.command);
 }
 
 /** 收集 console.warn（记忆反馈的降级必须可观测，但绝不刷屏）。 */
@@ -554,9 +620,11 @@ describe("quality-gate host 接线", () => {
       memoryFeedback: false,
       memoryGatewayUrl: "",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
+      pnpmScripts: "",
       // 非 volatile 的部署级设置：默认值 = 迁移前硬编码的那个现值，cordis.yml 行 config 可改
       maxRootDepth: 10,
       gateStdoutMaxBytes: 65_536,
+      securityAudit: false,
     });
   });
 
@@ -999,7 +1067,7 @@ describe("quality-gate host 接线", () => {
     for (let i = 0; i < 2; i += 1) {
       const root = path.join(tmpdir(), `qg-test-budget-${i}-${Date.now()}-${i}`);
       mkdirSync(root, { recursive: true });
-      writeFileSync(path.join(root, PKG_JSON), '{"name":"t"}');
+      writeFileSync(path.join(root, PKG_JSON), PKG_BODY);
       // tsconfig.json 必须存在——只有 package.json 的空壳不会给出 tsc 这条门禁
       writeFileSync(path.join(root, TSCONFIG), '{"compilerOptions":{}}');
       roots.push(root);
@@ -1338,6 +1406,36 @@ describe("quality-gate host 接线", () => {
     }
   });
 
+  it("子命令缺失（cargo audit / composer audit）按工具缺失，不按代码失败", () => {
+    const result = {
+      exitCode: 101,
+      stdout: { text: "", truncated: false },
+      stderr: { text: "error: no such command: `audit`", truncated: false },
+      timedOut: false,
+      aborted: false,
+    } as unknown as Parameters<typeof gateToolUnavailable>[1];
+    assert.equal(gateToolUnavailable({ root: "/w", command: ["cargo", "audit"] }, result), true);
+    assert.equal(gateToolUnavailable({ root: "/w", command: ["cargo", "check"] }, result), false);
+    const composer = {
+      ...result,
+      exitCode: 1,
+      stderr: { text: 'Command "audit" is not defined.', truncated: false },
+    };
+    assert.equal(
+      gateToolUnavailable({ root: "/w", command: ["composer", "audit"] }, composer),
+      true,
+    );
+    const normal = {
+      ...result,
+      exitCode: 1,
+      stderr: { text: "audit found issues", truncated: false },
+    };
+    assert.equal(
+      gateToolUnavailable({ root: "/w", command: ["composer", "audit"] }, normal),
+      false,
+    );
+  });
+
   it("真类型错误（exit 1 + TS 诊断，无 stub 横幅）仍报失败", async () => {
     ctx.gateExitCode = 1;
     ctx.gateStderr = "";
@@ -1582,6 +1680,163 @@ describe("quality-gate host 接线", () => {
   });
 });
 
+describe("quality-gate: 多语言根探测与执行", () => {
+  afterEach(recycleScratchRoots);
+
+  it("go 根 → go vet + go test 都真实执行", async () => {
+    const root = makeBareProject("go");
+    writeFileSync(path.join(root, "go.mod"), "module example.com/m\n");
+    assert.deepEqual(await runGateAt(root), ["go vet ./...", "go test ./..."]);
+  });
+
+  it("rust 根 → cargo check + cargo test --no-run", async () => {
+    const root = makeBareProject("rust");
+    writeFileSync(path.join(root, "Cargo.toml"), '[package]\nname = "x"\n');
+    assert.deepEqual(await runGateAt(root), ["cargo check", "cargo test --no-run"]);
+  });
+
+  it("ruby 根 → rubocop（.rubocop.yml 是开启条件）", async () => {
+    const root = makeBareProject("ruby");
+    writeFileSync(path.join(root, "Gemfile"), 'source "https://rubygems.org"\n');
+    writeFileSync(path.join(root, ".rubocop.yml"), "AllCops:\n  NewCops: enable\n");
+    assert.deepEqual(await runGateAt(root), ["rubocop"]);
+  });
+
+  it("java 根 → mvn test", async () => {
+    const root = makeBareProject("java");
+    writeFileSync(path.join(root, "pom.xml"), "<project/>");
+    assert.deepEqual(await runGateAt(root), ["mvn -q test"]);
+  });
+
+  it("pom 读不出来时不猜 verify 插件，仍按 Maven test", async () => {
+    const root = makeBareProject("java-unreadable");
+    mkdirSync(path.join(root, "pom.xml"));
+    assert.deepEqual(await runGateAt(root), ["mvn -q test"]);
+  });
+
+  it("c# 根通过 .csproj 被发现 → dotnet build", async () => {
+    const root = makeBareProject("dotnet");
+    writeFileSync(path.join(root, "App.csproj"), "<Project/>");
+    assert.deepEqual(await runGateAt(root), ["dotnet build --nologo"]);
+  });
+
+  it("cMake 的 build 目录标记被探测到 → cmake + ctest", async () => {
+    const root = makeBareProject("cmake");
+    writeFileSync(path.join(root, "CMakeLists.txt"), "project(x)\n");
+    mkdirSync(path.join(root, "build"), { recursive: true });
+    writeFileSync(path.join(root, "build", "CMakeCache.txt"), "");
+    writeFileSync(path.join(root, "build", "CTestTestfile.cmake"), "");
+    assert.deepEqual(await runGateAt(root), [
+      "cmake --build build",
+      "ctest --test-dir build --output-on-failure",
+    ]);
+  });
+
+  it("makefile 的 check 目标被读成项目门禁", async () => {
+    const root = makeBareProject("make");
+    writeFileSync(path.join(root, "Makefile"), "check:\n\t@true\n");
+    assert.deepEqual(await runGateAt(root), ["make check"]);
+  });
+
+  it("pHP composer 的 test 脚本优先于 validate", async () => {
+    const root = makeBareProject("php");
+    writeFileSync(path.join(root, "composer.json"), '{"scripts":{"test":"phpunit"}}');
+    assert.deepEqual(await runGateAt(root), ["composer run-script test"]);
+  });
+
+  it("python 的 pytest/mypy 配置段从 pyproject 读出并执行（没有 mypy 段就不发 mypy）", async () => {
+    const root = makeBareProject("python");
+    writeFileSync(path.join(root, PYPROJECT_TOML), "[tool.pytest.ini_options]\n[tool.mypy]\n");
+    assert.deepEqual(await runGateAt(root), ["pytest -q", "mypy ."]);
+
+    const pytestOnly = makeBareProject("python-pytest");
+    writeFileSync(path.join(pytestOnly, PYPROJECT_TOML), "[tool.pytest.ini_options]\n");
+    assert.deepEqual(await runGateAt(pytestOnly), ["pytest -q"]);
+  });
+
+  it("pytest.ini / setup.cfg / tox.ini 的 pytest 段都能读到", async () => {
+    const pytestIni = makeBareProject("pytest-ini");
+    writeFileSync(path.join(pytestIni, "pytest.ini"), "[pytest]\n");
+    assert.deepEqual(await runGateAt(pytestIni), ["pytest -q"]);
+
+    const setupCfg = makeBareProject("setup-cfg");
+    writeFileSync(path.join(setupCfg, "setup.cfg"), "[tool:pytest]\n");
+    assert.deepEqual(await runGateAt(setupCfg), ["pytest -q"]);
+
+    const toxIni = makeBareProject("tox-ini");
+    writeFileSync(path.join(toxIni, "tox.ini"), "[pytest]\n");
+    assert.deepEqual(await runGateAt(toxIni), ["pytest -q"]);
+  });
+
+  it("mypy.ini / setup.cfg 的 [mypy] 段都能开启 mypy", async () => {
+    const mypyIni = makeBareProject("mypy");
+    writeFileSync(path.join(mypyIni, "mypy.ini"), "[mypy]\n");
+    assert.deepEqual(await runGateAt(mypyIni), ["mypy ."]);
+
+    const setupCfg = makeBareProject("mypy-setup");
+    writeFileSync(path.join(setupCfg, "setup.cfg"), "[mypy]\n");
+    assert.deepEqual(await runGateAt(setupCfg), ["mypy ."]);
+  });
+
+  it("clang-tidy / cppcheck 需要 compile_commands.json 才发命令", async () => {
+    const root = makeBareProject("cpp-tidy");
+    writeFileSync(path.join(root, "CMakeLists.txt"), "project(x)\n");
+    writeFileSync(path.join(root, ".clang-tidy"), "Checks: '*'\n");
+    mkdirSync(path.join(root, "build"));
+    writeFileSync(path.join(root, "build/compile_commands.json"), "[]\n");
+    assert.deepEqual(await runGateAt(root), ["run-clang-tidy -p build"]);
+  });
+
+  it("rake 的 test 任务能成为项目门禁", async () => {
+    const root = makeBareProject("rake-test");
+    writeFileSync(
+      path.join(root, "Rakefile"),
+      'task :check do\nend\ntask "test" do\nend\ntask test: do\nend\n',
+    );
+    assert.deepEqual(await runGateAt(root), ["rake check"]);
+  });
+
+  it("rake 文件读不出来（是目录）→ 不发 rake", async () => {
+    const root = makeBareProject("rake-unreadable");
+    mkdirSync(path.join(root, "Rakefile"));
+    assert.deepEqual(await runGateAt(root), []);
+  });
+
+  it("oxlint / oxfmt 配置能开启内置 lint 与格式化门禁", async () => {
+    const root = makeBareProject("js-ox");
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    writeFileSync(path.join(root, ".oxlintrc.json"), "{}\n");
+    writeFileSync(path.join(root, ".oxfmtrc.json"), "{}\n");
+    assert.deepEqual(await runGateAt(root), ["oxlint .", "oxfmt --check ."]);
+  });
+
+  it("tox.ini 的 [flake8] 段也能开启 flake8", async () => {
+    const root = makeBareProject("tox-flake8");
+    writeFileSync(path.join(root, "tox.ini"), "[flake8]\n");
+    assert.deepEqual(await runGateAt(root), ["flake8"]);
+  });
+
+  it("python 的 black/pyright 配置段与 setup.cfg 的 flake8 段都真实执行", async () => {
+    const root = makeBareProject("python-mainstream");
+    writeFileSync(path.join(root, PYPROJECT_TOML), "[tool.black]\n[tool.pyright]\n");
+    writeFileSync(path.join(root, "setup.cfg"), "[flake8]\n");
+    assert.deepEqual(await runGateAt(root), ["black --check .", "flake8", "pyright"]);
+  });
+
+  it("setup.cfg / pyproject.toml 读不出来（是目录）→ 不猜对应工具", async () => {
+    const root = makeBareProject("python-unreadable");
+    mkdirSync(path.join(root, "setup.cfg"));
+    mkdirSync(path.join(root, PYPROJECT_TOML));
+    assert.deepEqual(await runGateAt(root), []);
+  });
+
+  it("makefile 存在但读不出来（是目录）→ not-run，不发 make", async () => {
+    const root = makeBareProject("bad-make");
+    mkdirSync(path.join(root, "Makefile"));
+    assert.deepEqual(await runGateAt(root), []);
+  });
+});
+
 // ══ ④ pnpm check 假失败防线 + create 编辑器 ════════════
 /** 造一个带 pnpm-workspace.yaml 的临时根；checkScript 控制是否声明 check。 */
 function makeWsProject(name: string, opts: { checkScript: boolean }): string {
@@ -1594,8 +1849,8 @@ function makeWsProject(name: string, opts: { checkScript: boolean }): string {
     ? '{"name":"t","scripts":{"check":"tsc"}}'
     : '{"name":"t","scripts":{"build":"tsc"}}';
   writeFileSync(path.join(root, PKG_JSON), pkg);
-  writeFileSync(path.join(root, "pnpm-workspace.yaml"), "packages:\n  - .\n");
-  writeFileSync(path.join(root, TSCONFIG), '{"compilerOptions":{},"include":["a.ts"]}');
+  writeFileSync(path.join(root, PNPM_WORKSPACE_NAME), "packages:\n  - .\n");
+  writeFileSync(path.join(root, TSCONFIG), TS_PROJECT_BODY);
   writeFileSync(path.join(root, "a.ts"), TS_SOURCE_BODY);
   scratchRoots.push(root);
   return root;
@@ -1662,6 +1917,62 @@ describe("quality-gate: pnpm check script 探测", () => {
     await sleep(20);
     assert.equal(ctx.shellCommands.length, 0);
     assert.equal(ctx.followupCalls.length, 0);
+  });
+});
+
+// ══ securityAudit 是追加层，不得参与“这个根有没有门禁”的判断 ═════════════
+describe("quality-gate: securityAudit 不参与根选择", () => {
+  let ctx: MockCtx;
+
+  beforeEach(() => {
+    ctx = createMockCtx();
+    // 打开供应链扫描：如果它被算进根选择，内层/外层的 pnpm audit 都会抢走真正的门禁。
+    ctx.value["securityAudit"] = true;
+    applyGate(ctx, ctx.value);
+  });
+
+  afterEach(recycleScratchRoots);
+
+  it("只有 lockfile 的外层 workspace 不会把子包真正的 tsc 换成 pnpm audit", async () => {
+    const outer = makeBareProject("audit-outer");
+    writeFileSync(path.join(outer, PKG_JSON), '{"name":"outer","scripts":{"build":"true"}}');
+    writeFileSync(path.join(outer, PNPM_WORKSPACE_NAME), "packages:\n  - packages/*\n");
+    writeFileSync(path.join(outer, PNPM_LOCK_NAME), PNPM_LOCK_BODY);
+    const inner = path.join(outer, "packages", "inner");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(path.join(inner, PKG_JSON), '{"name":"inner"}');
+    writeFileSync(path.join(inner, TSCONFIG), TS_PROJECT_BODY);
+    writeFileSync(path.join(inner, "a.ts"), TS_SOURCE_BODY);
+
+    ctx.gateExitCode = 0;
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(inner)), turn: 1 });
+    await sleep(20);
+
+    assert.equal(ctx.shellCommands.length, 1, "只该跑子包自己的门禁");
+    const [run] = ctx.shellCommands;
+    assert.ok(run, "只该跑子包自己的门禁");
+    assert.equal(run.workdir, inner, "根应停在子包，不该被外层的 lockfile 拉走");
+    assert.match(run.command, TSC_GATE_COMMAND, "真正该跑的是子包的 tsc");
+    assert.doesNotMatch(run.command, /pnpm audit/u);
+  });
+
+  it("只有 lockfile 的子包不会压掉外层已声明的 pnpm check", async () => {
+    const outer = makeWsProject("audit-inner", { checkScript: true });
+    const inner = path.join(outer, "packages", "inner");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(path.join(inner, PKG_JSON), '{"name":"inner"}');
+    writeFileSync(path.join(inner, PNPM_LOCK_NAME), PNPM_LOCK_BODY);
+
+    ctx.gateExitCode = 0;
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(inner)), turn: 1 });
+    await sleep(20);
+
+    assert.equal(ctx.shellCommands.length, 1, "外层声明的 check 不能被内层的扫描条目顶掉");
+    const [run] = ctx.shellCommands;
+    assert.ok(run, "外层声明的 check 不能被内层的扫描条目顶掉");
+    assert.equal(run.workdir, outer, "应升级到真正有 check 的 workspace 根");
+    assert.match(run.command, /pnpm check/u);
+    assert.doesNotMatch(run.command, /pnpm audit/u);
   });
 });
 
@@ -1874,7 +2185,7 @@ describe("quality-gate: memoryFeedback 反馈", () => {
 describe("quality-gate 0.1.7 隐式注册验收", () => {
   afterEach(recycleScratchRoots);
 
-  /** 设置卡该能编辑的字段（本包六项全是实时项，一个都不该漏）。 */
+  /** 设置卡该能编辑的字段（本包八项全是实时项，一个都不该漏）。 */
   const EDITABLE = [
     "enabled",
     "gateBudgetMs",
@@ -1882,21 +2193,23 @@ describe("quality-gate 0.1.7 隐式注册验收", () => {
     "memoryFeedback",
     "memoryGatewayKeyRef",
     "memoryGatewayUrl",
+    "pnpmScripts",
+    "securityAudit",
   ];
 
   it("命名空间 = cordis.patch.yml 的条目 id", () => {
     assert.equal(patchEntryId(), PLUGIN_ID);
   });
 
-  it("volatileForm(Config) 的字段集恰为六项可编辑字段", () => {
+  it("volatileForm(Config) 的字段集恰为八项可编辑字段", () => {
     const form = volatileFormOf(plugin.Config as unknown as SchemaNode);
     assert.ok(form !== null, "没有任何 volatile 字段 → 宿主 describe() 整条跳过本条目");
     assert.deepEqual(form.toSorted(), EDITABLE, "投影字段集与设置卡预期可编辑项不一致");
     assert.deepEqual(
       Object.keys(configDict()).toSorted(),
       [...EDITABLE, "gateStdoutMaxBytes", "maxRootDepth"].toSorted(),
-      "schema 字段全集 = 六项可编辑字段 + 两项非 volatile 部署值（maxRootDepth / " +
-        "gateStdoutMaxBytes，W4）：多了要同步这张清单，少了说明字段被误删",
+      "schema 字段全集 = 八项可编辑字段 + 两项非 volatile 部署值（maxRootDepth / " +
+        "gateStdoutMaxBytes）：多了要同步这张清单，少了说明字段被误删",
     );
   });
 
@@ -1987,6 +2300,17 @@ describe("quality-gate 行级 config", () => {
       1024,
       "stdout 的捕获上限不再是硬编码的 64KiB：改 cordis.yml 里的值就生效（判据见 config.md 里 volatile 字段那一段）",
     );
+  });
+
+  it("行级 config 的 securityAudit=true 追加 npm audit（默认关）", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("row-security");
+    writeFileSync(path.join(project, "package-lock.json"), "{}\n");
+    applyGate(ctx, rowValue({ securityAudit: true }));
+    await runTurn(ctx, "s-row-security", gateEvt(project));
+    assert.equal(ctx.shellCommands.length, 2);
+    assert.match(ctx.shellCommands[0]?.command ?? "", /--noEmit$/u);
+    assert.equal(ctx.shellCommands[1]?.command, "npm audit --audit-level=high --omit=dev");
   });
 
   it("行级 config 收紧 maxRootDepth 后深度不够即截断并 warn（不再硬编码 10 层）", async () => {
@@ -2220,6 +2544,27 @@ describe("编辑台账投影的读取路径", () => {
     assert.equal(ctx.shellCommands[0]?.workdir, project);
   });
 
+  it("首次加载台账时也只用本回合起点：不重放起点以前的历史编辑", async () => {
+    // 插件刚装载 / 宿主刚重启时 lastSeq 为空；如果台账路径从 0 开始，历史编辑会全部进入本回合。
+    const old = makeProject("ledger-history-old");
+    await armProjection(() => ({
+      edits: [
+        { seq: 0, callId: "c-old", name: "edit", path: `${old}/a.ts`, cwd: "", outcome: "ok" },
+        { seq: 2, callId: "c-cur", name: "edit", path: `${project}/a.ts`, cwd: "", outcome: "ok" },
+      ],
+    }));
+    ctx.gateExitCode = 0;
+    ctx.agents = {
+      list: () => [],
+      turnBoundaryOf: () => ({ openTurnStartSeq: 2, lastTurn: 1 }),
+    };
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentOf(3), turn: 1 });
+    await sleep(20);
+
+    assert.equal(ctx.shellCommands.length, 1, "起点以前的历史编辑不该重放");
+    assert.equal(ctx.shellCommands[0]?.workdir, project, "只该跑当前根");
+  });
+
   it("失败的条目被跳过：只剩失败的编辑时门禁不跑", async () => {
     await armProjection(() => ({
       edits: [
@@ -2230,6 +2575,32 @@ describe("编辑台账投影的读取路径", () => {
     await sleep(20);
     assert.equal(observed, 0);
     assert.equal(ctx.shellCommands.length, 0, "被失败结果否定的编辑不记录");
+  });
+
+  it("台账条目的相对路径按条目自己的 cwd 解析（换目录后历史条目不指错根）", async () => {
+    // 会话后来的活目录已经换到别处；条目记的是**当时**的 cwd（v3 的承重字段）。
+    // 一律按会话当前目录解析时，相对路径会落到另一个项目根上——断言 workdir 就能看出差别。
+    const elsewhere = makeProject("ledger-elsewhere");
+    await armProjection(() => ({
+      edits: [{ seq: 0, callId: "c1", name: "edit", path: "a.ts", cwd: project, outcome: "ok" }],
+    }));
+    const agent = {
+      session: {
+        id: "s-proj",
+        header: { cwd: elsewhere },
+        seq: 1,
+        snapshotEvents: () => [],
+      },
+      status: "running",
+      inbox: { nextTurn: [], nextStep: [] },
+      followup() {
+        void 0;
+      },
+    };
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+    assert.equal(ctx.shellCommands[0]?.workdir, project, "相对路径应按条目 cwd 解析");
   });
 
   it("fork 出来的会话（isSeeded）→ 回退到观察接口：继承前缀的切点只有观察接口给得出", async () => {
@@ -2559,6 +2930,49 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     assert.equal(ctx.shellCommands.length, 1, "推迟的文件必须在后续回合补检");
   });
 
+  it("冷读服务读取抛错 → 根文件放回累加器，下一回合补检", async () => {
+    members = [
+      { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
+    ];
+    live = [{ id: "s-child", status: "idle" }];
+    childSessions.set("s-child", {
+      id: "s-child",
+      inheritedEventCount: 0,
+      header: { cwd: project },
+      seq: 0,
+    });
+    ledgers.delete("s-root");
+    arm();
+    ctx.sessionQuery = {
+      observeSession: async (id: string) =>
+        id === "s-root" ? observationOfFiredSession(ctx) : childObservation(id),
+    };
+    const get = ctx.get.bind(ctx);
+    let queryGets = 0;
+    ctx.get = (name: string) => {
+      if (name === "sessionQuery") {
+        queryGets += 1;
+        // 第一次是读根会话的编辑事件（必须成功，文件才会进入累加器）；后台冷读那次才失败。
+        if (queryGets > 1) {
+          throw new Error("query service down");
+        }
+      }
+      return get(name);
+    };
+    fireRootTurn(ctx, { cwd: project, seq: 1, events: [editCall(path.join(project, "a.ts"))] });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "冷读失败这一轮不得发门禁");
+    assert.match(loggedText(), /gate scheduling failed/u, "调度失败必须落一条 error");
+    ctx.get = get;
+    fireRootTurn(ctx, { cwd: project, seq: 1, events: [] });
+    await sleep(80);
+    assert.equal(
+      ctx.shellCommands.length,
+      1,
+      `已经排空的根文件必须被放回并补检; logs=${loggedText()}`,
+    );
+  });
+
   it("空闲队友的台账并入门禁，并在失败文案里点名", async () => {
     members = [
       { kind: CHILD_ROW_KIND, id: "s-child", path: "reviewer", activity: INACTIVE_ACTIVITY },
@@ -2822,7 +3236,7 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
         throw new Error("catalog unavailable");
       },
     };
-    ctx.agents = { list: () => [] };
+    ctx.agents = { list: () => [] } as never;
     ledgers.set("s-root", {
       edits: [
         {
@@ -3043,7 +3457,7 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
     ];
     live = [];
     ctx.subagents = { listDescendants: async () => members };
-    ctx.agents = { list: () => [] };
+    ctx.agents = { list: () => [] } as never;
     applyGate(ctx, ctx.value);
     fireRootTurn(ctx, { cwd: project, seq: 0 });
     await sleep(20);
@@ -3063,7 +3477,7 @@ describe("rc.2 集成：具名子代理的编辑与推迟", () => {
       seq: 1,
     });
     ctx.subagents = { listDescendants: async () => members };
-    ctx.agents = { list: () => [] };
+    ctx.agents = { list: () => [] } as never;
     applyGate(ctx, ctx.value);
     await sleep(0);
     fireRootTurn(ctx, { cwd: project, seq: 0 });
@@ -3141,3 +3555,434 @@ describe("rc.2 集成：工具失败身份影响是否核验", () => {
     assert.equal(ctx.shellCommands.length, 0);
   });
 });
+
+// ══ 0.1.14 门禁判定修订：tsc 环境错误、pnpm 依赖预检、references、回合判据、首个游标 ══
+describe("quality-gate: 环境性失败与回合归属", () => {
+  afterEach(recycleScratchRoots);
+
+  it("tsc 报 TS6305（工程引用未构建）→ not-run，不逼模型去修代码", async () => {
+    const ctx = mountedCtx();
+    const project = makeProject("ts-env");
+    ctx.gateExitCode = 1;
+    // 实测形状：tsc 把诊断写 stdout，stderr 为空。
+    ctx.gateStdout =
+      "src/a.ts(1,1): error TS6305: Output file '/x/lib.d.ts' has not been built from source file '/y/a.ts'.";
+    ctx.gateStderr = "";
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentInto(ctx, project), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "tsc 这条门禁本身仍然要跑");
+    const text = (ctx.followupCalls[0] as { content: { text: string }[] }).content
+      .map((chunk) => chunk.text)
+      .join("");
+    assert.match(text, /未能执行/u);
+    assert.match(text, /TS2688 \/ TS6305/u);
+    assert.ok(!text.includes("请修复上述问题"), "环境错误不得报成代码失败");
+  });
+
+  it("pnpm 根有 lockfile 但没有 node_modules → 不发命令，注入“先安装依赖”", async () => {
+    const ctx = mountedCtx();
+    const project = makeProject("pnpm-deps");
+    writeFileSync(path.join(project, PKG_JSON), '{"name":"t","scripts":{"check":"tsc"}}');
+    writeFileSync(path.join(project, PNPM_WORKSPACE_NAME), "packages:\n  - .\n");
+    writeFileSync(path.join(project, PNPM_LOCK_NAME), PNPM_LOCK_BODY);
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentInto(ctx, project), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "未安装依赖时不执行 pnpm（不触发隐式安装）");
+    const text = (ctx.followupCalls[0] as { content: { text: string }[] }).content
+      .map((chunk) => chunk.text)
+      .join("");
+    assert.match(text, /pnpm install/u);
+    assert.ok(!text.includes("请修复上述问题"));
+  });
+
+  it("securityAudit 的 pnpm audit 只读 lockfile：没有 node_modules 也照跑", async () => {
+    const ctx = mountedCtx();
+    ctx.value["securityAudit"] = true;
+    const project = makeProject("pnpm-audit-deps");
+    writeFileSync(path.join(project, PKG_JSON), '{"name":"t"}');
+    writeFileSync(path.join(project, PNPM_LOCK_NAME), PNPM_LOCK_BODY);
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentInto(ctx, project), turn: 1 });
+    await sleep(20);
+    const audits = ctx.shellCommands.filter((entry) => entry.command.includes("pnpm audit"));
+    assert.equal(audits.length, 1, JSON.stringify(ctx.shellCommands));
+    assert.match(audits[0]!.command, /^pnpm audit --audit-level=high --prod$/u);
+  });
+
+  it("tsconfig 带 references → 不再发明包级 tsc（避免必然 TS6305）", async () => {
+    const ctx = mountedCtx();
+    const project = makeProject("ts-refs");
+    writeFileSync(
+      path.join(project, TSCONFIG),
+      '{"compilerOptions":{"composite":true},"references":[{"path":"../lib"}]}',
+    );
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(project)), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "有 references 的包不单独跑 tsc");
+    assert.equal(ctx.followupCalls.length, 0);
+  });
+
+  it("跨回合的迟到结果被丢弃：lastTurn 已前进就不再注入", async () => {
+    const ctx = mountedCtx();
+    const project = makeProject("stale");
+    ctx.agents = { list: () => [], turnBoundaryOf: () => ({ openTurnStartSeq: 0, lastTurn: 2 }) };
+    ctx.gateExitCode = 1;
+    ctx.gateStdout = "error TS2345: stale";
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(project)), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.followupCalls.length, 0, "属于上一回合的结果不得注入新回合");
+    assert.equal(ctx.shellCommands.length, 1, "门禁本身照常执行（结果只是被丢弃）");
+  });
+
+  it("首见会话的事件窗从本回合起点开始，不重放整份历史", async () => {
+    const ctx = mountedCtx();
+    const project = makeProject("first-from");
+    // 日志里只有一条**上一回合**的编辑；本回合起点 = 1，因此本回合没有编辑。
+    ctx.agents = { list: () => [], turnBoundaryOf: () => ({ openTurnStartSeq: 1, lastTurn: 1 }) };
+    const agent = {
+      session: {
+        id: "s-first-from",
+        header: { cwd: project },
+        snapshotEvents: () => gateEvt(project),
+      },
+      status: "idle",
+      inbox: { nextTurn: [], nextStep: [] },
+      followup() {
+        void 0;
+      },
+    };
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 0, "起点之前的历史编辑不属于本回合");
+  });
+
+  it("用户配置的已声明脚本成为门禁命令（pnpm run <script>）", async () => {
+    const ctx = createMockCtx();
+    ctx.value["pnpmScripts"] = "check:all";
+    const project = makeProject("scripts");
+    writeFileSync(path.join(project, PKG_JSON), '{"name":"t","scripts":{"check:all":"oxlint ."}}');
+    applyGate(ctx, ctx.value);
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(project)), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1);
+    assert.match(ctx.shellCommands[0]?.command ?? "", /pnpm run check:all/u);
+  });
+});
+
+describe("quality-gate: 边界信息的缺省形态", () => {
+  afterEach(recycleScratchRoots);
+
+  it("tsconfig.json 读不出来（路径是目录）→ 按“没有信息”处理，tsc 门禁照旧", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("tsconfig-dir");
+    rmSync(path.join(project, TSCONFIG));
+    mkdirSync(path.join(project, TSCONFIG));
+    applyGate(ctx, ctx.value);
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(project)), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "读不到 references 不改变既有结论");
+  });
+
+  it("turnBoundaryOf 返回非对象 → 不加回合判据，正常注入", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("boundary-none");
+    applyGate(ctx, ctx.value);
+    // 宿主契约是对象；这里刻意返回非对象，验证窄视图把它当成"读不到"而不是抛错。
+    ctx.agents = {
+      list: () => [],
+      turnBoundaryOf: (() => 42) as unknown as () => undefined,
+    };
+    ctx.gateExitCode = 1;
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(project)), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.followupCalls.length, 0, "agentFor 的 followup 是空实现，注入不计入");
+    assert.equal(ctx.shellCommands.length, 1);
+  });
+
+  it("回合边界缺字段：openTurnStartSeq 为 null、lastTurn 不是数字 → 仍按可用部分处理", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("boundary-partial");
+    applyGate(ctx, ctx.value);
+    ctx.agents = {
+      list: () => [],
+      turnBoundaryOf: () => ({ openTurnStartSeq: null, lastTurn: undefined }),
+    };
+    ctx.gateExitCode = 0;
+    ctx.handlers["agent/turn-stopping"]!({ agent: agentFor(gateEvt(project)), turn: 1 });
+    await sleep(20);
+    assert.equal(ctx.shellCommands.length, 1, "缺字段不影响门禁本身");
+  });
+
+  it("队友只有 label 时用 label 作展示名，并把回合信号传给冷读", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("team-label");
+    applyGate(ctx, ctx.value);
+    const seen: (AbortSignal | undefined)[] = [];
+    ctx.agents = { list: () => [{ id: "s-child", status: "idle" }] };
+    // subagents 走 ctx.get 的属性分支（createMockCtx 没有类型化字段，这里按运行期形状挂上）
+    (ctx as unknown as Record<string, unknown>)["subagents"] = {
+      listDescendants: async () => [{ kind: "child", id: "s-child", label: "researcher" }],
+    };
+    const original = ctx.sessionQuery!;
+    ctx.sessionQuery = {
+      observeSession: (
+        id: string,
+        options?: { projectionMode?: "none" | "all"; signal?: AbortSignal },
+      ) => {
+        seen.push(options?.signal);
+        return original.observeSession(id, options);
+      },
+    };
+    const controller = new AbortController();
+    const agent = agentFor(gateEvt(project));
+    ctx.handlers["agent/turn-stopping"]!({ agent, turn: 1, signal: controller.signal });
+    await sleep(20);
+    assert.ok(seen.length >= 2, "根会话与队友各读一次");
+    assert.notEqual(seen.at(-1), undefined, "冷读必须带上组合信号（根会话那次不带）");
+    assert.equal(ctx.shellCommands.length, 1);
+  });
+});
+
+/** 假 logger：断言只看状态词与 shell 调用。 */
+function noopLog(): void {
+  // 不记录
+}
+
+/** 造一个只读引用（与宿主 volatile 引用同形）。 */
+function refOf<Value>(value: Value): { get: () => Value } {
+  return { get: () => value };
+}
+
+/** 读面替身的运行时：只填 run/state 真正读到的字段。 */
+function gateRuntimeFor(ctx: MockCtx, enabled = true): never {
+  const log = { debug: noopLog, info: noopLog, warn: noopLog, error: noopLog };
+  return {
+    svc: ctx,
+    config: {
+      enabled: refOf(enabled),
+      maxInjectsPerTurn: refOf(2),
+      gateBudgetMs: refOf(60_000),
+      memoryFeedback: refOf(false),
+      memoryGatewayUrl: refOf(""),
+      memoryGatewayKeyRef: refOf(""),
+      pnpmScripts: refOf(""),
+      maxRootDepth: 18,
+      gateStdoutMaxBytes: 65_536,
+      securityAudit: refOf(false),
+    },
+    log,
+    maxRootDepth: 18,
+    stdoutMaxBytes: 65_536,
+    messages: () => MESSAGES.zh,
+    accumulators: new Map(),
+    injectState: new Map(),
+    lastSeqBySession: new Map(),
+    memoryNotice: { warned: false, log },
+    gateAbort: new AbortController(),
+    inFlightGates: new Set(),
+    shellWarned: false,
+    queryMissingWarned: false,
+    queryReadWarned: false,
+    teamListWarned: false,
+    teamReadWarned: false,
+    editLedger: { value: undefined },
+    recentResults: new Map(),
+    activeGateRoots: new Map(),
+    disposed: false,
+  } as never;
+}
+
+/** 用真实 cordis Context 构造读面（替身 ctx 没有 root，Service 构造会抛）。 */
+function gateServiceOf(
+  ctx: MockCtx,
+  enabled = true,
+): {
+  run: (request: unknown) => Promise<{ status: string }>;
+  state: (request: unknown) => {
+    rows: readonly {
+      outcome: string;
+      diagnostics?: readonly { path: string; line: number; message: string }[];
+    }[];
+  };
+} {
+  return new QualityGateRemoteService(new Context(), gateRuntimeFor(ctx, enabled));
+}
+
+/** await 之后取 status（unicorn 禁止直接读 await 表达式的成员）。 */
+async function runStatusOf(
+  service: { run: (request: unknown) => Promise<{ status: string }> },
+  request: unknown,
+): Promise<string> {
+  const result = await service.run(request);
+  return result.status;
+}
+
+describe("右键立即跑门禁", () => {
+  it("状态词覆盖 invalid / no-agent / busy / disabled / no-cwd / no-shell / no-gate", async () => {
+    const ctx = createMockCtx();
+    const service = gateServiceOf(ctx);
+    assert.equal(await runStatusOf(service, {}), "invalid");
+    ctx.agents = { list: () => [] } as never;
+    assert.equal(await runStatusOf(service, { sessionId: "s-x" }), "no-agent");
+    const project = makeProject("gate-busy");
+    const agent = {
+      ...agentFor(gateEvt(project)),
+      session: { ...agentFor([]).session, header: { cwd: project } },
+    };
+    ctx.agents = { list: () => [], get: () => ({ ...agent, status: "running" }) } as never;
+    assert.equal(await runStatusOf(service, { sessionId: "s-x" }), "busy");
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    assert.equal(await runStatusOf(gateServiceOf(ctx, false), { sessionId: "s-x" }), "disabled");
+    ctx.agents = { list: () => [], get: () => ({ ...agent, session: { header: {} } }) } as never;
+    assert.equal(await runStatusOf(service, { sessionId: "s-x" }), "no-cwd");
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    const { shell } = ctx;
+    ctx.shell = undefined as never;
+    assert.equal(await runStatusOf(service, { sessionId: "s-x" }), "no-shell");
+    ctx.shell = shell;
+    const empty = mkdirSync(path.join(tmpdir(), `qg-nogate-${Date.now()}`), { recursive: true });
+    ctx.agents = {
+      list: () => [],
+      get: () => ({ ...agent, session: { header: { cwd: empty } } }),
+    } as never;
+    assert.equal(await runStatusOf(service, { sessionId: "s-x" }), "no-gate");
+  });
+
+  it("同一根已有门禁在跑 → busy，不并发第二条", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("gate-root-busy");
+    const agent = {
+      ...agentFor(gateEvt(project)),
+      status: "idle",
+      session: { ...agentFor([]).session, header: { cwd: project } },
+    };
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    const runtime = gateRuntimeFor(ctx) as unknown as {
+      readonly activeGateRoots: Map<string, number>;
+    };
+    runtime.activeGateRoots.set(project, 1);
+    const service = new QualityGateRemoteService(new Context(), runtime as never);
+    assert.equal(await runStatusOf(service, { sessionId: "s-root" }), "busy");
+    assert.equal(ctx.shellCommands.length, 0, "并发判据要在发命令之前");
+  });
+
+  it("tsc 诊断按仓库根换算，嵌套包也能对上 diff 路径", async () => {
+    const repo = path.join(
+      tmpdir(),
+      `qg-repo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    const project = path.join(repo, "packages", "app");
+    mkdirSync(path.join(repo, ".git"), { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(path.join(project, PKG_JSON), PKG_BODY);
+    writeFileSync(path.join(project, TSCONFIG), '{"compilerOptions":{},"include":["src/a.ts"]}');
+    mkdirSync(path.join(project, "src"), { recursive: true });
+    writeFileSync(path.join(project, "src", "a.ts"), "export const a = 1;\n");
+    scratchRoots.push(repo);
+    const ctx = createMockCtx();
+    const agent = {
+      ...agentFor([]),
+      status: "idle",
+      session: { ...agentFor([]).session, header: { cwd: project } },
+    };
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    ctx.gateExitCode = 1;
+    ctx.gateStdout = "src/a.ts(1,1): error TS2322: boom\n";
+    ctx.gateStderr = "";
+    const service = gateServiceOf(ctx);
+    assert.equal(await runStatusOf(service, { sessionId: "s-repo" }), "done");
+    const { rows } = service.state({ sessionId: "s-repo" });
+    const [row] = rows;
+    assert.ok(row !== undefined);
+    assert.deepEqual(row.diagnostics, [
+      { path: "packages/app/src/a.ts", line: 1, message: "boom" },
+    ]);
+  });
+
+  it("沙箱策略解析失败 → 门禁按未能执行记录，不退回部署级策略", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("gate-manual-policy");
+    const agent = {
+      ...agentFor(gateEvt(project)),
+      status: "idle",
+      session: { ...agentFor([]).session, header: { cwd: project } },
+      followup: () => {
+        // 本用例只关心记录口径
+      },
+    };
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    ctx.sandboxPolicy = (() => {
+      throw new Error("policy service down (mock)");
+    }) as never;
+    const service = gateServiceOf(ctx);
+    assert.equal(await runStatusOf(service, { sessionId: "s-policy" }), "done");
+    const { rows } = service.state({ sessionId: "s-policy" });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.outcome, "not-run");
+    assert.equal(ctx.shellCommands.length, 0, "策略解析不了就一条命令都不发");
+  });
+
+  it("空闲会话跑一次门禁并把结果写进读面（失败走注入）", async () => {
+    const ctx = createMockCtx();
+    const project = makeProject("gate-manual");
+    const agent = {
+      ...agentFor(gateEvt(project)),
+      status: "idle",
+      session: { ...agentFor([]).session, header: { cwd: project } },
+      followup: (message: unknown) => {
+        ctx.followupCalls.push(message);
+      },
+    };
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    ctx.gateExitCode = 1;
+    ctx.gateStdout = "src/a.ts(1,1): error TS2322: boom\n";
+    ctx.gateStderr = "";
+    const service = gateServiceOf(ctx);
+    assert.equal(await runStatusOf(service, { sessionId: "s-manual" }), "done");
+    assert.equal(ctx.shellCommands.length, 1, "门禁真的执行了一次");
+    const { rows } = service.state({ sessionId: "s-manual" });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.outcome, "code-failure");
+    const [row] = rows;
+    assert.deepEqual(row.diagnostics, [{ path: "src/a.ts", line: 1, message: "boom" }]);
+  });
+
+  it("会话外的门禁根：先登记写权限、再解析一次策略，批次登记进 inFlightGates", async () => {
+    const ctx = createMockCtx();
+    const parent = makeProject("gate-manual-grant");
+    const sub = path.join(parent, "packages", "app");
+    // sub 故意不写任何清单：探测会升到带 package.json/tsconfig 的 parent
+    mkdirSync(sub, { recursive: true });
+    let resolveCalls = 0;
+    const registered: string[] = [];
+    const released: string[] = [];
+    ctx.sandboxPolicy = {
+      resolve: () => {
+        resolveCalls += 1;
+        return { mode: "workspace-write" as const, workspaceRoot: sub };
+      },
+      registerWritableRoot: (_session: unknown, directory: string) => {
+        registered.push(directory);
+        return () => {
+          released.push(directory);
+        };
+      },
+    };
+    const agent = {
+      ...agentFor([]),
+      status: "idle",
+      session: { ...agentFor([]).session, header: { cwd: sub } },
+    };
+    ctx.agents = { list: () => [], get: () => agent } as never;
+    const runtime = gateRuntimeFor(ctx) as unknown as {
+      readonly inFlightGates: Set<unknown>;
+    };
+    const service = new QualityGateRemoteService(new Context(), runtime as never);
+    assert.equal(await runStatusOf(service, { sessionId: "s-grant" }), "done");
+    assert.deepEqual(registered, [parent], "门禁根不在会话可写边界内时必须登记");
+    assert.equal(resolveCalls, 2, "登记之后要再解析一次，让新根进入策略快照");
+    assert.deepEqual(released, [parent], "批次结束后必须释放");
+    assert.equal(runtime.inFlightGates.size, 0, "批次结束后不能留在 inFlightGates 里");
+  });
+});
+
+/** 读面只用 rt 的这几位；替身按真实字段填齐，run 走完整批次。 */

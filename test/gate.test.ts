@@ -5,7 +5,7 @@ import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { EDIT_TOOLS, EditAccumulator } from "../lib/accumulator.ts";
-import { detectGate } from "../lib/gate-detect.ts";
+import { detectGate, parseTsDiagnostics } from "../lib/gate-detect.ts";
 import type { ProjectRoot } from "../lib/gate-detect.ts";
 
 // 夹具里用的文件名（用例里的「根目录下有哪些文件、编辑了哪个文件」）。本包实现没有导出这些
@@ -13,6 +13,8 @@ import type { ProjectRoot } from "../lib/gate-detect.ts";
 // 的别名——断言不会退化成同义反复。
 /** 根目录下的 npm 清单名。 */
 const PKG_JSON = "package.json";
+const UNKNOWN_ROOT = "/w/unknown";
+const UNDECLARED_ROOT = "/w/undeclared";
 /** 根目录下的 pnpm workspace 清单名。 */
 const WORKSPACE_MANIFEST = "pnpm-workspace.yaml";
 /** 根目录下的 Rust 清单名。 */
@@ -21,6 +23,8 @@ const CARGO_MANIFEST = "Cargo.toml";
 const PYPROJECT = "pyproject.toml";
 /** 根目录下的 TypeScript 配置名（给出 tsc 这条门禁的必要条件）。 */
 const TSCONFIG = "tsconfig.json";
+/** 同时声明 ruff format 与 black 的夹具根：两条格式化器互相判红，不能叠加。 */
+const PY_BLACK_ROOT = "/w/py-black";
 /**
  * 记录编辑那几条用例的夹具路径，按当前平台的分隔符拼出来。
  *
@@ -143,9 +147,12 @@ describe("gate-detect：自动探测项目该跑哪条门禁命令", () => {
     assert.deepEqual(detectGate(roots), [{ root: "/w/wukil", command: ["pnpm", "check"] }]);
   });
 
-  it("纯 Rust 项目（Cargo.toml）→ cargo check", () => {
+  it("纯 Rust 项目（Cargo.toml）→ cargo check + cargo test --no-run", () => {
     const roots: ProjectRoot[] = [{ root: "/w/rs", files: [CARGO_MANIFEST, "src/main.rs"] }];
-    assert.deepEqual(detectGate(roots), [{ root: "/w/rs", command: ["cargo", "check"] }]);
+    assert.deepEqual(detectGate(roots), [
+      { root: "/w/rs", command: ["cargo", "check"] },
+      { root: "/w/rs", command: ["cargo", "test", "--no-run"] },
+    ]);
   });
 
   it("pyproject.toml 里有 [tool.ruff] 段 → ruff check", () => {
@@ -153,6 +160,34 @@ describe("gate-detect：自动探测项目该跑哪条门禁命令", () => {
       { root: "/w/py", files: [PYPROJECT, "src/a.py"], ruffConfigured: true },
     ];
     assert.deepEqual(detectGate(roots), [{ root: "/w/py", command: ["ruff", "check", "."] }]);
+  });
+
+  it("pyproject.toml 里有 [tool.ruff.format] 段 → 追加 ruff format --check", () => {
+    // 格式化门禁是独立声明：只开 ruff lint 的工程不该被 format 判红。
+    const roots: ProjectRoot[] = [
+      {
+        root: "/w/py-fmt",
+        files: [PYPROJECT, "src/a.py"],
+        ruffConfigured: true,
+        ruffFormatConfigured: true,
+      },
+    ];
+    assert.deepEqual(detectGate(roots), [
+      { root: "/w/py-fmt", command: ["ruff", "check", "."] },
+      { root: "/w/py-fmt", command: ["ruff", "format", "--check", "."] },
+    ]);
+    // 同时声明 black 时不叠加 ruff format：两套格式化器互相判红。
+    const withBlack: ProjectRoot = {
+      root: PY_BLACK_ROOT,
+      files: [PYPROJECT, "src/a.py"],
+      ruffConfigured: true,
+      ruffFormatConfigured: true,
+      blackConfigured: true,
+    };
+    assert.deepEqual(detectGate([withBlack]), [
+      { root: PY_BLACK_ROOT, command: ["ruff", "check", "."] },
+      { root: PY_BLACK_ROOT, command: ["black", "--check", "."] },
+    ]);
   });
 
   it("同一 root 重复出现只产出一门（去重责任在本函数，不假定调用方已归一）", () => {
@@ -199,14 +234,16 @@ describe("gate-detect：自动探测项目该跑哪条门禁命令", () => {
     assert.deepEqual(detectGate(roots), []);
   });
 
-  it("多个项目根各得各的门禁命令（每根一条，互不影响）", () => {
+  it("多个项目根各得各的门禁命令（互不影响，同一根可以有多条）", () => {
     const roots: ProjectRoot[] = [
       { root: "/w/a", files: [PKG_JSON, TSCONFIG, "x.ts"] },
       { root: "/w/b", files: [CARGO_MANIFEST, "x.rs"] },
     ];
     const gates = detectGate(roots);
-    assert.equal(gates.length, 2);
+    assert.equal(gates.length, 3);
+    assert.deepEqual(gates[0]?.command, ["tsc", "--noEmit"]);
     assert.deepEqual(gates[1]?.command, ["cargo", "check"]);
+    assert.deepEqual(gates[2]?.command, ["cargo", "test", "--no-run"]);
   });
 
   it("没有清单文件的目录 → 没有门禁命令（空的配置项跳过）", () => {
@@ -225,24 +262,36 @@ describe("gate-detect：自动探测项目该跑哪条门禁命令", () => {
     assert.deepEqual(detectGate(roots)[0]?.command, ["pnpm", "check"]);
   });
 
-  it("优先级边界：rust > python，python > tsc", () => {
-    // 只测 workspace 与 rust 并存时，else-if 链调换（rust > python、python > tsc）不会被发现。
-    const rustOverPython = detectGate([
+  it("混合根不再按语言二选一：Rust/Python/TS 各自的门禁都保留", () => {
+    const rustPy = detectGate([
       {
         root: "/w/rust-py",
         files: [CARGO_MANIFEST, PYPROJECT, "a.py"],
         ruffConfigured: true,
       },
     ]);
-    assert.deepEqual(rustOverPython[0]?.command, ["cargo", "check"]);
-    const pythonOverTsc = detectGate([
+    assert.deepEqual(
+      rustPy.map((gate) => gate.command),
+      [
+        ["cargo", "check"],
+        ["cargo", "test", "--no-run"],
+        ["ruff", "check", "."],
+      ],
+    );
+    const pyTs = detectGate([
       {
         root: "/w/py-ts",
         files: [PYPROJECT, PKG_JSON, TSCONFIG, "a.py"],
         ruffConfigured: true,
       },
     ]);
-    assert.deepEqual(pythonOverTsc[0]?.command, ["ruff", "check", "."]);
+    assert.deepEqual(
+      pyTs.map((gate) => gate.command),
+      [
+        ["tsc", "--noEmit"],
+        ["ruff", "check", "."],
+      ],
+    );
   });
 
   it("空输入安全", () => {
@@ -314,9 +363,12 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
     // 保守的做法是拿不到信息时**不猜**。给一条没有依据的门禁= 给一条很可能在命令层面就失败
     // 的门禁；少给一次门禁只是少一次自动核验，用户可以自己跑。
     const roots: ProjectRoot[] = [
-      { root: "/w/unknown", files: [PKG_JSON, WORKSPACE_MANIFEST, CARGO_MANIFEST] },
+      { root: UNKNOWN_ROOT, files: [PKG_JSON, WORKSPACE_MANIFEST, CARGO_MANIFEST] },
     ];
-    assert.deepEqual(detectGate(roots), [{ root: "/w/unknown", command: ["cargo", "check"] }]);
+    assert.deepEqual(detectGate(roots), [
+      { root: UNKNOWN_ROOT, command: ["cargo", "check"] },
+      { root: UNKNOWN_ROOT, command: ["cargo", "test", "--no-run"] },
+    ]);
   });
 
   it("空 scripts 清单（package.json 有 scripts 之外的形态）同样不发 pnpm check", () => {
@@ -342,7 +394,7 @@ describe("gate-detect：pnpm check 必须有已声明的 check 脚本", () => {
   });
 });
 
-describe("accumulator：.sh 不记录（四条门禁命令都校验不了 shell 脚本）", () => {
+describe("accumulator：.sh 不记录（内置检查器没有稳定的 shell 脚本门禁）", () => {
   it("相邻的扩展名和 edit 路径一样，都不计入待门禁的文件", () => {
     const acc = new EditAccumulator();
     acc.note("write", "/home/dev/.dsh/run-all-tests.sh");
@@ -369,5 +421,109 @@ describe("accumulator：.sh 不记录（四条门禁命令都校验不了 shell 
       acc.note("edit", filePath);
     }
     assert.equal(acc.drain().length, 9);
+  });
+});
+
+describe("gate-detect：project references 与用户配置脚本", () => {
+  it("带 references 的成员包不再发 tsc（包级 --noEmit 必然 TS6305）", () => {
+    // 实测：composite + references 的工程上 `tsc --noEmit` 报 TS6305（输出文件未构建），
+    // 即使依赖装好也修不好——这是"这个包单独跑 tsc 的前提不成立"，不是代码错误。
+    const roots: ProjectRoot[] = [
+      { root: "/w/ref", files: [PKG_JSON, TSCONFIG], tsconfigReferences: true },
+    ];
+    assert.deepEqual(detectGate(roots), []);
+  });
+
+  it("没有 references（显式 false / 缺信息）→ 仍给 tsc，既有行为不变", () => {
+    const explicit: ProjectRoot[] = [
+      { root: "/w/ref0", files: [PKG_JSON, TSCONFIG], tsconfigReferences: false },
+    ];
+    assert.deepEqual(detectGate(explicit)[0]?.command, ["tsc", "--noEmit"]);
+    const unknown: ProjectRoot[] = [{ root: "/w/ref1", files: [PKG_JSON, TSCONFIG] }];
+    assert.deepEqual(detectGate(unknown)[0]?.command, ["tsc", "--noEmit"]);
+  });
+
+  it("用户配置的脚本只在根 package.json 真声明时执行 `pnpm run <名字>`", () => {
+    const declared: ProjectRoot[] = [
+      { root: "/w/scripts", files: [PKG_JSON, "a.ts"], scripts: ["check:all", "verify"] },
+    ];
+    assert.deepEqual(detectGate(declared, ["check:all"]), [
+      { root: "/w/scripts", command: ["pnpm", "run", "check:all"] },
+    ]);
+  });
+
+  it("未声明的脚本名被忽略（不替项目编命令，回落到别的门禁）", () => {
+    const roots: ProjectRoot[] = [
+      { root: UNDECLARED_ROOT, files: [PKG_JSON, CARGO_MANIFEST], scripts: ["build"] },
+    ];
+    assert.deepEqual(detectGate(roots, ["check:all"]), [
+      { root: UNDECLARED_ROOT, command: ["cargo", "check"] },
+      { root: UNDECLARED_ROOT, command: ["cargo", "test", "--no-run"] },
+    ]);
+  });
+
+  it("脚本名形状不安全（路径穿越）一律不进入 argv", () => {
+    const roots: ProjectRoot[] = [
+      { root: "/w/unsafe", files: [PKG_JSON, TSCONFIG], scripts: ["../../evil"] },
+    ];
+    assert.deepEqual(detectGate(roots, ["../../evil"]), [
+      { root: "/w/unsafe", command: ["tsc", "--noEmit"] },
+    ]);
+  });
+
+  it("优先级：workspace 声明的 check 高于用户脚本；用户脚本高于 cargo/ruff/tsc", () => {
+    const workspaceFirst = detectGate(
+      [
+        {
+          root: "/w/order",
+          files: [PKG_JSON, WORKSPACE_MANIFEST, CARGO_MANIFEST],
+          scripts: ["check", "all"],
+        },
+      ],
+      ["all"],
+    );
+    assert.deepEqual(workspaceFirst[0]?.command, ["pnpm", "check"]);
+    const scriptBeforeCargo = detectGate(
+      [{ root: "/w/order2", files: [PKG_JSON, CARGO_MANIFEST], scripts: ["all"] }],
+      ["all"],
+    );
+    assert.deepEqual(scriptBeforeCargo[0]?.command, ["pnpm", "run", "all"]);
+  });
+
+  it("多个配置脚本时取第一个可用项（同一优先级内先到先得）", () => {
+    const roots: ProjectRoot[] = [
+      { root: "/w/multi", files: [PKG_JSON], scripts: ["verify", "all"] },
+    ];
+    assert.deepEqual(detectGate(roots, ["missing", "verify", "all"])[0]?.command, [
+      "pnpm",
+      "run",
+      "verify",
+    ]);
+  });
+});
+
+describe("parseTsDiagnostics", () => {
+  it("认得出 tsc 默认输出里的诊断，其它行一律跳过", () => {
+    const text = [
+      "src/a.ts(12,5): error TS2322: Type 'string' is not assignable.",
+      "",
+      "src/b.ts(7,1): warning TS6133: 'x' is declared but its value is never read.",
+      "Found 2 errors.",
+    ].join("\n");
+    assert.deepEqual(parseTsDiagnostics(text), [
+      { path: "src/a.ts", line: 12, message: "Type 'string' is not assignable." },
+      { path: "src/b.ts", line: 7, message: "'x' is declared but its value is never read." },
+    ]);
+  });
+
+  it("messageMax 截断正文、limit 截断条数", () => {
+    const text = ["a.ts(1,1): error TS1: msg-1", "b.ts(2,1): error TS2: msg-2"].join("\n");
+    assert.deepEqual(parseTsDiagnostics(text, { messageMax: 4, limit: 1 }), [
+      { path: "a.ts", line: 1, message: "msg-" },
+    ]);
+  });
+
+  it("没有诊断行时返回空表（不猜路径与行号）", () => {
+    assert.deepEqual(parseTsDiagnostics("exit=1\nstdout: nothing"), []);
   });
 });

@@ -1,5 +1,5 @@
 // 门禁命令的探测、编辑记录与记忆反馈这三个模块的性质测试。期望值来自各模块文件头写明的契约
-// （允许的四条命令、假失败比漏检查更贵、URL 判不确定时不放行、把失败文本压成一行），不从实现派生。
+// （声明过的命令白名单、假失败比漏检查更贵、URL 判不确定时不放行、把失败文本压成一行），不从实现派生。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -26,37 +26,174 @@ const unsafeUrlArb = fc.oneof(
   fc.constant(""),
 );
 
-/** 探测那段代码点名的那两份清单文件（"只认这几条命令"这个性质体现在哪两份清单上）。 */
+/** 探测代码认可的根标记与配置名（"命令白名单"这个性质体现在这些名字的任意组合上）。 */
 const PKG_JSON = "package.json";
 const TSCONFIG_JSON = "tsconfig.json";
 const WORKSPACE_YAML = "pnpm-workspace.yaml";
-/** 项目根的文件清单生成域：真实仓库里这些名字的任意组合。 */
+/** 项目根的文件清单生成域：九种语言的清单/配置标记与若干无关文件。 */
 const fileNameArb = fc.constantFrom(
   PKG_JSON,
   TSCONFIG_JSON,
   WORKSPACE_YAML,
+  "eslint.config.js",
+  "vitest.config.js",
+  "jest.config.js",
   "Cargo.toml",
+  "rustfmt.toml",
+  "go.mod",
   "pyproject.toml",
+  "ruff.toml",
+  ".ruff.toml",
+  "pytest.ini",
+  "tox.ini",
+  "setup.cfg",
+  "mypy.ini",
+  "Gemfile",
+  ".rubocop.yml",
+  ".oxlintrc.json",
+  ".oxfmtrc.json",
+  ".pylintrc",
+  ".rspec",
+  "pom.xml",
+  "mvnw",
+  "build.gradle",
+  "gradlew",
+  "gradlew.bat",
+  "settings.gradle",
+  "CMakeLists.txt",
+  "build/CMakeCache.txt",
+  "build/CTestTestfile.cmake",
+  "build/compile_commands.json",
+  ".clang-tidy",
+  ".cppcheck",
+  "Makefile",
+  "composer.json",
+  "phpunit.xml",
+  "vendor/bin/phpunit",
+  "phpstan analyse",
+  "psalm",
+  "php-cs-fixer fix --dry-run --diff",
+  "App.csproj",
+  "App.sln",
+  "tests/",
+  "test/",
   "README.md",
 );
 const scriptsArb = fc.option(
   fc.array(fc.constantFrom("check", "build", "test"), { maxLength: 3 }),
   { nil: undefined },
 );
+const composerScriptsArb = fc.option(fc.array(fc.constantFrom("test", "lint"), { maxLength: 2 }), {
+  nil: undefined,
+});
+const makeTargetsArb = fc.option(fc.array(fc.constantFrom("check", "test"), { maxLength: 2 }), {
+  nil: undefined,
+});
+const rakeTargetsArb = fc.option(fc.array(fc.constantFrom("check", "test"), { maxLength: 2 }), {
+  nil: undefined,
+});
 const projectRootArb = fc.record(
   {
     root: fc.stringMatching(/^\/[a-z][a-z0-9]{0,6}$/u),
-    files: fc.array(fileNameArb, { maxLength: 5 }),
+    files: fc.array(fileNameArb, { maxLength: 8 }),
     scripts: scriptsArb,
+    composerScripts: composerScriptsArb,
+    makeTargets: makeTargetsArb,
+    rakeTargets: rakeTargetsArb,
     ruffConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    ruffFormatConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    pytestConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    mypyConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    tsconfigReferences: fc.option(fc.boolean(), { nil: undefined }),
+    blackConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    pyrightConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    flake8Configured: fc.option(fc.boolean(), { nil: undefined }),
+    pylintConfigured: fc.option(fc.boolean(), { nil: undefined }),
+    mavenVerifyConfigured: fc.option(fc.boolean(), { nil: undefined }),
   },
   { requiredKeys: ["root", "files"] },
 ) as fc.Arbitrary<ProjectRoot>;
 
-const COMMAND_WHITELIST = new Set(["pnpm check", "cargo check", "ruff check .", "tsc --noEmit"]);
+/** 所有 GateCommand 分支的字符串形状（动态脚本名只允许 check/build/test）。 */
+const COMMAND_WHITELIST = new Set([
+  "pnpm check",
+  "pnpm run check",
+  "pnpm run build",
+  "pnpm run test",
+  "cargo check",
+  "cargo test --no-run",
+  "cargo fmt --all -- --check",
+  "cargo clippy --all-targets -- -D warnings",
+  "run-clang-tidy -p build",
+  "cppcheck --project=build/compile_commands.json --error-exitcode=1",
+  "go vet ./...",
+  "go test ./...",
+  "golangci-lint run",
+  "staticcheck ./...",
+  "ruff check .",
+  "ruff format --check .",
+  "black --check .",
+  "flake8",
+  "pyright",
+  "pylint .",
+  "pytest -q",
+  "mypy .",
+  "rubocop",
+  "rspec",
+  "standardrb",
+  "mvn -q test",
+  "./mvnw -q test",
+  "mvn -q verify",
+  "./mvnw -q verify",
+  "gradle check",
+  "./gradlew check",
+  "gradlew.bat check",
+  "detekt --config detekt.yml",
+  "detekt --config detekt.yaml",
+  "detekt --config config/detekt/detekt.yml",
+  "detekt --config config/detekt/detekt.yaml",
+  "ktlint",
+  "checkstyle -c checkstyle.xml src/main/java",
+  "checkstyle -c config/checkstyle/checkstyle.xml src/main/java",
+  "dotnet build --nologo",
+  "dotnet test --nologo",
+  "dotnet format --verify-no-changes --nologo",
+  "cmake --build build",
+  "ctest --test-dir build --output-on-failure",
+  "make check",
+  "make test",
+  "make format-check",
+  "make check-format",
+  "make clang-format-check",
+  "bazel test //...",
+  "rake check",
+  "rake test",
+  "composer validate --no-check-publish",
+  "composer run-script test",
+  "composer audit",
+  "npm audit --audit-level=high --omit=dev",
+  "pnpm audit --audit-level=high --prod",
+  "cargo audit",
+  "govulncheck ./...",
+  "pip-audit -r requirements.txt",
+  "bundler-audit check --update",
+  "phpunit",
+  "vendor/bin/phpunit",
+  "phpstan analyse",
+  "psalm",
+  "php-cs-fixer fix --dry-run --diff",
+  "oxlint .",
+  "eslint --format unix .",
+  "vitest run",
+  "jest --ci",
+  "tsc --noEmit",
+  "prettier --check .",
+  "oxfmt --check .",
+  "biome check .",
+]);
 
 describe("detectGate 的白名单与优先级性质", () => {
-  it("任意根组合的产出命令都落在四元组白名单内；重复根只产一次", () => {
+  it("任意根组合的产出命令都落在白名单内；同一 root+command 不重复", () => {
     fc.assert(
       fc.property(fc.array(projectRootArb, { maxLength: 5 }), (roots) => {
         const gates = detectGate(roots);
@@ -66,8 +203,8 @@ describe("detectGate 的白名单与优先级性质", () => {
             `白名单外命令：${gate.command.join(" ")}`,
           );
         }
-        const seenRoots = gates.map((gate) => gate.root);
-        assert.equal(new Set(seenRoots).size, seenRoots.length, "重复根被重复探测");
+        const seen = gates.map((gate) => `${gate.root}\u0000${gate.command.join("\u0000")}`);
+        assert.equal(new Set(seen).size, seen.length, "同一根的同一条命令被重复产出");
       }),
     );
   });
@@ -80,6 +217,7 @@ describe("detectGate 的白名单与优先级性质", () => {
         const gates = detectGate([root]);
         const tsc = gates.some((gate) => gate.command.join(" ") === "tsc --noEmit");
         const isWorkspace = files.includes(WORKSPACE_YAML);
+        const references = root.tsconfigReferences === true;
         const hasPnpmCheck =
           files.includes(WORKSPACE_YAML) &&
           files.includes("package.json") &&
@@ -95,6 +233,7 @@ describe("detectGate 的白名单与优先级性质", () => {
           assert.equal(isWorkspace, false);
           assert.equal(files.includes(PKG_JSON), true);
           assert.equal(files.includes(TSCONFIG_JSON), true);
+          assert.equal(references, false, "带 references 的 tsconfig 不该发包级 tsc");
         }
       }),
     );

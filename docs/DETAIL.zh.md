@@ -5,19 +5,20 @@
 ## 设置卡上改的是什么
 
 - **门禁** — `enabled`（默认开）关掉后门禁完全不跑，模型可能带着坏检查收回合。`maxInjectsPerTurn`（1–5，默认 2）限制一个会话跨回合最多收到几次修复指令，这是防失控的闸。`gateBudgetMs`（10000–600000，默认 300000，卡上按秒显示）是整趟门禁的预算，按共享池发放：先跑的先用，只给后面每条留 5s 保底——均分会让一条在伞工作区根上串行跑十仓的 `pnpm check`（实测 240s）必然超时。超时按「未能执行」注入，绝不当成通过。
+- **供应链扫描** — `securityAudit`（默认关）打开后，每个根按锁文件追加一条依赖漏洞扫描（npm/pnpm/cargo/go/pip/bundler/composer），独立于项目声明的 `check`，也不参与根选择；要联网、要工具已安装，缺工具按未执行处理。
 - **记忆反馈** — `memoryFeedback`（默认关）打开之后才会把失败的证据写进记忆网关的 L0 层；报给教训总线不受这个开关影响。`memoryGatewayUrl` 没有随包发布的默认值：留空时改用环境变量 `TDAI_GATEWAY_URL`，两处都空就是未配置，这个功能不跑。`memoryGatewayKeyRef`（默认 `TDAI_GATEWAY_KEY`）存的只是凭据的**引用名**，密钥留在宿主的凭据服务里，不进设置。清空这一格是恢复默认的引用名，不是关掉反馈。
 
 这些值每个回合现读，改完下一回合生效，不用重启宿主。反馈要真的发出去，需要开关打开、地址能解析出值，并且凭据服务里确实存着那个引用名指向的值。
 
 ## 要重启才生效的值
 
-`maxRootDepth`（默认 10，决定从被改动的文件往上找项目根最多找几层）和 `gateStdoutMaxBytes`（65536）是部署时的默认值，刻意没有放进设置卡：写在本插件注册行的 `config:` 块里，改值要重启生效。
+`maxRootDepth`（默认 10，决定从被改动的文件往上找项目根最多找几层）和 `gateStdoutMaxBytes`（65536，证据捕获上限）是部署时的默认值，刻意没有放进设置卡：写在本插件注册行的 `config:` 块里，改值要重启生效。
 
 还有一条要提前知道：宿主重启之后回合游标回到 fork 的位置，所以重启后的第一个回合会把检查重跑一遍。
 
 ## 需要外部提供什么
 
-门禁命令按项目根现场探测，绝不虚构：那个根的 `package.json` 声明了 `check` 脚本才用 `pnpm check`，否则依次试 `cargo check`、只有存在 `ruff.toml` 或 `[tool.ruff]` 时才用 `ruff check .`、再否则用 `tsc --noEmit`。命令经宿主的沙箱执行，所以 `SANDBOX_UNAVAILABLE` 说的是"根本没跑成"，不是"跑过了"。要连记忆网关还需要一个可达的地址，以及凭据服务里那个引用名对应的值。
+门禁命令按项目根现场探测，绝不虚构：那个根的 `package.json` 声明了 `check` 脚本才用 `pnpm check`，否则依次试 `cargo check`、只有存在 `ruff.toml` 或 `[tool.ruff]` 时才用 `ruff check .`、再否则用 `tsc --noEmit`；根上有 `MODULE.bazel` / `WORKSPACE` 时追加 `bazel test //...`；C/C++ 根有 `.clang-format` 且 Makefile 声明了对应目标时跑那个目标，不替 clang-format 猜文件列表。在设置卡上打开 `securityAudit` 后，每个根还会按锁文件追加一条依赖漏洞扫描（`npm`/`pnpm audit`、`cargo audit`、`govulncheck`、`pip-audit`、`bundler-audit` 或 `composer audit`）；这些命令要联网、要工具已安装，工具缺失按未执行处理，不会自动安装。所有命令经宿主的沙箱执行，所以 `SANDBOX_UNAVAILABLE` 说的是"根本没跑成"，不是"跑过了"。要连记忆网关还需要一个可达的地址，以及凭据服务里那个引用名对应的值。
 
 ## 更完整的说明
 

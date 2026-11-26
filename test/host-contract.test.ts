@@ -115,9 +115,11 @@ function makeCtx(overrides: Record<string, unknown> = {}): MockCtx {
       // 让"反馈自己失败"的那几条测试真的走到 pushGateFeedback（而不是被前面的条件挡掉）。
       memoryGatewayUrl: "https://gateway.test:8420",
       memoryGatewayKeyRef: "TDAI_GATEWAY_KEY",
+      pnpmScripts: "",
       // 非 volatile 的部署级设置：resolve 交普通值（refsOf 按 meta.volatile 区分形状）
       maxRootDepth: 10,
       gateStdoutMaxBytes: 65_536,
+      securityAudit: false,
       ...overrides,
     },
     fiber: { id: "quality-gate-fiber" },

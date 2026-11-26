@@ -5,6 +5,81 @@
 版本标题不写发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需
 增设标准六类之外的小节（如 `Tests`、`Not changed, deliberately`）。
 
+## 0.1.14
+
+会话侧栏开始显示真实门禁结果：每个会话留最近 20 条（命令、根、结论、单行摘要），经官方 Typert Remote 命名空间 `qualityGate` 的 `latest` / `state` 两个读方法读取，并由 `run` 立即执行一次；读面缺席（精简上下文、旧宿主）时侧栏的结果格显示“本会话尚无记录”，不报错。`@deepseek-ai/dsh-typert-protocol` 进入 devDependencies 与 peerDependencies（与 `dsh-dir-prep-organize` 同形）。
+
+把"门禁没跑成"与"代码有问题"分开，并补上项目自定义门禁入口。包级 `tsc` 假失败根治：tsconfig 的 `references` 按 JSONC 解析（注释、尾逗号与字符串里的字样都不误判），带非空 `references` 的根不再发 `tsc --noEmit`（包级命令在未构建引用时必报 `TS6305`）；渲染期仍可能出现的 `TS2688 / TS6305 / TS6306 / TS6307` 按环境问题归为 `not-run`。`pnpm` 根有 lockfile 但无 `node_modules` 时不发命令，提示先安装依赖；脚本内部的 exit 126/127 一律按环境不可用处理。新增 `pnpmScripts`：只执行根 `package.json` 真声明且名字形状安全的脚本。队友台账的冷读移出串行段，`observeSession` 接组合信号与 15s 上限；门禁结果加回合判据（`lastTurn` 前进即丢弃）；首次见到会话的事件窗收在本回合起点；台账相对路径按条目自己的 `cwd` 解析。
+
+### Added
+
+- **门禁结果留存**：每条门禁（含预算不足被跳过的那条）记一行 `{ at, gate, root, outcome, detail }`，detail 压成单行并截到 200 字符，按会话环形保留 20 条。
+- **`qualityGate` Remote 读面**：`latest()` 跨会话取最新一条；`state({ sessionId })` 取该会话的行。客户端 descriptor 手写、请求走 zod strict codec，应答逐行验形状，坏行丢掉而不是抛错。
+- **会话侧栏**：在原有"启用状态 / 注入配额"两格旁增加"最近一次门禁"与"门禁命令"两格。
+- **右键立即跑门禁**：会话菜单新增一项，经 `run` 方法对空闲会话跑一次当前项目的门禁；失败照回合收口同一套规则注入并开新回合，忙 / 无会话 / 无门禁时只回状态词。
+- **diff 行注解（可选）**：装了 forge 面板（`ctx.forgeChanges` 在）时，结果里的诊断（tsc、go、cargo、ruff、rubocop、javac/Maven、dotnet、clang/gcc、PHP、eslint）注册为 `forge.diff.line.annotation` 源，按文件画到对应行；面板缺席就整条不出现，认不出的输出形状不产生注解。
+
+- **九种语言的内置门禁矩阵**：项目没有声明自己的检查时，按根标记探测 JavaScript/TypeScript、Rust、Go、Python、Ruby、Java/Kotlin、C/C++、C#、PHP；同一个根可以有多条门禁，按 `root+command` 去重后串行执行。所有探测都是保守的：工具自己的配置文件/清单不出现就不发命令，工具缺失按 `not-run` 归因。
+- **主流工具链补齐**：在九种生态的矩阵里增加各自的常用检查——JS/TS 的 `oxlint`/`oxfmt`/`prettier`/`biome`，Rust 的 `cargo clippy`，Go 的 `golangci-lint`/`staticcheck`，Python 的 `ruff format`/`black`/`flake8`/`pyright`/`pylint`，Ruby 的 `standardrb` 与 `Rakefile` 的 `check`/`test` 任务，C/C++ 的 `clang-tidy`/`cppcheck`，C# 的 `dotnet format`，PHP 的 `phpstan`/`psalm`/`php-cs-fixer`；仍然只认工具自己的配置，配置缺席就不发命令。
+- **C/C++ 的 clang-format**：CLI 需要显式文件列表（不接受目录），所以不替项目拼 glob；只在 `.clang-format` 与 Makefile 的 `format-check` / `check-format` / `clang-format-check` 目标同时存在时跑 `make <目标>`。没有显式目标就不发命令，不会把目录参数硬塞给 clang-format。
+- **Bazel**：根上有 `MODULE.bazel` / `WORKSPACE` / `WORKSPACE.bazel` 才追加 `bazel test //...`；这是项目显式声明的构建入口，整仓重构建仍受 `gateBudgetMs` 限制。
+- **Java 的独立 Checkstyle**：没有 Maven/Gradle 的工程，根或 `config/checkstyle/` 下有 `checkstyle.xml` 且存在 `src/main/java` 时追加 `checkstyle -c <文件> src/main/java`；有构建工具时交给项目自己的插件/任务，不叠第二条。
+- **Java/Kotlin 的独立静态分析**：`pom.xml` 里真的声明了 `maven-checkstyle-plugin`、`spotbugs-maven-plugin`、`maven-pmd-plugin` 或旧名 `pmd-maven-plugin` 时，Maven 改用 `verify`（`mvn -q verify` / wrapper 优先的 `./mvnw -q verify`），让项目自己的静态分析绑定到 `verify` 生命周期；没声明就仍跑 `test`，不猜插件坐标。Kotlin 另按自己的配置追加 `detekt --config <file>`（根或 `config/detekt/` 下的 yml/yaml），有 `.editorconfig` 与 `src/main/kotlin` 时再追加 `ktlint`。
+- **可选的供应链扫描（`securityAudit`，默认关）**：打开后按锁文件追加一条依赖漏洞扫描——`package-lock.json` / `npm-shrinkwrap.json` → `npm audit --audit-level=high --omit=dev`，`pnpm-lock.yaml` → `pnpm audit --audit-level=high --prod`，`Cargo.toml` + `Cargo.lock` → `cargo audit`，`go.mod` → `govulncheck ./...`，`requirements.txt` → `pip-audit -r requirements.txt`，`Gemfile.lock` → `bundler-audit check --update`，`composer.lock` → `composer audit`。这一层独立于项目声明的 `check`：声明通常不包含依赖漏洞扫描，所以有声明时也会跑。
+- **项目声明仍是第一层**：根 `package.json` 的 `check`、`pnpmScripts` 里点名且真声明的脚本、Makefile 的 `check`/`test` 目标压过所有内置探测（显式打开的 `securityAudit` 是唯一例外）。
+- **诊断解析通用化**：`lib/gate-diagnostics.ts` 按命令解析各语言的行列诊断，`repoRelativeDiagnostics` 统一换算到仓库根相对路径；归因与 pass/fail 判定不变。
+- **`GATED_EXT` 扩展**：覆盖 `.go`、`.rb`、`.java`、`.kt`、`.c/.h/.cc/.cpp/.hpp`、`.cs`、`.php`、`.xml`、`.gradle`、`.sln`、`.csproj`、`.ini`、`.cfg`、`.mod`、`.sum`，以及 `.neon`、`.jsonc`、`.clang-tidy`、`.cppcheck`、`Makefile`、`CMakeLists.txt`、`Gemfile`、`Rakefile`、`gradlew`、`mvnw`、`.rspec`、`.prettierrc`、`.flake8`、`.editorconfig`、`.oxlintrc`、`.oxfmtrc`、`.pylintrc` 这类文件名；`.sh` 仍排除。
+
+### Changed
+
+- **发布契约**：新增 peer `@deepseek-ai/dsh-typert-protocol`（`^0.2.3-alpha.2`），消费者跟随宿主共享实例。
+- **`pnpm check` 的门槛**：只看根 `package.json` 是否声明了非空 `check`，不再要求 `pnpm-workspace.yaml`；workspace 根没有 `check` 时仍不退到 `tsc`（solution-style tsconfig 会永远通过）。
+- **供应链扫描开关上设置卡**：`securityAudit` 改成 volatile，放在「门禁」小节的紧凑布尔单元格里，默认 `false`（这些扫描要联网，默认打开会让每次编辑回合都承担网络与额外工具的耗时）。部署值仍只有 `maxRootDepth` 与 `gateStdoutMaxBytes` 两项，继续走注册行 `config:`、改完重启。
+- **`tsc` 门禁的判定条件**：`tsconfig.json` 的 `references` 非空时不再给包级 `tsc --noEmit`；这类工程应通过 `pnpmScripts` 声明自己的聚合检查。
+- **`tsc` 环境错误**：`TS2688`（找不到类型定义）与 `TS6305/6306/6307`（引用产物未构建）改报 `not-run`，注入文案明确"不要为此修改代码"。
+- **pnpm 依赖预检**：根有 `pnpm-lock.yaml` 且无 `node_modules` 时不发门禁命令（避免回合收尾时隐式安装/写盘），提示先 `pnpm install`。
+- **exit 126/127 的归因**：只要 stderr 出现"命令不存在/不可执行"就按环境问题处理，包括项目脚本内部缺命令的情形。
+- **`pnpmScripts`**：逗号或空白分隔的脚本名，默认空；仅根 `package.json` 真声明且匹配 `[A-Za-z0-9:._-]` 时执行 `pnpm run <名字>`。workspace 自己的 `check` 仍优先。
+- **队友台账**：串行段只保留"列队友 + 读运行状态"；冷会话重放进入后台批次、在 `drain` 之前完成，`observeSession` 带回合信号与 15s 超时。
+- **回合判据**：`agents.turnBoundaryOf` 的 `lastTurn` 与发起批次不一致时丢弃结果，不再把上一回合的失败注入下一回合。
+- **首个事件窗**：首次见到的会话从 `openTurnStartSeq`（回合起点）开始，不再重放整份历史；fork 边界仍优先。编辑台账投影也使用同一回合下限，插件刚装载时不会把起点以前的历史编辑重放成本回合门禁。
+- **台账路径**：相对路径按条目自己的 `cwd` 解析，换目录后的历史条目不会指错项目根。
+- **子代理展示名**：`path ?? label ?? id`。
+
+### Fixed
+
+- **手动跑门禁与自动路径一致**：`QualityGateRemoteService.run` 在 `grantGateRoots` 之后重新解析一次策略，并把有效策略交给批次——此前临时登记的可写根没有进入策略快照，手动入口会静默地跑一条注定被拒的门禁。
+- **`pnpmScripts` 的透传**：`rootForFile` / `projectRootsOf` / `hasPnpmCheckGate` 不再丢掉自定义脚本名。此前它在 workspace 根判定里也被忽略。
+- **`securityAudit` 不参与根选择**：它只在选定根之后追加供应链扫描。此前它被算进 pnpm 门禁命中：只有 lockfile 的子包会截停向上探测，只有 lockfile 的外层 workspace 会吞掉子包真正的 `tsc` / `check`，扫描命令退出 0 就成了假通过。
+- **编辑台账首回合游标**：台账路径与事件窗共用 `openTurnStartSeq`；首次加载（`lastSeq` 为空）不再从 0 重放历史编辑。`lastSeq` 存在时仍保留增量语义，读失败留下的未处理编辑不会被跳过。
+- **tsconfig 的 JSONC 解析**：`references` 判定不再扫原始文本，而是剥掉字符串外的行/块注释与尾逗号后 `JSON.parse`；注释里出现 `"references"` 不再误判成引用，注释/尾逗号里的真实引用也不再误判成未引用。
+- **手动批次进入 `inFlightGates`**：dispose 的 `Promise.allSettled` 现在会等到手动批次结束，卸载不会再让门禁子进程活过插件生命周期。
+- **卸载清空 `recentResults`**：同一 `sessionId` 可能被复用，旧的"最近结果"会跨装载周期出现在侧栏。
+- **`isTurnAgent` 校验 `status` 与 `inbox`**：这两个字段就是手动入口与注入前判据要读的，单校验 session + followup 会让形状不全的替身读到 `undefined`。
+- **`eslint` 用解析器认得的输出格式**：命令改为 `eslint --format unix .`，`lib/gate-diagnostics.ts` 的 ts 解析器只认 `path:line:col:` 形状，stylish 树此前解析不出任何一条诊断。
+- **pytest 只认显式入口**：`tests/` / `test/` 目录不再触发 `pytest -q`——目录存在而没有用例时 pytest 退 5，那是配置错误不是代码失败。
+- **ruff format 需要显式配置**：只有 `[tool.ruff.format]` / `[format]` 段存在时才追加 `ruff format --check`；声明了 black 时不再叠加。此前"有 ruff 段"就发，会把只启用 lint 的工程整片判红。
+- **clang-format 门禁可达**：`.clang-format` 进入探测清单，Makefile 目标不再只收 `check`/`test`，收全部目标名并排除 `:=` / `::=` 变量赋值。
+- **setup.cfg 的 pylint 段与 composer 的数组脚本**：setup.cfg 按 `[pylint]` 段头判定（此前误用 pyproject 的正则）；`declaredScriptsOf` 接受非空字符串数组，composer 的 `"test": ["phpunit"]` 不再被丢掉。
+- **诊断解析补齐**：Go 的列号可省；PHP 认 `Fatal error: … in <file>:<line>`（与此前的 `on line` 两种形状）；Rust 的 `aborting due to` / `could not compile` 汇总行不再挂上一条错误的 `-->` 文件。
+- **绝对路径诊断不再跑出仓库**：`repoRelativeDiagnostics` 对已经是绝对路径的诊断（Maven）保留原值，不再产出 `../..` 形状。
+- **改动记录器认工具配置**：`GATED_NAME` / `GATED_EXT` 补 `makefile`、`GNUmakefile` 与 `.conf`（`staticcheck.conf` 此前不算改动）。
+- **根标记与探测表分开**：`MANIFESTS` 仍是探测文件名表（新增 `.clang-format`），向上找根改走 `ROOT_MARKERS`，`.prettierrc` / `.editorconfig` / 各类工具配置不再把一个目录升成项目根。
+- **`maxDepth<=0` 与脚本名首字符**：层数上限为 0 时 `hitDepthLimit` 为真（不再静默跳过）；`SCRIPT_NAME_PATTERN` 禁止首字符 `-` / `.`，避免把选项形状的名字当脚本。
+- **侧栏与注解的刷新**：注解 observable 在内容未变时保持原引用、不再通知订阅者；会话侧栏每 5 秒重读一次（门禁结果在回合结束时才落盘，只读一次会永远停在打开面板那一刻）。
+- **`make test` 不再压掉内置探测**：只有 `check` 目标算项目声明并覆盖内置门禁；`test` 目标改为追加一个测试入口（与 `rake test` 同分工），只把 `test` 写进 Makefile 的工程不再因此失去 lint/format。
+- **错误摘要不再丢成因**：`messageOf` 对 `Error` 的空 `message` 退回 `String(error)`（至少留下 `Error`），非 `Error` 对象读字符串型 `message`，都读不到才是 `unknown error`。
+- **`pnpm audit` 不被依赖预检误伤**：预检只在 `pnpm <script>` / `pnpm run` 形态下要求 `node_modules`；`pnpm audit` 只读 lockfile，没有安装依赖也照跑。
+- **Remote 返回面收敛**：`latest` 直接复用 `parseRow` 的行解析（不再另起一套状态分支），运行请求与状态各用独立的 `typeSymbol`，`parseRow` 只在 `known` 时解析诊断。
+- **重复实现与注释归位**：Python 的 `[tool.black]` / `[tool.pyright]` 探测抽成 `pyprojectConfiguredOf`，诊断收集器由 `gate-detect.ts` 的 `collectDiagnostics` 单点提供（`parseTsDiagnostics` 委托它），`ROOT_MARKERS` 删掉没有消费方的 `meson.build` / `settings.gradle(.kts)`，`setGateReader`（全仓无调用）与 `TeamEdits.deferred`（恒无读取点）删除，几处挂错位置的 JSDoc 移回其函数上方。
+
+### Tests
+
+- 新增 `test/gate-multilang.test.ts`（九种语言矩阵、主流工具链、项目声明优先、同根去重、Maven verify、Kotlin detekt/ktlint、供应链扫描默认关闭/打开）、`test/gate-diagnostics.test.ts`（各命令诊断与仓库根换算）与 `test/host.test.ts` 的多语言根探测执行、POM 读不出时退回 `test`、行级 `securityAudit`、`cargo audit` / `composer audit` 子命令缺失按工具缺失的用例。
+- 覆盖率为 `host.ts`、`lib/**`、`src/ui-messages.ts`、`src/remote.ts` 四项 100%；新增分支都由正例与负例各钉一条。
+- `test/gate.test.ts` 新增 references 与 `pnpmScripts` 的判定用例；`test/host.test.ts` 覆盖 tsc 环境错误、pnpm 预检、跨回合丢弃、首窗起点、条目 cwd 与边界缺省形态；`test/host-integrity.test.ts` 覆盖"列出队友之后/冷读期间"两个卸载点。
+- 新增 `test/project-probe.test.ts`（脚本形状、Python 配置段、Makefile 目标、根标记、`maxDepth<=0` 与读不动的清单）与 `test/errors.test.ts`（`messageOf` 的四类分支）；`test/gate-diagnostics.test.ts` 补 Go 可选列号、PHP 的 `in <file>:<line>`、Rust 汇总行、Maven 绝对路径；`test/gate-multilang.test.ts` 的 eslint / ruff format / pytest / Makefile 判据随实现收缩；`test/host.test.ts` 与 `test/host-integrity.test.ts` 补手动路径策略重解析、`securityAudit` / `pnpmScripts` 透传、`pnpm audit` 无 `node_modules` 照跑、`isTurnAgent` 形状与 dispose 清 `recentResults`。
+
 ## 0.1.13
 
 宿主基线切到 `dsh 0.2.3-alpha.2`（Node `^24.22.3 || >=26.13.1`），shared 经 catalog 抬到 `^0.2.13`。编辑台账升到 `stateVersion: 3`：每条记录必填 `cwd`，按条目解析；`ChildLedgerSnapshot.entries` 改为必填，新增活目录 `WorkingDirectoryFace` 与子代理 cwd 用例。设置卡随 shared v3 视觉层更新，并新增 `QgPanelSection` 会话面板段（id `quality-gate-status`，order 120）；客户端槽位与产物预算测试同步。

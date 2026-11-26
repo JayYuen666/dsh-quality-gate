@@ -155,6 +155,8 @@ describe("quality-gate client 构建", () => {
       "memoryFeedback",
       "memoryGatewayUrl",
       "memoryGatewayKeyRef",
+      "pnpmScripts",
+      "securityAudit",
     ]) {
       assert.ok(srcText.includes(`field: "${field}"`), `${field} 必须绑进卡片`);
     }

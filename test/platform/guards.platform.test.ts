@@ -46,20 +46,49 @@ describe("编辑路径归一在各平台上的语义", () => {
 });
 
 describe("ruff门禁的探测所接受的输入形状", () => {
-  it("ruffConfigured=true 且有 pyproject.toml 才给出 ruff 这条门禁；false 和 undefined 都不给", () => {
-    const files = ["pyproject.toml", "src/x.py"];
-    assert.deepEqual(detectGate([{ root: "/proj", files, ruffConfigured: true }]), [
+  const PY_FILES = ["pyproject.toml", "src/x.py"];
+  const CRLF_ROOT = "/crlf-proj";
+
+  it("ruffConfigured=true 且有 Python 工程元数据文件才给出 ruff 这条门禁；false 和 undefined 都不给", () => {
+    assert.deepEqual(detectGate([{ root: "/proj", files: PY_FILES, ruffConfigured: true }]), [
       { root: "/proj", command: ["ruff", "check", "."] },
     ]);
-    assert.deepEqual(detectGate([{ root: "/proj", files, ruffConfigured: false }]), []);
-    assert.deepEqual(detectGate([{ root: "/proj", files }]), []);
+    assert.deepEqual(detectGate([{ root: "/proj", files: PY_FILES, ruffConfigured: false }]), []);
+    assert.deepEqual(detectGate([{ root: "/proj", files: PY_FILES }]), []);
+  });
+
+  it("ruff format 是第二个独立开关：只有 ruffFormatConfigured=true 才出现", () => {
+    assert.deepEqual(
+      detectGate([
+        { root: "/proj", files: PY_FILES, ruffConfigured: true, ruffFormatConfigured: true },
+      ]),
+      [
+        { root: "/proj", command: ["ruff", "check", "."] },
+        { root: "/proj", command: ["ruff", "format", "--check", "."] },
+      ],
+    );
+    // 声明了 black 时 ruff format 不叠加（两套格式化规则会互相判红）。
+    assert.deepEqual(
+      detectGate([
+        {
+          root: "/proj",
+          files: PY_FILES,
+          ruffConfigured: true,
+          ruffFormatConfigured: true,
+          blackConfigured: true,
+        },
+      ]),
+      [
+        { root: "/proj", command: ["ruff", "check", "."] },
+        { root: "/proj", command: ["black", "--check", "."] },
+      ],
+    );
   });
 
   it("crlf 写法的内容不影响判断：ruffConfigured 是调用方读出来的布尔值，这一层只看它", () => {
-    // pyproject.toml 用 CRLF 写到磁盘时，段头的正则在读取那一步就去掉了行尾；这一层只接布尔值。
-    const files = ["pyproject.toml", "src/x.py"];
-    assert.deepEqual(detectGate([{ root: "/crlf-proj", files, ruffConfigured: true }]), [
-      { root: "/crlf-proj", command: ["ruff", "check", "."] },
+    // 该 Python 工程元数据文件用 CRLF 写到磁盘时，段头的正则在读取那一步就去掉了行尾；这一层只接布尔值。
+    assert.deepEqual(detectGate([{ root: CRLF_ROOT, files: PY_FILES, ruffConfigured: true }]), [
+      { root: CRLF_ROOT, command: ["ruff", "check", "."] },
     ]);
   });
 });
